@@ -1,0 +1,31 @@
+name: build
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset default
+      - name: Build
+        run: cmake --build build --config Release
+      - name: Test meshinfo fixture
+        run: .\build\tools\meshinfo\meshinfo.exe tests\fixtures\cube.staticmesh
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake ninja-build libgl1-mesa-dev libsdl2-dev
+      - name: Configure
+        run: cmake --preset default
+      - name: Build
+        run: cmake --build build
+      - name: Test meshinfo fixture
+        run: ./build/tools/meshinfo/meshinfo tests/fixtures/cube.staticmesh

@@ -1,0 +1,50 @@
+# --- Build output ---
+build/
+cmake-build-*/
+out/
+.cache/
+
+# --- IDE / editor ---
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# --- CMake / virtual FS scratch ---
+__virtual__*
+
+# --- Runtime logs & captured frames (never commit) ---
+*.log
+*_log.txt
+*_out.txt
+*_diag.txt
+walk_log.txt
+dalian_log.txt
+run_pose.png
+
+# --- Screenshots / captures (may contain third-party rendered assets) ---
+*.png
+*.jpg
+*.jpeg
+*.bmp
+
+# --- Battlefield 2 / EA-DICE game assets: NEVER redistribute ---
+# The engine loads these from your own BF2 installation at runtime.
+*.zip
+*.dds
+*.con
+*.tweak
+*.baf
+*.ske
+*.bundledmesh
+*.skinnedmesh
+*.samples
+*.raw
+*.tai
+*.wav
+*.ogg
+
+# --- Keep the tiny hand-authored parser test fixtures ---
+!tests/fixtures/
+!tests/fixtures/**
