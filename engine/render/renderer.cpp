@@ -597,6 +597,40 @@ std::uint32_t create_ui_program() {
   return program;
 }
 
+std::uint32_t create_ui_tex_program() {
+  const char* vertex_src = R"(
+    #version 330 core
+    layout(location = 0) in vec2 aPos;
+    layout(location = 1) in vec2 aUv;
+    uniform mat4 uProj;
+    out vec2 vUv;
+    void main() {
+      vUv = aUv;
+      gl_Position = uProj * vec4(aPos, 0.0, 1.0);
+    }
+  )";
+  const char* fragment_src = R"(
+    #version 330 core
+    in vec2 vUv;
+    uniform sampler2D uTex;
+    uniform float uAlpha;
+    out vec4 FragColor;
+    void main() {
+      FragColor = vec4(texture(uTex, vUv).rgb, uAlpha);
+    }
+  )";
+  const auto vs = compile_shader(GL_VERTEX_SHADER, vertex_src);
+  const auto fs = compile_shader(GL_FRAGMENT_SHADER, fragment_src);
+  const auto program = glCreateProgram();
+  glAttachShader(program, vs);
+  glAttachShader(program, fs);
+  glLinkProgram(program);
+  check_program_link(program, "ui_tex");
+  glDeleteShader(vs);
+  glDeleteShader(fs);
+  return program;
+}
+
 std::uint32_t create_sky_program() {
   // Full-screen triangle; the fragment reconstructs a world-space view ray and
   // shades a vertical gradient with a soft sun disc.
@@ -985,8 +1019,11 @@ bool Renderer::initialize(void* sdl_window) {
   terrain_program_ = create_terrain_program();
   color_program_ = create_color_program();
   ui_program_ = create_ui_program();
+  ui_tex_program_ = create_ui_tex_program();
   glGenVertexArrays(1, &ui_vao_);
   glGenBuffers(1, &ui_vbo_);
+  glGenVertexArrays(1, &ui_tex_vao_);
+  glGenBuffers(1, &ui_tex_vbo_);
   sky_program_ = create_sky_program();
   water_program_ = create_water_program();
   grass_program_ = create_grass_program();
@@ -1901,6 +1938,75 @@ float Renderer::ui_text_width(const char* text, float scale) const {
 }
 
 float Renderer::ui_text_height(float scale) const { return 12.f * scale; }
+
+std::uint32_t Renderer::upload_rgba_texture(int width, int height, const std::uint8_t* rgba) {
+  if (!initialized_ || width <= 0 || height <= 0 || rgba == nullptr) return 0;
+  std::uint32_t id = 0;
+  glGenTextures(1, &id);
+  glBindTexture(GL_TEXTURE_2D, id);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+  glGenerateMipmap(GL_TEXTURE_2D);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glBindTexture(GL_TEXTURE_2D, 0);
+  return id;
+}
+
+void Renderer::ui_image_cover(std::uint32_t texture, int img_w, int img_h, float alpha) {
+  if (!initialized_ || texture == 0 || img_w <= 0 || img_h <= 0 || alpha <= 0.f) return;
+  const float fb_w = static_cast<float>(ui_fb_w_);
+  const float fb_h = static_cast<float>(ui_fb_h_);
+  if (fb_w <= 0.f || fb_h <= 0.f) return;
+  const float fb_aspect = fb_w / fb_h;
+  const float img_aspect = static_cast<float>(img_w) / static_cast<float>(img_h);
+  float x = 0.f, y = 0.f, w = fb_w, h = fb_h;
+  float u0 = 0.f, v0 = 0.f, u1 = 1.f, v1 = 1.f;
+  if (img_aspect > fb_aspect) {
+    w = h * img_aspect;
+    x = (fb_w - w) * 0.5f;
+    const float crop = (w - fb_w) / w;
+    u0 = crop * 0.5f;
+    u1 = 1.f - crop * 0.5f;
+  } else {
+    h = w / img_aspect;
+    y = (fb_h - h) * 0.5f;
+    const float crop = (h - fb_h) / h;
+    v0 = crop * 0.5f;
+    v1 = 1.f - crop * 0.5f;
+  }
+  // Two triangles: pos.xy + uv.xy (6 verts).
+  const std::vector<float> verts = {
+      x,     y,     u0, v0,  x + w, y,     u1, v0,  x + w, y + h, u1, v1,
+      x,     y,     u0, v0,  x + w, y + h, u1, v1,  x,     y + h, u0, v1,
+  };
+  glUseProgram(ui_tex_program_);
+  glUniformMatrix4fv(glGetUniformLocation(ui_tex_program_, "uProj"), 1, GL_FALSE, ui_proj_);
+  glUniform1f(glGetUniformLocation(ui_tex_program_, "uAlpha"), alpha);
+  glUniform1i(glGetUniformLocation(ui_tex_program_, "uTex"), 0);
+  glActiveTexture(GL_TEXTURE0);
+  glBindTexture(GL_TEXTURE_2D, texture);
+  glBindVertexArray(ui_tex_vao_);
+  glBindBuffer(GL_ARRAY_BUFFER, ui_tex_vbo_);
+  glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts.size() * sizeof(float)), verts.data(),
+               GL_DYNAMIC_DRAW);
+  glEnableVertexAttribArray(0);
+  glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), reinterpret_cast<void*>(0));
+  glEnableVertexAttribArray(1);
+  glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float),
+                        reinterpret_cast<void*>(2 * sizeof(float)));
+  glDrawArrays(GL_TRIANGLES, 0, 6);
+  glBindVertexArray(0);
+}
+
+void Renderer::ui_dim_framebuffer(float alpha) {
+  if (!initialized_ || alpha <= 0.f) return;
+  const float w = static_cast<float>(ui_fb_w_);
+  const float h = static_cast<float>(ui_fb_h_);
+  const std::vector<float> xy = {0.f, 0.f, w, 0.f, w, h, 0.f, 0.f, w, h, 0.f, h};
+  ui_draw_tris(ui_program_, ui_vao_, ui_vbo_, ui_proj_, xy, 0.f, 0.f, 0.f, alpha);
+}
 
 void Renderer::end_ui() {
   if (!initialized_) return;

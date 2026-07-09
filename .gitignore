@@ -29,6 +29,10 @@ run_pose.png
 *.jpeg
 *.bmp
 
+# Bundled original UI assets (not BF2 game content).
+!apps/dalian/assets/menu/
+!apps/dalian/assets/menu/**
+
 # --- Battlefield 2 / EA-DICE game assets: NEVER redistribute ---
 # The engine loads these from your own BF2 installation at runtime.
 *.zip

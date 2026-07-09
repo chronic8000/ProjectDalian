@@ -1,5 +1,6 @@
 #include "menu.hpp"
 
+#include "menu_background.hpp"
 #include "menu_music.hpp"
 #include "multiplayer_menu.hpp"
 #include "ui_layout.hpp"
@@ -568,6 +569,9 @@ MenuResult run_main_menu(SDL_Window* window, bf2::Renderer& renderer, Settings& 
       std::cerr << "MenuMusic: The_Siege_of_Dalian.mp3 not found (check Downloads or music/ folder)\n";
   }
 
+  MenuBackground bg;
+  bg.load(renderer);
+
   while (running) {
     SDL_Event e;
     bool clicked = false;
@@ -599,7 +603,9 @@ MenuResult run_main_menu(SDL_Window* window, bf2::Renderer& renderer, Settings& 
     renderer.begin_frame(UiTheme::kBgR, UiTheme::kBgG, UiTheme::kBgB);
     renderer.begin_ui(window);
 
-    renderer.ui_rect(0, 0, W, 52, 0.03f, 0.04f, 0.05f, 0.98f);
+    bg.draw(renderer);
+
+    renderer.ui_rect(0, 0, W, 52, 0.03f, 0.04f, 0.05f, 0.85f);
     renderer.ui_rect(0, 52, W, 2, UiTheme::kOrangeR, UiTheme::kOrangeG, UiTheme::kOrangeB, 1.f);
     renderer.ui_text(24, 14, 2.4f, "PROJECT DALIAN", 0.95f, 0.96f, 0.98f, 1.f);
 
@@ -628,7 +634,7 @@ MenuResult run_main_menu(SDL_Window* window, bf2::Renderer& renderer, Settings& 
       tx += tw + 6;
     }
 
-    renderer.ui_rect(20, 64, W - 40, H - 84, 0.06f, 0.07f, 0.08f, 0.92f);
+    renderer.ui_rect(20, 64, W - 40, H - 84, 0.06f, 0.07f, 0.08f, 0.82f);
 
     if (tab == TopTab::Play) {
       const float lx = 40, ly = 80, lw = 420;
@@ -733,6 +739,7 @@ MenuResult run_main_menu(SDL_Window* window, bf2::Renderer& renderer, Settings& 
     renderer.end_frame();
     SDL_GL_SwapWindow(window);
   }
+  bg.destroy(renderer);
   bgm.shutdown();
   return result;
 }

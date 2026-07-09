@@ -157,6 +157,12 @@ public:
                float a);
   float ui_text_width(const char* text, float scale) const;
   float ui_text_height(float scale) const;
+  // Upload an RGBA8 image (4 bytes/pixel, top-left origin) for UI drawing.
+  std::uint32_t upload_rgba_texture(int width, int height, const std::uint8_t* rgba);
+  // Draw a texture across the full framebuffer (object-fit: cover).
+  void ui_image_cover(std::uint32_t texture, int img_w, int img_h, float alpha = 1.f);
+  // Semi-transparent dim over the full framebuffer (e.g. behind menu panels).
+  void ui_dim_framebuffer(float alpha);
   // Map screen pixels to the fixed 1600x900 design space used by menu layout.
   void ui_unproject(int screen_x, int screen_y, float& design_x, float& design_y) const;
   float ui_scale() const { return ui_scale_; }
@@ -225,8 +231,11 @@ private:
     std::uint32_t line_vao_ = 0;
     std::uint32_t line_vbo_ = 0;
     std::uint32_t ui_program_ = 0;
+    std::uint32_t ui_tex_program_ = 0;
     std::uint32_t ui_vao_ = 0;
     std::uint32_t ui_vbo_ = 0;
+    std::uint32_t ui_tex_vao_ = 0;
+    std::uint32_t ui_tex_vbo_ = 0;
     float ui_proj_[16] = {};
     float ui_scale_ = 1.f;
     float ui_off_x_ = 0.f;
