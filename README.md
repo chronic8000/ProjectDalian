@@ -178,7 +178,22 @@ multiplayer, conquest, static prop heights, etc.).
 
 ---
 
-## Build
+## Download (Windows, pre-built)
+
+**No compile required** — grab the latest release from
+[GitHub Releases](https://github.com/chronic8000/ProjectDalian/releases).
+
+1. Download `ProjectDalian-*-win64.zip`
+2. Unzip anywhere
+3. Run `project_dalian.exe`
+4. Point **Options → BF2 path** at your retail install (`C:\Program Files (x86)\Battlefield2`)
+
+The zip contains only Project Dalian binaries, SDL2 runtime DLLs, and bundled menu
+music/art. **No EA/DICE game data** — you must own Battlefield 2.
+
+---
+
+## Build from source
 
 Requirements:
 - CMake 3.24+
