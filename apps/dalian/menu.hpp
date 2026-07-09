@@ -50,6 +50,9 @@ struct PauseResult {
 
 std::string resolve_bf2_root(Settings& settings, const char* argv1);
 std::vector<MapEntry> scan_maps(const std::string& bf2_root);
+// Resolve a map from lobby/discovery data (server.zip path preferred, then display name).
+MapEntry resolve_map_entry(const std::vector<MapEntry>& maps, const std::string& server_zip,
+                           const std::string& display_name);
 
 MenuResult run_main_menu(SDL_Window* window, bf2::Renderer& renderer, Settings& settings,
                          const std::vector<MapEntry>& maps);

@@ -508,6 +508,8 @@ void write_lobby(std::vector<std::uint8_t>& b, const NetLobbyState& lob) {
 
   put_str(b, lob.map_name, 200);
 
+  put_str(b, lob.map_server_zip, 260);
+
   put_u16(b, static_cast<std::uint16_t>(lob.members.size()));
 
   for (const auto& m : lob.members) {
@@ -535,6 +537,8 @@ NetLobbyState read_lobby(Reader& r) {
   lob.game_started = r.u8() != 0;
 
   lob.map_name = read_str(r, 200);
+
+  if (r.o < r.n) lob.map_server_zip = read_str(r, 260);
 
   const std::uint16_t count = r.u16();
 
@@ -1199,13 +1203,16 @@ std::uint16_t Net::lobby_player_faction(std::uint32_t id) const {
 
 
 
-void Net::set_lobby_config(bool allow_late_join, const std::string& map_name) {
+void Net::set_lobby_config(bool allow_late_join, const std::string& map_name,
+                           const std::string& map_server_zip) {
 
   if (role_ != Role::Server) return;
 
   lobby_.allow_late_join = allow_late_join;
 
   lobby_.map_name = map_name.substr(0, 200);
+
+  lobby_.map_server_zip = map_server_zip.substr(0, 260);
 
   broadcast_lobby();
 

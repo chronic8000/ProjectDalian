@@ -222,35 +222,49 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
       discovery_active = false;
     }
 
+    if (net && !is_host && net->lobby_joined()) {
+      const auto& lob = net->lobby();
+      if (!lob.map_server_zip.empty() || !lob.map_name.empty()) {
+        MapEntry resolved = resolve_map_entry(maps, lob.map_server_zip, lob.map_name);
+        if (!resolved.server_zip.empty()) host_map = resolved;
+      }
+    }
+
     if (net && view == MpView::Lobby && net->game_started()) {
-      result.action = MenuAction::StartMultiplayer;
-      if (!host_map.server_zip.empty())
-        result.map = host_map;
-      else if (selected_map >= 0 && selected_map < static_cast<int>(maps.size()))
-        result.map = maps[selected_map];
-      result.mp.enabled = true;
-      result.mp.is_host = is_host;
-      result.mp.port = settings.net_port;
-      result.mp.player_name = name_field.buf;
-      result.mp.faction_id = faction_id;
-      result.mp.allow_late_join = allow_late_join;
-      result.mp.bots_enabled = bots_enabled;
-      result.mp.bot_count = static_cast<int>(bot_count_f + 0.5f);
-      result.mp.bot_difficulty = static_cast<int>(bot_difficulty_f + 0.5f);
-      result.net = std::move(net);
-      discovery.stop();
-      text_field_blur(name_field);
-      text_field_blur(ip_field);
-      settings.player_name = name_field.buf;
-      settings.use_tailscale = use_tailscale;
-      settings.allow_late_join = allow_late_join;
-      settings.mp_bots_enabled = bots_enabled;
-      settings.mp_bot_count = static_cast<int>(bot_count_f + 0.5f);
-      settings.mp_bot_difficulty = static_cast<int>(bot_difficulty_f + 0.5f);
-      settings.default_faction = faction_id;
-      settings.manual_server_ip = ip_field.buf;
-      settings.save();
-      return true;
+      MapEntry chosen = host_map;
+      if (chosen.server_zip.empty() && net) {
+        const auto& lob = net->lobby();
+        chosen = resolve_map_entry(maps, lob.map_server_zip, lob.map_name);
+      }
+      if (chosen.server_zip.empty()) {
+        lobby_anim += 1.f / 60.f;
+      } else {
+        result.action = MenuAction::StartMultiplayer;
+        result.map = chosen;
+        result.mp.enabled = true;
+        result.mp.is_host = is_host;
+        result.mp.port = settings.net_port;
+        result.mp.player_name = name_field.buf;
+        result.mp.faction_id = faction_id;
+        result.mp.allow_late_join = allow_late_join;
+        result.mp.bots_enabled = bots_enabled;
+        result.mp.bot_count = static_cast<int>(bot_count_f + 0.5f);
+        result.mp.bot_difficulty = static_cast<int>(bot_difficulty_f + 0.5f);
+        result.net = std::move(net);
+        discovery.stop();
+        text_field_blur(name_field);
+        text_field_blur(ip_field);
+        settings.player_name = name_field.buf;
+        settings.use_tailscale = use_tailscale;
+        settings.allow_late_join = allow_late_join;
+        settings.mp_bots_enabled = bots_enabled;
+        settings.mp_bot_count = static_cast<int>(bot_count_f + 0.5f);
+        settings.mp_bot_difficulty = static_cast<int>(bot_difficulty_f + 0.5f);
+        settings.default_faction = faction_id;
+        settings.manual_server_ip = ip_field.buf;
+        settings.save();
+        return true;
+      }
     }
 
     SDL_Event e;
@@ -371,7 +385,7 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
           clicked) {
         if (start_listen_server(net, settings.net_port, is_host, discovery, discovery_active,
                                 use_tailscale, tailscale_subnet)) {
-          net->set_lobby_config(allow_late_join, "Server setup");
+          net->set_lobby_config(allow_late_join, "Server setup", {});
           net->send_join_info(name_field.buf, static_cast<std::uint16_t>(faction_id));
           view = MpView::HostSetup;
         }
@@ -398,6 +412,8 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
                 break;
               }
             }
+            if (host_map.server_zip.empty())
+              host_map = resolve_map_entry(maps, {}, sel.map_name);
           }
         }
         if (!blocked && !addr.empty()) {
@@ -499,7 +515,7 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
           }
         }
         if (net) {
-          net->set_lobby_config(allow_late_join, host_map.display_name);
+          net->set_lobby_config(allow_late_join, host_map.display_name, host_map.server_zip);
           net->send_join_info(name_field.buf, static_cast<std::uint16_t>(faction_id));
           view = MpView::Lobby;
         }
@@ -521,6 +537,9 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
                           1.f);
       } else if (!net->lobby_joined()) {
         net->send_join_info(name_field.buf, static_cast<std::uint16_t>(faction_id));
+      } else if (net->game_started() && host_map.server_zip.empty()) {
+        draw_clipped_text(renderer, 40, 112, W - 440.f, 1.4f,
+                          "Syncing map from host...", 0.85f, 0.75f, 0.35f, 1.f);
       }
 
       const auto& lob = net->lobby();
@@ -576,7 +595,7 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
                           allow_late_join) &&
             clicked) {
           allow_late_join = !allow_late_join;
-          net->set_lobby_config(allow_late_join, host_map.display_name);
+          net->set_lobby_config(allow_late_join, host_map.display_name, host_map.server_zip);
         }
         if (draw_button(renderer, mx, my, W - 260, H - 120, 200, 48, "START GAME", true) &&
             clicked) {

@@ -432,6 +432,49 @@ std::vector<MapEntry> scan_maps(const std::string& bf2_root) {
   return out;
 }
 
+static std::string normalize_path_key(std::string p) {
+  for (char& c : p) {
+    if (c == '\\') c = '/';
+    else c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  }
+  return p;
+}
+
+MapEntry resolve_map_entry(const std::vector<MapEntry>& maps, const std::string& server_zip,
+                           const std::string& display_name) {
+  if (!server_zip.empty()) {
+    const std::string key = normalize_path_key(server_zip);
+    for (const auto& m : maps) {
+      if (normalize_path_key(m.server_zip) == key) return m;
+    }
+    if (std::filesystem::exists(server_zip)) {
+      MapEntry m;
+      m.server_zip = server_zip;
+      m.display_name = display_name.empty() ? prettify_name(std::filesystem::path(server_zip)
+                                                               .parent_path()
+                                                               .filename()
+                                                               .string())
+                                            : display_name;
+      const auto levels = std::filesystem::path(server_zip).parent_path().parent_path();
+      if (levels.has_parent_path()) m.mod_name = levels.parent_path().filename().string();
+      m.folder = std::filesystem::path(server_zip).parent_path().filename().string();
+      return m;
+    }
+  }
+  if (!display_name.empty()) {
+    for (const auto& m : maps) {
+      if (m.display_name == display_name) return m;
+    }
+    const std::string want = normalize_path_key(display_name);
+    for (const auto& m : maps) {
+      if (normalize_path_key(m.display_name) == want) return m;
+      if (normalize_path_key(m.folder) == want) return m;
+      if (normalize_path_key(prettify_name(m.folder)) == want) return m;
+    }
+  }
+  return {};
+}
+
 void apply_graphics_settings(bf2::Renderer& renderer, Settings& settings) {
   renderer.set_bloom(settings.bloom, settings.bloom_intensity);
   renderer.set_shadows_enabled(settings.shadows_enabled);
