@@ -74,6 +74,7 @@
 #include "engine/core/collision_resolver.hpp"
 #include "engine/core/mesh_bounds.hpp"
 #include "engine/core/placement_snap.hpp"
+#include "engine/core/archive_path_resolve.hpp"
 #include "engine/core/overgrowth_instances.hpp"
 #include "engine/core/object_lightmaps.hpp"
 #include "engine/core/undergrowth.hpp"
@@ -166,8 +167,7 @@ glm::mat4 placement_matrix(const bf2::ObjectInstance& inst) {
 }
 
 std::string mesh_texture_folder(const std::string& vpath) {
-  const auto slash = vpath.find_last_of('/');
-  return slash == std::string::npos ? std::string() : vpath.substr(0, slash);
+  return bf2::mesh_texture_folder_hint(vpath);
 }
 
 // Load (or fetch from cache) a textured GPU mesh and wire up its material textures.
@@ -590,6 +590,31 @@ int main(int argc, char** argv) {
       archive_path.clear();
       continue;
     }
+
+    const auto level_mod_dir = std::filesystem::path(archive_path).parent_path().parent_path().parent_path();
+    const std::string level_mod_name = level_mod_dir.filename().string();
+    auto mount_zip_if_exists = [&](const std::filesystem::path& dir, const char* name) -> bool {
+      const auto p = dir / name;
+      return std::filesystem::exists(p) && resources.archives().mount(p.string());
+    };
+    // Custom mods often ship maps without full Objects/Common archives. Mount retail
+    // BF2 first so mod zips layered on top still override, but shared road textures
+    // and props resolve from the base game.
+    if (!bf2_root.empty() && level_mod_name != "bf2") {
+      const auto retail = std::filesystem::path(bf2_root) / "mods" / "bf2";
+      if (std::filesystem::is_directory(retail)) {
+        int retail_mounted = 0;
+        for (const char* z : {"Objects_client.zip", "Objects_server.zip", "Common_client.zip",
+                              "Common_server.zip", "Booster_client.zip", "Booster_server.zip"}) {
+          if (mount_zip_if_exists(retail, z)) ++retail_mounted;
+        }
+        if (retail_mounted > 0) {
+          std::cout << "Retail BF2 archives: " << retail_mounted << " from " << retail.string()
+                    << '\n';
+        }
+      }
+    }
+
     const bool have_objects = !objects_zip.empty() && std::filesystem::exists(objects_zip) &&
                               resources.archives().mount(objects_zip);
     std::cout << "Objects archive: " << (have_objects ? objects_zip : "(none)") << '\n';
@@ -928,21 +953,28 @@ int main(int argc, char** argv) {
 
   // Compiled road meshes from CompiledRoads.con (client.zip).
   int road_resolved = 0;
+  int road_tex_miss = 0;
   for (const auto& road : level.roads) {
     if (road.mesh_vpath.empty()) continue;
-    if (collision_cache.find(road.mesh_vpath) == collision_cache.end()) {
-      collision_cache.emplace(road.mesh_vpath, load_instance_collision(resources, road.mesh_vpath));
+    const std::string resolved_mesh =
+        bf2::resolve_mesh_vpath(resources.archives(), road.mesh_vpath);
+    if (collision_cache.find(resolved_mesh) == collision_cache.end()) {
+      collision_cache.emplace(resolved_mesh,
+                              load_instance_collision(resources, resolved_mesh));
     }
-    auto& gpu = ensure_textured_mesh(road.mesh_vpath, template_cache, resources, textures, renderer);
+    auto& gpu = ensure_textured_mesh(resolved_mesh, template_cache, resources, textures, renderer);
     if (gpu.vao == 0) continue;
+    for (const auto& sub : gpu.submeshes) {
+      if (sub.base_tex == 0) ++road_tex_miss;
+    }
     Instance in;
-    in.mesh_key = road.mesh_vpath;
+    in.mesh_key = resolved_mesh;
     in.model = glm::translate(glm::mat4(1.f),
                               glm::vec3(road.position[0], road.position[1], road.position[2]));
     in.origin = glm::vec3(road.position[0], road.position[1], road.position[2]);
     instances.push_back(in);
     ++road_resolved;
-    const auto& soup = collision_cache[road.mesh_vpath];
+    const auto& soup = collision_cache[resolved_mesh];
     if (soup.empty()) {
       ++collision_miss;
     } else {
@@ -950,7 +982,9 @@ int main(int argc, char** argv) {
     }
   }
   if (road_resolved > 0) {
-    std::cout << "CompiledRoads: rendered " << road_resolved << " segments\n";
+    std::cout << "CompiledRoads: rendered " << road_resolved << " segments";
+    if (road_tex_miss > 0) std::cout << " (" << road_tex_miss << " submeshes missing road textures)";
+    std::cout << '\n';
   }
 
   std::cout << "Uploaded " << template_cache.size() << " unique meshes, " << resolved

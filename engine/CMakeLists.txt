@@ -74,6 +74,7 @@ add_library(bf2engine STATIC
   core/mesh_bounds.cpp
   core/placement_audit.cpp
   core/collision_resolver.cpp
+  core/archive_path_resolve.cpp
   core/placement_snap.cpp
   core/template_resolver.cpp
   render/renderer.cpp

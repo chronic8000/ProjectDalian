@@ -8,6 +8,7 @@
 #include "tweak_parser.hpp"
 
 #include "engine/core/collision_resolver.hpp"
+#include "engine/core/archive_path_resolve.hpp"
 #include "vehicle_air_profile.hpp"
 #include "vehicle_weapon_profile.hpp"
 #include "projectile_profile.hpp"
@@ -41,6 +42,7 @@ int main() {
     const auto lights = dalian::collect_scene_lights({e});
     check("scene_lights", lights.size() == 1 && lights[0].pos.y == 2.f);
   check("collision_resolver", bf2::collision_resolver_self_test());
+  check("archive_path_resolve", bf2::archive_path_resolve_self_test());
   }
 
   return failed == 0 ? 0 : 1;

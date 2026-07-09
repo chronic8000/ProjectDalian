@@ -65,6 +65,12 @@ std::vector<std::string> texture_candidate_paths(const std::string& bf2_path,
         push_unique(candidates, folder.substr(0, slash) + "/" + base);
         push_unique(candidates, folder.substr(0, slash) + "/" + key);
       }
+      // Compiled road meshes live under Roads/; textures are in Roads/Textures/
+      // inside Objects_client.zip (not the level client.zip).
+      if (folder == "roads" || (slash != std::string::npos && folder.substr(slash + 1) == "roads")) {
+        push_unique(candidates, "roads/textures/" + base);
+        push_unique(candidates, "objects/roads/textures/" + base);
+      }
     }
   }
   return candidates;

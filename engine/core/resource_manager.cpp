@@ -1,5 +1,7 @@
 #include "resource_manager.hpp"
 
+#include "archive_path_resolve.hpp"
+
 #include <algorithm>
 #include <fstream>
 #include <sstream>
@@ -54,7 +56,10 @@ DdsTexture ResourceManager::load_texture(const std::string& virtual_path) {
 }
 
 std::optional<std::vector<std::uint8_t>> ResourceManager::read_bytes(const std::string& virtual_path) const {
-  return archives_.read(virtual_path);
+  for (const auto& cand : archive_candidate_paths(virtual_path)) {
+    if (auto bytes = archives_.read(cand)) return bytes;
+  }
+  return std::nullopt;
 }
 
 }  // namespace bf2
