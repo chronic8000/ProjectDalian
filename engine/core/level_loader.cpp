@@ -1,44 +1,14 @@
 #include "level_loader.hpp"
 
+#include "engine/core/static_object_parser.hpp"
+
 #include <filesystem>
+#include <iostream>
 #include <sstream>
 #include <string>
 
 namespace bf2 {
 namespace {
-
-// Extract the first slash-separated float triplet's Y and the size/scale from a
-// Heightdata.con-style script. Returns width/height/vertical-scale via out params.
-bool parse_heightdata(const std::string& script, std::uint32_t& w, std::uint32_t& h,
-                      float& vscale, float& xz_scale) {
-  std::istringstream in(script);
-  std::string line;
-  bool found = false;
-  while (std::getline(in, line)) {
-    std::istringstream ls(line);
-    std::string cmd;
-    ls >> cmd;
-    if (cmd == "heightmap.setSize") {
-      ls >> w >> h;
-      found = true;
-    } else if (cmd == "heightmap.setScale") {
-      std::string triple;
-      ls >> triple;
-      // "x/y/z" -> xz_scale = x, vscale = y
-      const auto s1 = triple.find('/');
-      const auto s2 = triple.find('/', s1 + 1);
-      if (s1 != std::string::npos && s2 != std::string::npos) {
-        try {
-          xz_scale = std::stof(triple.substr(0, s1));
-          vscale = std::stof(triple.substr(s1 + 1, s2 - s1 - 1));
-        } catch (...) {
-        }
-      }
-      break;  // only the primary heightmap (first block) matters here
-    }
-  }
-  return found;
-}
 
 }  // namespace
 
@@ -67,28 +37,65 @@ LevelLoadResult LevelLoader::load_mounted_level(const std::string& level_name) {
   LevelLoadResult result;
   result.level_name = level_name;
 
-  // Placements.
+  // Placements from StaticObjects.con (+ DummyObjects.con when present).
   if (const auto so = resources_.read_bytes("StaticObjects.con")) {
     std::string script(reinterpret_cast<const char*>(so->data()), so->size());
     interpreter_.execute_script(script);
+    StaticObjectParser parser;
+    parser.parse(script);
+    if (parser.entities().size() != interpreter_.instances().size()) {
+      std::cerr << "StaticObjectParser: " << parser.entities().size()
+                << " entities vs ConInterpreter " << interpreter_.instances().size()
+                << " instances\n";
+    }
+  }
+  if (const auto dummy = resources_.read_bytes("DummyObjects.con")) {
+    const std::size_t before = interpreter_.instances().size();
+    std::string script(reinterpret_cast<const char*>(dummy->data()), dummy->size());
+    interpreter_.execute_script(script);
+    std::cout << "DummyObjects: merged " << (interpreter_.instances().size() - before)
+              << " extra placements\n";
   }
   result.placements = interpreter_.instances();
 
-  // Terrain (primary heightmap).
-  std::uint32_t w = 1025;
-  std::uint32_t h = 1025;
-  float vscale = 0.00640869f;
-  float xz_scale = 2.0f;
-  if (const auto hd = resources_.read_bytes("Heightdata.con")) {
-    std::string script(reinterpret_cast<const char*>(hd->data()), hd->size());
-    parse_heightdata(script, w, h, vscale, xz_scale);
+  // Compiled road meshes (client.zip).
+  if (const auto roads = resources_.read_bytes("CompiledRoads.con")) {
+    const std::string script(reinterpret_cast<const char*>(roads->data()), roads->size());
+    result.roads = parse_compiled_roads(script);
+    std::cout << "CompiledRoads: " << result.roads.size() << " segments\n";
   }
-  if (const auto raw = resources_.read_bytes("HeightmapPrimary.raw")) {
-    try {
-      result.terrain = TerrainLoader::load_raw_heightmap(*raw, w, h, vscale);
-      result.has_terrain = true;
-    } catch (...) {
-      result.has_terrain = false;
+
+  // Full 3x3 heightmap cluster (primary + eight secondaries).
+  if (const auto hd = resources_.read_bytes("Heightdata.con")) {
+    const std::string script(reinterpret_cast<const char*>(hd->data()), hd->size());
+    if (result.heightmap_cluster.load_from_script(resources_, script)) {
+      result.has_heightmap_cluster = true;
+      std::cout << "HeightmapCluster: " << result.heightmap_cluster.patches().size()
+                << " patches loaded\n";
+    }
+  }
+
+  // Primary heightfield for terrain mesh / colormap UVs (centred grid).
+  if (result.has_heightmap_cluster) {
+    for (const auto& patch : result.heightmap_cluster.patches()) {
+      if (patch.grid_x == 0 && patch.grid_y == 0) {
+        result.terrain = patch.terrain;
+        result.has_terrain = !result.terrain.samples.empty();
+        break;
+      }
+    }
+  }
+  if (!result.has_terrain) {
+    std::uint32_t w = 1025;
+    std::uint32_t h = 1025;
+    float vscale = 0.00640869f;
+    if (const auto raw = resources_.read_bytes("HeightmapPrimary.raw")) {
+      try {
+        result.terrain = TerrainLoader::load_raw_heightmap(*raw, w, h, vscale);
+        result.has_terrain = true;
+      } catch (...) {
+        result.has_terrain = false;
+      }
     }
   }
 

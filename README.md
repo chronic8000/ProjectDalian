@@ -97,9 +97,26 @@ its respective owner.
 - Offscreen-FBO post-process pass (used for the FPV drone feed)
 
 - **Vehicle geometry assembly** from `.con` hierarchy (hull + child parts such as
-  rotors); internal geometry parts (wheels, turrets) positioned via `geometryPart`
-  indices baked from bundledmesh `BLENDINDICES`
+  rotors); internal geometry parts (wheels, turrets, landing gear) positioned via
+  `geometryPart` indices baked from bundledmesh `BLENDINDICES`
 - **Helicopter rotor blur** (static blades at low RPM → blur disc at speed)
+- **Landing gear tuck animation** on jets (gear struts, hatches, wheels split from
+  hull mesh and rotated from `.con` `LandingGear` data)
+
+**Level / map fidelity (Dalian Plant and compatible maps):**
+- **3×3 secondary heightmap cluster** — samples neighbouring `HeightmapSecondary_*`
+  patches so props and vehicles sit on decks/ramps instead of bare primary terrain
+- **Overgrowth trees** — `Overgrowth.raw` instancing for distant tree/bush cover
+- **Compiled roads** — `CompiledRoads.con` spline data for road-aligned placement
+- **Texture parent-folder resolve** — finds DDS colour maps when BF2 stores them
+  one directory up (fixes purple/missing materials on pipes, etc.)
+- **Template resolver** — nested `.tweak` / `.con` runs for multi-part statics
+- **DummyObjects.con merge** — decorative props referenced only from dummy lists
+- **Asset audit on load** — optional `BF2_TEXAUDIT=1` reports missing textures
+- **Cheaper water shader** — distance fade, fewer waves, skips work when high above
+  the surface
+- **Boat buoyancy** — sea vehicles float at the water plane instead of driving the
+  seabed
 
 **Audio (SDL_mixer, reads retail BF2 archives):**
 - Weapon fire / reload / deploy sounds parsed from weapon `.tweak` files
@@ -115,9 +132,14 @@ its respective owner.
 - **Ground vehicles:** throttle, steering, terrain-following chassis tilt, wheel
   spin/steer on separated geometry parts where `.con` defines wheel geometry
 - **Helicopters:** BF2-style collective (W/S), yaw (A/D), mouse cyclic
-  pitch/roll, rotor spool RPM, AI gunner seat
-- **Fixed-wing jets (work in progress):** runway throttle, rudder taxi, mouse
-  pitch for rotation/lift — **still rough/unstable; needs more tuning**
+  pitch/roll, rotor spool RPM, AI gunner seat, flares (`X`)
+- **Fixed-wing jets (alpha):** BF2-inspired arcade flight with body-wing lift,
+  engine spool before runway roll, V1 rotation (~72 km/h), double-tap W or
+  `Ctrl` afterburner (sprint fuel + 1.6× thrust), `G` landing-gear stow with
+  tuck animation, mouse pitch/roll, rudder (A/D), horizon damping
+- **Conquest layer (alpha):** tickets, control points, capture logic, voice cues
+- **Modular game sim** — `game_sim.cpp` + `.inl` shards (vehicles, missiles,
+  interaction, conquest) with net-ready snapshot types
 - **In-game pause menu** (Esc): resume, options, leave to main menu
 - Character controller with bilinear terrain following and object collision
 - First- and third-person camera, animated player soldier + held weapon
@@ -229,11 +251,14 @@ Settings and the BF2 root path from the main menu are stored under
 | Mouse | Cyclic pitch / roll |
 | `X` | Flares |
 | `F1`–`F8` | Switch crew seat |
-| **Jet (pilot, WIP)** | |
+| **Jet (pilot)** | |
 | `W` / `S` | Throttle / brake |
 | `A` / `D` | Rudder |
 | Mouse pull back | Pitch up (rotate on runway / climb in air) |
-| Mouse left/right | Bank (in air only) |
+| Mouse left/right | Bank (in air) |
+| Double-tap `W` or `Ctrl` | Toggle afterburner (sprint fuel) |
+| `G` | Stow / deploy landing gear |
+| `F1`–`F8` | Switch crew seat |
 | **Drone** | |
 | `W`/`S` throttle, `A`/`D` yaw, mouse pitch/roll | Fly the quad |
 
@@ -307,10 +332,11 @@ docs/        file-format reverse-engineering notes
   helicopter flight, wheel animation split, BF2 weapon/voice/ambient audio,
   vehicle engine sounds (partial), multiplayer lobby + LAN/Tailscale browser ✔
   (alpha / incomplete)
-- **In progress** — fixed-wing jet flight model (unstable), animation
-  retargeting, full vehicle audio coverage, networking hardening, in-engine editor
-- **Next** — jet tuning, more munitions, radio comms, live volume sliders,
-  dedicated server polish
+- **In progress** — jet polish (per-aircraft gear/exhaust), animation retargeting,
+  full vehicle audio coverage, networking hardening, particle effects (afterburner
+  flames), in-engine editor
+- **Next** — more munitions, radio comms, live volume sliders, dedicated server
+  polish, envmaps / extended terrain mesh
 
 ### Recent implementation notes (Jul 2026)
 
@@ -320,10 +346,13 @@ docs/        file-format reverse-engineering notes
 | Display / fullscreen | Dynamic mode list; recovery hotkeys + `--windowed` |
 | Multiplayer lobby | Host/join/ready/start; LAN + Tailscale discovery |
 | Deploy UI | Faction, kit, spawn map |
+| Map fidelity | Heightmap cluster, overgrowth, roads, texture resolve, asset audit |
 | Ground vehicles | Drive, terrain tilt, animated wheels (where meshed) |
-| Helicopters | Collective/yaw/cyclic, rotor RPM blur, AI gunner |
-| Jets | Runway + basic pitch/roll — **not flyable yet; needs work** |
+| Boats / RHIBs | Water-surface buoyancy |
+| Helicopters | Collective/yaw/cyclic, rotor RPM blur, AI gunner, flares |
+| Jets | Spool, V1 rotate, body-wing lift, afterburner, gear tuck (`G`) — alpha |
 | Game audio | Weapons, voice, ambient; vehicle loops on enter |
+| Conquest | Tickets, CP capture, voice cues — alpha |
 | Crash fix | SDL2 + SDL2_mixer DLLs copied next to exe on build |
 
 ---

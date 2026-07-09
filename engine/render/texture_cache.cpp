@@ -1,39 +1,21 @@
 #include "engine/render/texture_cache.hpp"
 
-#include <algorithm>
-#include <cctype>
-#include <vector>
+#include "engine/render/texture_resolve.hpp"
 
 namespace bf2 {
-namespace {
 
-std::string normalize(std::string p) {
-  std::replace(p.begin(), p.end(), '\\', '/');
-  std::transform(p.begin(), p.end(), p.begin(),
-                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  while (!p.empty() && p.front() == '/') p.erase(p.begin());
-  return p;
-}
-
-}  // namespace
-
-std::uint32_t TextureCache::get(const std::string& bf2_path) {
+std::uint32_t TextureCache::get(const std::string& bf2_path, const std::string& mesh_folder) {
   if (bf2_path.empty()) {
     return 0;
   }
-  const std::string key = normalize(bf2_path);
-  if (const auto it = cache_.find(key); it != cache_.end()) {
+  const std::string key = bf2_path;
+  const std::string cache_key =
+      mesh_folder.empty() ? key : (key + "|" + mesh_folder);
+  if (const auto it = cache_.find(cache_key); it != cache_.end()) {
     return it->second;
   }
 
-  // Candidate virtual paths: as-is, without a leading "objects/", and with one.
-  std::vector<std::string> candidates;
-  candidates.push_back(key);
-  if (key.rfind("objects/", 0) == 0) {
-    candidates.push_back(key.substr(std::string("objects/").size()));
-  } else {
-    candidates.push_back("objects/" + key);
-  }
+  const auto candidates = texture_candidate_paths(bf2_path, mesh_folder);
 
   std::uint32_t id = 0;
   for (const auto& cand : candidates) {
@@ -48,22 +30,16 @@ std::uint32_t TextureCache::get(const std::string& bf2_path) {
       const DdsTexture tex = DdsLoader::load_from_memory(*bytes);
       id = renderer_.upload_texture(tex);
       if (id != 0) {
-        // Classify as a cutout mask if a meaningful fraction of texels are fully
-        // transparent (typical of foliage/fence alpha). Specular-in-alpha maps
-        // and opaque DXT1 have (almost) no alpha==0 texels, so they're excluded.
         try {
           const DdsTexture rgba = DdsLoader::decode_to_rgba8(tex);
           const std::size_t px = rgba.pixels.size() / 4;
-          std::size_t clear = 0;  // fully transparent (hard cutout gaps)
-          std::size_t soft = 0;   // semi-transparent (feathered foliage edges)
+          std::size_t clear = 0;
+          std::size_t soft = 0;
           for (std::size_t i = 0; i < px; ++i) {
             const std::uint8_t a = rgba.pixels[i * 4 + 3];
             if (a < 32) ++clear;
             if (a < 96) ++soft;
           }
-          // Treat as a transparency mask if it has real holes, or a meaningful
-          // band of soft alpha (leaf/plant/decal edges). Opaque building/fence
-          // textures are DXT1 (alpha=255 everywhere), so they never qualify.
           const double fc = px ? static_cast<double>(clear) / px : 0.0;
           const double fs = px ? static_cast<double>(soft) / px : 0.0;
           if (fc > 0.02 || fs > 0.06) {
@@ -71,11 +47,12 @@ std::uint32_t TextureCache::get(const std::string& bf2_path) {
           }
         } catch (...) {
         }
+        break;
       }
     } catch (...) {
       id = 0;
+      continue;
     }
-    break;
   }
 
   if (id != 0) {
@@ -83,7 +60,7 @@ std::uint32_t TextureCache::get(const std::string& bf2_path) {
   } else {
     ++missing_;
   }
-  cache_[key] = id;
+  cache_[cache_key] = id;
   return id;
 }
 

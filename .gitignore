@@ -14,6 +14,9 @@ out/
 # --- CMake / virtual FS scratch ---
 __virtual__*
 
+# --- Runtime / dev scratch (extracted level data — load from your BF2 install) ---
+apps/dalian/temp_map_data/
+
 # --- Runtime logs & captured frames (never commit) ---
 *.log
 *_log.txt

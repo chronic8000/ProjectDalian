@@ -3,8 +3,10 @@
 #include <string>
 #include <vector>
 
+#include "engine/core/compiled_roads_parser.hpp"
 #include "engine/core/resource_manager.hpp"
 #include "engine/core/scene_graph.hpp"
+#include "engine/formats/terrain/heightmap_cluster.hpp"
 #include "engine/formats/terrain/terrain_loader.hpp"
 #include "engine/script/con_interpreter.hpp"
 
@@ -16,6 +18,9 @@ struct LevelLoadResult {
   std::vector<ObjectInstance> placements;
   bool has_terrain = false;
   Terrain terrain;
+  HeightmapCluster heightmap_cluster;
+  bool has_heightmap_cluster = false;
+  std::vector<CompiledRoadPlacement> roads;
 };
 
 class LevelLoader {

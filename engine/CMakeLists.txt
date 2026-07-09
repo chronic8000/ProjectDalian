@@ -56,14 +56,22 @@ add_library(bf2engine STATIC
   formats/collision/bf2_collision.cpp
   formats/terrain/terrain_loader.cpp
   formats/terrain/terrain_colormap.cpp
+  formats/terrain/terrain_con_parser.cpp
+  formats/terrain/heightmap_cluster.cpp
   anim/pose.cpp
   anim/skinning.cpp
   core/resource_manager.cpp
   core/scene_graph.cpp
   core/level_loader.cpp
+  core/static_object_parser.cpp
+  core/overgrowth_parser.cpp
+  core/overgrowth_instances.cpp
+  core/compiled_roads_parser.cpp
+  core/asset_audit.cpp
   core/template_resolver.cpp
   render/renderer.cpp
   render/texture_cache.cpp
+  render/texture_resolve.cpp
   physics/physics_world.cpp
   script/con_interpreter.cpp
   script/gameplay_script.cpp

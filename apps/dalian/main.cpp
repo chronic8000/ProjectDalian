@@ -21,10 +21,17 @@
 #include "game_audio.hpp"
 #include "menu.hpp"
 #include "server_discovery.hpp"
+#include "conquest_voice.hpp"
+#include "game_sim.hpp"
+#include "game_snapshot.hpp"
+#include "map_conquest_parser.hpp"
+#include "minimap_projector.hpp"
+#include "vehicle_classify.hpp"
 
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
 #include <algorithm>
@@ -48,8 +55,11 @@
 
 #include "engine/anim/pose.hpp"
 #include "engine/anim/skinning.hpp"
+#include "engine/core/asset_audit.hpp"
 #include "engine/core/atmosphere.hpp"
 #include "engine/core/level_loader.hpp"
+#include "engine/core/overgrowth_parser.hpp"
+#include "engine/core/overgrowth_instances.hpp"
 #include "engine/core/object_lightmaps.hpp"
 #include "engine/core/undergrowth.hpp"
 #include "engine/core/resource_manager.hpp"
@@ -140,6 +150,40 @@ glm::mat4 placement_matrix(const bf2::ObjectInstance& inst) {
   return m;
 }
 
+std::string mesh_texture_folder(const std::string& vpath) {
+  const auto slash = vpath.find_last_of('/');
+  return slash == std::string::npos ? std::string() : vpath.substr(0, slash);
+}
+
+// Load (or fetch from cache) a textured GPU mesh and wire up its material textures.
+bf2::GpuTexturedMesh& ensure_textured_mesh(
+    const std::string& vpath, std::unordered_map<std::string, bf2::GpuTexturedMesh>& cache,
+    bf2::ResourceManager& resources, bf2::TextureCache& textures, bf2::Renderer& renderer) {
+  auto it = cache.find(vpath);
+  if (it == cache.end()) {
+    bf2::GpuTexturedMesh gpu{};
+    try {
+      const auto m = resources.load_mesh(vpath);
+      const auto data = bf2::MeshLoader::extract_textured(m, 0, 0);
+      if (!data.vertices.empty()) {
+        gpu = renderer.upload_textured(data);
+        const std::string tex_folder = mesh_texture_folder(vpath);
+        for (std::size_t i = 0; i < gpu.submeshes.size() && i < data.submeshes.size(); ++i) {
+          gpu.submeshes[i].base_tex = textures.get(data.submeshes[i].base_map, tex_folder);
+          gpu.submeshes[i].detail_tex = textures.get(data.submeshes[i].detail_map, tex_folder);
+          gpu.submeshes[i].normal_tex = textures.get(data.submeshes[i].normal_map, tex_folder);
+          gpu.submeshes[i].dirt_tex = textures.get(data.submeshes[i].dirt_map, tex_folder);
+          gpu.submeshes[i].crack_tex = textures.get(data.submeshes[i].crack_map, tex_folder);
+          gpu.submeshes[i].cutout = textures.is_cutout(gpu.submeshes[i].base_tex);
+        }
+      }
+    } catch (const std::exception&) {
+    }
+    it = cache.emplace(vpath, std::move(gpu)).first;
+  }
+  return it->second;
+}
+
 struct Instance {
   std::string mesh_key;  // stable lookup into template_cache (never store raw map pointers)
   glm::mat4 model{1.0f};
@@ -148,7 +192,7 @@ struct Instance {
   glm::vec4 lm_xform{1.f, 1.f, 0.f, 0.f};
 };
 
-// Extract a local-space triangle soup (3 verts per tri) from the collision mesh
+// Extract a local-space triangle soup
 // col best suited to soldier movement (col_type 2, else the densest col).
 std::vector<bf2::Float3> collision_soup(const bf2::CollisionMesh& cm) {
   const bf2::CollisionCol* best = nullptr;
@@ -638,6 +682,14 @@ int main(int argc, char** argv) {
     std::cout << "Resolved " << resolver.map().size() << " templates; " << level.placements.size()
               << " placements\n";
 
+    {
+      std::vector<std::string> tmpl_names;
+      tmpl_names.reserve(level.placements.size());
+      for (const auto& p : level.placements) tmpl_names.push_back(p.template_name);
+      const auto audit = bf2::audit_static_assets(resources, resolver, tmpl_names);
+      bf2::log_asset_audit(audit, std::getenv("BF2_TEXAUDIT") != nullptr);
+    }
+
     bf2::TextureCache textures(resources, renderer);
 
     // Terrain: colormap + lightmap tiles from client.zip when available.
@@ -663,6 +715,14 @@ int main(int argc, char** argv) {
     } else {
       std::cout << "Terrain colormap not loaded (missing client tiles?)\n";
     }
+  }
+
+  bf2::OvergrowthParser overgrowth_defs;
+  if (const auto og = resources.read_bytes("Overgrowth/Overgrowth.con")) {
+    const std::string script(reinterpret_cast<const char*>(og->data()), og->size());
+    overgrowth_defs.parse(script);
+    std::cout << "Overgrowth: " << overgrowth_defs.materials().size() << " materials, "
+              << overgrowth_defs.types().size() << " types (instances in Overgrowth.raw)\n";
   }
 
   bf2::GpuMesh terrain_gpu{};
@@ -762,7 +822,7 @@ int main(int argc, char** argv) {
             // Prune cells that aren't thin-bladed grass: fully opaque/empty, or
             // containing a solid filled region (packed sprite or atlas padding
             // that would render as a grey square on the ground).
-            if (cov > 0.7 || cov < 0.005 || solid > 0.015) {
+            if (cov > 0.88 || cov < 0.003 || solid > 0.035) {
               it = undergrowth.grass.erase(it);
             } else {
               ++it;
@@ -790,30 +850,8 @@ int main(int argc, char** argv) {
     if (vpath.empty()) {
       continue;
     }
-    auto it = template_cache.find(vpath);
-    if (it == template_cache.end()) {
-      bf2::GpuTexturedMesh gpu{};
-      try {
-        const auto m = resources.load_mesh(vpath);
-        const auto data = bf2::MeshLoader::extract_textured(m, 0, 0);  // highest detail
-        if (!data.vertices.empty()) {
-          gpu = renderer.upload_textured(data);
-          for (std::size_t i = 0; i < gpu.submeshes.size() && i < data.submeshes.size(); ++i) {
-            gpu.submeshes[i].base_tex = textures.get(data.submeshes[i].base_map);
-            gpu.submeshes[i].detail_tex = textures.get(data.submeshes[i].detail_map);
-            gpu.submeshes[i].normal_tex = textures.get(data.submeshes[i].normal_map);
-            gpu.submeshes[i].dirt_tex = textures.get(data.submeshes[i].dirt_map);
-            gpu.submeshes[i].crack_tex = textures.get(data.submeshes[i].crack_map);
-            // Foliage/fence leaf cards use an alpha cutout mask; flag them so the
-            // renderer discards the transparent texels instead of drawing white.
-            gpu.submeshes[i].cutout = textures.is_cutout(gpu.submeshes[i].base_tex);
-          }
-        }
-      } catch (const std::exception&) {
-      }
-      it = template_cache.emplace(vpath, std::move(gpu)).first;
-
-      // Load matching collision mesh once per template.
+    auto& gpu = ensure_textured_mesh(vpath, template_cache, resources, textures, renderer);
+    if (collision_cache.find(vpath) == collision_cache.end()) {
       std::vector<bf2::Float3> soup;
       const std::string col_vpath = collision_path_for(vpath);
       if (!col_vpath.empty()) {
@@ -827,7 +865,7 @@ int main(int argc, char** argv) {
       }
       collision_cache.emplace(vpath, std::move(soup));
     }
-    if (it->second.vao != 0) {
+    if (gpu.vao != 0) {
       Instance in;
       in.mesh_key = vpath;
       in.model = placement_matrix(inst);
@@ -844,13 +882,66 @@ int main(int argc, char** argv) {
       ++resolved;
     }
   }
+
+  // Compiled road meshes from CompiledRoads.con (client.zip).
+  int road_resolved = 0;
+  for (const auto& road : level.roads) {
+    if (road.mesh_vpath.empty()) continue;
+    auto& gpu = ensure_textured_mesh(road.mesh_vpath, template_cache, resources, textures, renderer);
+    if (gpu.vao == 0) continue;
+    Instance in;
+    in.mesh_key = road.mesh_vpath;
+    in.model = glm::translate(glm::mat4(1.f),
+                              glm::vec3(road.position[0], road.position[1], road.position[2]));
+    in.origin = glm::vec3(road.position[0], road.position[1], road.position[2]);
+    instances.push_back(in);
+    ++road_resolved;
+  }
+  if (road_resolved > 0) {
+    std::cout << "CompiledRoads: rendered " << road_resolved << " segments\n";
+  }
+
   std::cout << "Uploaded " << template_cache.size() << " unique meshes, " << resolved
-            << " instances; textures loaded " << textures.loaded_count() << ", missing "
+            << " static instances; textures loaded " << textures.loaded_count() << ", missing "
             << textures.missing_count() << '\n';
 
   // Physics / player.
   bf2::PhysicsWorld world;
   world.set_terrain(level.terrain, xz, /*centered=*/true);
+  if (level.has_heightmap_cluster) {
+    world.set_heightmap_cluster(&level.heightmap_cluster);
+    std::cout << "Physics: using full 3x3 heightmap cluster (" << level.heightmap_cluster.patches().size()
+              << " patches)\n";
+  }
+
+  // Overgrowth trees/bushes from Overgrowth.raw material grid.
+  int tree_resolved = 0;
+  if (!overgrowth_defs.types().empty()) {
+    if (const auto og_raw = resources.read_bytes("Overgrowth/Overgrowth.raw")) {
+      auto trees = bf2::build_overgrowth_instances(overgrowth_defs, *og_raw, resources, xz);
+      for (const auto& tr : trees) {
+        auto& gpu = ensure_textured_mesh(tr.mesh_vpath, template_cache, resources, textures, renderer);
+        if (gpu.vao == 0) continue;
+        bf2::ObjectInstance pseudo;
+        pseudo.position[0] = tr.position[0];
+        pseudo.position[1] = world.terrain_height(tr.position[0], tr.position[2]);
+        pseudo.position[2] = tr.position[2];
+        pseudo.rotation[0] = tr.rotation[0];
+        pseudo.rotation[1] = tr.rotation[1];
+        pseudo.rotation[2] = tr.rotation[2];
+        Instance in;
+        in.mesh_key = tr.mesh_vpath;
+        in.model = placement_matrix(pseudo);
+        if (tr.scale != 1.f) {
+          in.model = glm::scale(in.model, glm::vec3(tr.scale));
+        }
+        in.origin = glm::vec3(pseudo.position[0], pseudo.position[1], pseudo.position[2]);
+        instances.push_back(in);
+        ++tree_resolved;
+      }
+      std::cout << "Overgrowth: instanced " << tree_resolved << " trees/bushes\n";
+    }
+  }
 
   // Feed world-space collision triangles for every placed building.
   for (const auto& in : instances) {
@@ -872,7 +963,8 @@ int main(int argc, char** argv) {
   world.finalize_colliders();
   std::cout << "Collision triangles: " << world.collision_triangle_count() << '\n';
 
-  bf2::CharacterController player;
+  dalian::GameSim game_sim;
+  bf2::CharacterController& player = game_sim.state().player;
   player.eye_height = 1.8f;
 
   // Spawn at the original BF2 spawn: the control point nearest the map centre
@@ -882,6 +974,7 @@ int main(int argc, char** argv) {
   std::string gameplay_script;   // layer used for control-point/player spawns
   std::string vehicle_script;    // layer used for vehicle placement (richest set)
   std::vector<glm::vec3> control_points;  // above-water objectives, for enemy placement
+  dalian::MapConquestLayout map_layout;
   {
     // Larger conquest layers (64/32) carry the full vehicle roster including
     // jets and helicopters; the 16-player COOP layer often omits aircraft. We
@@ -926,6 +1019,7 @@ int main(int argc, char** argv) {
         spawn = glm::vec3(cp.x, cp.y + player.eye_height + 1.0f, cp.z);
       }
     }
+    if (!gameplay_script.empty()) map_layout = dalian::parse_map_conquest(gameplay_script);
   }
   player.position = {spawn.x, spawn.y, spawn.z};
   std::cout << "Spawn @ " << spawn.x << " " << spawn.y << " " << spawn.z << '\n';
@@ -935,63 +1029,18 @@ int main(int argc, char** argv) {
   // separate child meshes (rotors, sometimes turrets) attached at offsets defined
   // in the vehicle's .tweak/.con. Parts internal to the body (wings, gun turret,
   // landing skids) are already baked into the body mesh as geometry parts.
-  struct VehiclePart {
-    std::string mesh_key;
-    glm::mat4 local{1.0f};  // relative to the vehicle root
-  };
-  struct VehicleWheelSlot {
-    int geom_part = -1;
-    std::string mesh_key;
-    glm::mat4 rest{1.f};
-    bool steers = false;
-  };
-  struct Vehicle {
-    std::string mesh_key;  // root body
-    glm::mat4 model{1.0f};
-    glm::vec3 origin{};
-    std::vector<VehiclePart> parts;  // child meshes (rotors, etc.)
-    // Live driving state (see the E-to-enter system below).
-    glm::vec3 pos{};       // current world position (starts at origin)
-    float heading = 0.f;   // yaw in degrees
-    float speed = 0.f;     // signed ground speed (m/s)
-    bool is_air = false;   // helicopters / jets use the simple flight model
-    float rotor_spin = 0.f;  // accumulated rotor angle (rad) while flying
-    float rotor_rpm = 0.f;   // 0..1 spool state: 0 parked (static blades), 1 full (blur disc)
-    // Helicopter flight attitude (degrees) and full 3D velocity. Cyclic pitch
-    // tilts the nose (accelerate forward), roll banks into coordinated turns.
-    float pitch = 0.f;
-    float roll = 0.f;
-    glm::vec3 vel{0.f};
-    bool has_gunner_seat = false;  // attack helis carry a co-pilot/gunner station
-    bool is_heli = false;          // rotary-wing: hovers (collective). false = fixed-wing jet
-    float throttle = 0.f;          // jet engine setting 0..1 (W spools up, S airbrakes)
-    bool wheels_on_ground = true;  // jet: true while gear is on the deck/runway
-    // Crew seats (BF2-style). occupant: -1 empty, 0 the player, 1 an AI crewman.
-    // Seat 0 is always the driver/pilot; extra seats are gunner/passenger.
-    struct SeatSlot {
-      const char* name = "SEAT";
-      int occupant = -1;
-    };
-    std::vector<SeatSlot> seats;
-    // Smoothed chassis up-vector: ground vehicles tilt to follow the terrain /
-    // surface slope (a cheap suspension model). Aircraft keep +Y.
-    glm::vec3 ground_normal{0.f, 1.f, 0.f};
-    // Ground clearance: distance the lowest vertex sits below the mesh origin.
-    // Vehicles are placed/snapped so origin.y = terrain + clearance, which lands
-    // the wheels/tracks/skids on the ground instead of sinking the hull into it.
-    float clearance = 0.f;
-    // Landing clearance for aircraft: the true skid/gear height above ground.
-    // `clearance` may include a large scripted offset (e.g. a carrier deck), so
-    // the in-flight terrain floor uses this smaller value to let aircraft land.
-    float land_clearance = 0.f;
-    // Oriented collision half-extents (x=right, y=height, z=forward) in local
-    // space, for pushing the on-foot player out of the hull.
-    glm::vec3 col_half{1.6f, 1.4f, 3.0f};
-    std::vector<VehicleWheelSlot> wheels;
-    std::vector<float> wheel_spin;
-    float visual_steer = 0.f;
-  };
-  std::vector<Vehicle> vehicles;
+  using VehiclePart = dalian::VehiclePart;
+  using VehicleWheelSlot = dalian::VehicleWheelSlot;
+  using Vehicle = dalian::Vehicle;
+  using Enemy = dalian::Enemy;
+  using ActiveMissile = dalian::ActiveMissile;
+  using Tracer = dalian::Tracer;
+  using Impact = dalian::Impact;
+  using Projectile = dalian::Projectile;
+  using Smoke = dalian::Smoke;
+  using Explosion = dalian::Explosion;
+  using Flare = dalian::Flare;
+  std::vector<Vehicle> loaded_vehicles;
   std::unordered_map<std::string, bf2::GpuTexturedMesh> vehicle_cache;
   // Lowest assembled-mesh Y per vehicle body path (relative to its origin).
   std::unordered_map<std::string, float> vehicle_min_y;
@@ -1017,7 +1066,8 @@ int main(int argc, char** argv) {
     };
     struct PartHierarchy {
       std::vector<glm::mat4> xforms;
-      std::vector<VehicleWheelSlot> wheels;
+      std::vector<dalian::VehicleWheelSlot> wheels;
+      std::vector<dalian::VehicleGearSlot> gear_parts;
     };
     // Load a vehicle/part mesh (external geom, LOD0) into the shared cache. When
     // `part_xform` is supplied (the body mesh), each vertex is moved from its
@@ -1093,14 +1143,15 @@ int main(int argc, char** argv) {
             geom_override >= 0 ? static_cast<std::size_t>(geom_override) : external_geometry(mesh);
         auto data = bf2::MeshLoader::extract_textured(mesh, geom, 0);
         const auto& part_xform = hierarchy ? hierarchy->xforms : std::vector<glm::mat4>{};
-        std::unordered_set<int> wheel_parts;
+        std::unordered_set<int> split_parts;
         if (hierarchy) {
-          for (const auto& w : hierarchy->wheels) wheel_parts.insert(w.geom_part);
+          for (const auto& w : hierarchy->wheels) split_parts.insert(w.geom_part);
+          for (const auto& g : hierarchy->gear_parts) split_parts.insert(g.geom_part);
         }
         if (!part_xform.empty() && data.vertex_part.size() == data.vertices.size() &&
-            !wheel_parts.empty()) {
+            !split_parts.empty()) {
           bf2::TexturedMeshData body;
-          std::unordered_map<int, bf2::TexturedMeshData> wheel_meshes;
+          std::unordered_map<int, bf2::TexturedMeshData> part_meshes;
           std::unordered_map<int, std::unordered_map<std::uint32_t, std::uint32_t>> vmaps;
           auto map_vert = [&](int bucket, std::uint32_t old_i, bf2::TexturedMeshData& target) {
             auto& vm = vmaps[bucket];
@@ -1127,8 +1178,8 @@ int main(int argc, char** argv) {
           for (std::size_t ii = 0; ii + 2 < data.indices.size(); ii += 3) {
             const std::uint32_t ia = data.indices[ii];
             const int p = static_cast<int>(data.vertex_part[ia]);
-            if (wheel_parts.count(p)) {
-              auto& wd = wheel_meshes[p];
+            if (split_parts.count(p)) {
+              auto& wd = part_meshes[p];
               wd.indices.push_back(map_vert(p, ia, wd));
               wd.indices.push_back(map_vert(p, data.indices[ii + 1], wd));
               wd.indices.push_back(map_vert(p, data.indices[ii + 2], wd));
@@ -1156,11 +1207,18 @@ int main(int argc, char** argv) {
           assign_submesh(body);
           bool ok = upload_mesh_data(body, cache_key, vpath);
           for (const auto& w : hierarchy->wheels) {
-            auto wit = wheel_meshes.find(w.geom_part);
-            if (wit == wheel_meshes.end() || wit->second.vertices.empty()) continue;
+            auto wit = part_meshes.find(w.geom_part);
+            if (wit == part_meshes.end() || wit->second.vertices.empty()) continue;
             assign_submesh(wit->second);
             const std::string wkey = vpath + "#wheel_" + std::to_string(w.geom_part);
             upload_mesh_data(wit->second, wkey, vpath);
+          }
+          for (const auto& g : hierarchy->gear_parts) {
+            auto git = part_meshes.find(g.geom_part);
+            if (git == part_meshes.end() || git->second.vertices.empty()) continue;
+            assign_submesh(git->second);
+            const std::string gkey = vpath + "#gear_" + std::to_string(g.geom_part);
+            upload_mesh_data(git->second, gkey, vpath);
           }
           return ok;
         }
@@ -1194,7 +1252,7 @@ int main(int argc, char** argv) {
     // effects) are skipped -- their geometry is already in the body or is non-visual.
     auto parse_vehicle_parts = [&](const std::string& body_vpath) -> std::vector<VehiclePart> {
       std::vector<VehiclePart> parts;
-      // vehicles/<cat>/<name>/meshes/<name>.bundledmesh -> folder vehicles/<cat>/<name>
+      // loaded_vehicles/<cat>/<name>/meshes/<name>.bundledmesh -> folder loaded_vehicles/<cat>/<name>
       const auto meshes_pos = body_vpath.rfind("/meshes/");
       if (meshes_pos == std::string::npos) return parts;
       const std::string folder = body_vpath.substr(0, meshes_pos);
@@ -1279,7 +1337,7 @@ int main(int argc, char** argv) {
     };
 
     // Build per-geometry-part transforms from a vehicle's .con object hierarchy.
-    // BF2 vehicles bake turret/barrel/wheels into one bundledmesh as separate
+    // BF2 loaded_vehicles bake turret/barrel/wheels into one bundledmesh as separate
     // rigid parts (each `geometryPart N`), positioned by an ObjectTemplate tree:
     // the root PhysicalObject owns part 0 (hull) at identity, and every
     // addTemplate/setPosition/setRotation nests a child part relative to it.
@@ -1335,6 +1393,7 @@ int main(int argc, char** argv) {
       };
       struct ObjDef {
         int geom_part = -1;
+        std::string type;
         std::vector<Child> children;
       };
       std::unordered_map<std::string, ObjDef> objs;
@@ -1353,7 +1412,7 @@ int main(int argc, char** argv) {
           ls >> oname;  // arg holds the type, next token is the name
           cur = lc(oname);
           if (first.empty()) first = cur;
-          objs[cur];
+          objs[cur].type = lc(arg);
           cur_child = -1;
         } else if (k == "objecttemplate.geometrypart" && !cur.empty()) {
           try {
@@ -1375,6 +1434,18 @@ int main(int argc, char** argv) {
       std::string root = objs.count(lc(name)) ? lc(name) : first;
       if (root.empty()) return hierarchy;
 
+      const auto tuck_for_wheel = [&](const std::string& n) {
+        const std::string s = lc(n);
+        if (s.find("fwheel") != std::string::npos || s.find("nose") != std::string::npos)
+          return std::pair<float, int>{92.f, 1};
+        return std::pair<float, int>{60.f, 1};
+      };
+      const auto tuck_for_gear = [&](const std::string& n) {
+        const std::string s = lc(n);
+        if (s.find("hatch") != std::string::npos) return std::pair<float, int>{90.f, 2};
+        if (s.find("fgear") != std::string::npos) return std::pair<float, int>{92.f, 1};
+        return std::pair<float, int>{60.f, 1};
+      };
       std::unordered_map<std::string, bool> visited;
       // Iterative DFS carrying the accumulated transform for each node.
       std::vector<std::pair<std::string, glm::mat4>> stack;
@@ -1392,12 +1463,25 @@ int main(int argc, char** argv) {
           if (static_cast<int>(hierarchy.xforms.size()) <= gp)
             hierarchy.xforms.resize(gp + 1, glm::mat4(1.0f));
           hierarchy.xforms[gp] = xform;
+          const std::string& otype = it->second.type;
           if (is_wheel_name(oname)) {
-            VehicleWheelSlot ws;
+            dalian::VehicleWheelSlot ws;
             ws.geom_part = gp;
             ws.rest = xform;
             ws.steers = is_steer_name(oname);
+            const auto [ang, ax] = tuck_for_wheel(oname);
+            ws.gear_tuck_angle = ang;
+            ws.gear_tuck_axis = ax;
             hierarchy.wheels.push_back(std::move(ws));
+          } else if (otype == "landinggear" ||
+                     (oname.find("gear") != std::string::npos && oname.find("wheel") == std::string::npos)) {
+            dalian::VehicleGearSlot gs;
+            gs.geom_part = gp;
+            gs.rest = xform;
+            const auto [ang, ax] = tuck_for_gear(oname);
+            gs.gear_tuck_angle = ang;
+            gs.gear_tuck_axis = ax;
+            hierarchy.gear_parts.push_back(std::move(gs));
           }
         }
         for (const auto& c : it->second.children) {
@@ -1460,8 +1544,14 @@ int main(int argc, char** argv) {
       for (auto& w : v.wheels) {
         w.mesh_key = vpath + "#wheel_" + std::to_string(w.geom_part);
       }
+      v.gear_parts = xcit->second.gear_parts;
+      for (auto& g : v.gear_parts) {
+        g.mesh_key = vpath + "#gear_" + std::to_string(g.geom_part);
+      }
       v.wheel_spin.assign(v.wheels.size(), 0.f);
-      v.is_air = vpath.find("vehicles/air/") != std::string::npos;
+      v.is_air = dalian::vehicle_is_aircraft(vpath, vs.vehicle);
+      v.is_heli = dalian::vehicle_is_helicopter(vpath, vs.vehicle);
+      v.is_boat = dalian::vehicle_is_boat(vpath, vs.vehicle);
       if (const auto hit = vehicle_half_xz.find(vpath); hit != vehicle_half_xz.end()) {
         // Trim slightly so the player can brush right up against the hull, and
         // keep a sane minimum so tiny/odd meshes still block.
@@ -1501,6 +1591,9 @@ int main(int argc, char** argv) {
             dn.point.y <= scriptY + 0.75f)
           surfY = dn.point.y;
       }
+      if (v.is_boat && terrY < atmo.water_level + 0.5f && surfY < atmo.water_level) {
+        surfY = atmo.water_level;
+      }
       const float script_off = vs.pos.y - surfY;
       const auto myit = vehicle_min_y.find(vpath);
       const float body_low = myit != vehicle_min_y.end() ? myit->second : 0.f;
@@ -1535,6 +1628,18 @@ int main(int argc, char** argv) {
       m = glm::rotate(m, glm::radians(vs.rot.z), glm::vec3(0, 0, 1));
       v.model = m;
       v.parts = pcit->second;
+      if (v.is_air && !v.is_heli) {
+        v.throttle = 0.f;
+        v.jet_rpm = 0.f;
+        v.jet_airborne = false;
+        v.jet_gear_down = true;
+        v.jet_gear_anim = 0.f;
+        v.jet_sprint = 1.f;
+        v.vel = glm::vec3(0.f);
+        v.pitch = 0.f;
+        v.roll = 0.f;
+        v.wheels_on_ground = true;
+      }
       // A rotor part means this is a helicopter (not a jet): it flies the cyclic
       // model well and carries a co-pilot/gunner station.
       for (const auto& p : v.parts) {
@@ -1544,8 +1649,9 @@ int main(int argc, char** argv) {
           break;
         }
       }
+      if (v.is_heli) v.is_air = true;
       // Crew seat layout by vehicle class. Seat 0 always drives/pilots.
-      const bool is_tank = vpath.find("vehicles/land/") != std::string::npos &&
+      const bool is_tank = vpath.find("loaded_vehicles/land/") != std::string::npos &&
                            (vpath.find("tnk") != std::string::npos ||
                             vpath.find("apc") != std::string::npos ||
                             vpath.find("aav") != std::string::npos);
@@ -1559,13 +1665,13 @@ int main(int argc, char** argv) {
         v.seats = {{"DRIVER", -1}, {"GUNNER", -1}, {"PASSENGER", -1}};  // jeep/buggy
       }
       part_count += static_cast<int>(v.parts.size());
-      vehicles.push_back(std::move(v));
+      loaded_vehicles.push_back(std::move(v));
       ++placed;
     }
     std::cout << "Vehicles: " << placed << " placed, " << vehicle_cache.size()
               << " unique meshes, " << part_count << " attached parts\n";
     if (std::getenv("BF2_VEHLIST")) {
-      for (const auto& v : vehicles)
+      for (const auto& v : loaded_vehicles)
         std::cerr << "  veh " << v.mesh_key << " parts=" << v.parts.size()
                   << " clearance=" << v.clearance << " terrainY="
                   << world.terrain_height(v.origin.x, v.origin.z) << " originY=" << v.origin.y
@@ -1656,7 +1762,7 @@ int main(int argc, char** argv) {
             resources, std::string(reinterpret_cast<const char*>(amb->data()), amb->size()));
       }
       std::unordered_set<std::string> seen_veh_snd;
-      for (const auto& vv : vehicles) {
+      for (const auto& vv : loaded_vehicles) {
         if (!seen_veh_snd.insert(vv.mesh_key).second) continue;
         const auto mp = vv.mesh_key.rfind("/meshes/");
         if (mp == std::string::npos) continue;
@@ -1679,6 +1785,7 @@ int main(int argc, char** argv) {
     }
   };
   float voice_cooldown = 0.f;
+  float snapshot_log_timer = 0.f;
 
   bf2::GpuColorMesh gun_mesh{};
   if (!have_weapon_model) {
@@ -1869,136 +1976,91 @@ int main(int argc, char** argv) {
               << "/" << (have_clip_run ? clip_run.bone_count : -1) << "b"
               << " (ske nodes=" << soldier_ske.nodes.size() << ")\n";
   }
+
+  // ---- Authoritative game simulation (headless-tickable, net-ready) ----
+  {
+    dalian::SimInitParams sim_init;
+    sim_init.world = &world;
+    sim_init.water_y = atmo.has_water ? atmo.water_level : -1e9f;
+    sim_init.spawn = {spawn.x, spawn.y, spawn.z};
+    sim_init.control_points = control_points;
+    sim_init.soldier_ske = &soldier_ske;
+    sim_init.clip_stand = &clip_stand;
+    sim_init.clip_walk = &clip_walk;
+    sim_init.have_soldier = have_soldier;
+    sim_init.have_clip_stand = have_clip_stand;
+    sim_init.have_clip_walk = have_clip_walk;
+    sim_init.missile_headless_demo = shot_missile;
+    sim_init.starting_tickets = 150;
+    sim_init.map_layout = map_layout;
+    sim_init.team1_faction_id = map_layout.team1_faction_id;
+    sim_init.team2_faction_id = map_layout.team2_faction_id;
+    game_sim.init(sim_init);
+    game_sim.state().vehicles = std::move(loaded_vehicles);
+    std::cout << "Enemies: " << game_sim.state().enemies.size() << " defenders\n";
+    std::cout << "Conquest: " << game_sim.state().control_points.size() << " control points, "
+              << sim_init.starting_tickets << " tickets per team\n";
+  }
+  dalian::GameState& G = game_sim.state();
+  auto& vehicles = G.vehicles;
+  auto& enemies = G.enemies;
+  auto& tracers = G.tracers;
+  auto& impacts = G.impacts;
+  auto& projectiles = G.projectiles;
+  auto& missiles = G.missiles;
+  auto& smoke = G.smoke;
+  auto& explosions = G.explosions;
+  auto& flares = G.flares;
+  int& in_vehicle = G.in_vehicle;
+  int& player_seat = G.player_seat;
+  float& air_pitch_stick = G.air_pitch_stick;
+  float& air_roll_stick = G.air_roll_stick;
+  float& air_input_grace = G.air_input_grace;
+  float& fire_cooldown = G.fire_cooldown;
+  float& muzzle_flash = G.muzzle_flash;
+  float& recoil = G.recoil;
+  bool& ballistic = G.ballistic;
+  float& missile_reload = G.missile_reload;
+  float& heli_rocket_cd = G.heli_rocket_cd;
+  float& heli_gun_cd = G.heli_gun_cd;
+  float& heli_grocket_cd = G.heli_grocket_cd;
+  float& heli_flare_cd = G.heli_flare_cd;
+  int& gunner_target = G.gunner_target;
+  float& gunner_acquire = G.gunner_acquire;
+  bool& gunner_engaging = G.gunner_engaging;
+  int& player_kills = G.player_kills;
+  int& player_deaths = G.player_deaths;
+  float& player_health = G.player_health;
+  float& player_regen_delay = G.player_regen_delay;
+  float& player_stamina = G.player_stamina;
+  int& mag_ammo = G.mag_ammo;
+  int& reserve_ammo = G.reserve_ammo;
+  bool& reloading = G.reloading;
+  float& reload_timer = G.reload_timer;
+  glm::vec3& wind_base = G.wind_base;
+  glm::vec3& wind = G.wind;
+  auto& conquest_points = G.control_points;
+  auto& tickets = G.tickets;
+  bool& match_over = G.match_over;
+  bool& match_started = G.match_started;
+  dalian::TeamId& player_team = G.player_team;
+  int& team1_faction_id = G.team1_faction_id;
+  int& team2_faction_id = G.team2_faction_id;
+  dalian::TeamId& winning_team = G.winning_team;
+  float& round_time = G.round_time;
+
   bool third_person = false;
   float anim_time = 0.f;
-
-  // Vehicle occupancy: index into `vehicles`, or -1 when on foot.
-  int in_vehicle = -1;
-  int player_seat = 0;  // which crew seat the player occupies in `in_vehicle`
-  // Virtual flight stick (BF2 mouse-flight): while piloting an aircraft the mouse
-  // deflects this stick instead of free-looking. X rolls, Y pitches; A/D yaw.
-  // Helicopters read it as an attitude command (tilt holds); jets read it as a
-  // pitch/roll RATE (so you can loop and barrel-roll).
-  float air_pitch_stick = 0.f;  // -1..1
-  float air_roll_stick = 0.f;   // -1..1
-  float air_input_grace = 0.f;  // ignore mouse briefly after entering (SDL warp spike)
   bool air_stick_moved = false; // set when mouse moves the flight stick this frame
-  // Invert flight pitch when enabled in settings.
   auto air_invert_fn = [&]() { return settings.invert_air; };
 
-  // Shooting state.
-  struct Tracer {
-    glm::vec3 a, b;
-    float life;
-  };
-  struct Impact {
-    glm::vec3 p;
-    float life;
-  };
-  // A physical bullet: integrates velocity + gravity and does a segment raycast
-  // each frame between its previous and current position (the "BF2 way"), giving
-  // real travel time and bullet drop.
-  struct Projectile {
-    glm::vec3 pos;
-    glm::vec3 vel;
-    float life;
-  };
-  std::vector<Tracer> tracers;
-  std::vector<Impact> impacts;
-  std::vector<Projectile> projectiles;
+  constexpr float kMuzzleSpeed = 340.f;
+  constexpr float kBulletGravity = -9.81f;
+  constexpr float kBulletLife = 3.0f;
+  constexpr float kBulletDrag = 0.0011f;
 
-  // ---- Vehicle-launched missiles ------------------------------------------
-  // A live missile wraps the reusable MissileController flight model, plus an
-  // optional homing target (a tracked enemy) and a smoke-spawn timer.
-  struct ActiveMissile {
-    bf2::MissileController m;
-    int homing_enemy = -1;  // >=0: retarget onto this enemy each frame
-    glm::vec3 prev_pos{};
-    float smoke_timer = 0.f;
-  };
-  std::vector<ActiveMissile> missiles;
-  // Drifting smoke puff (rocket exhaust trail + launch cloud). Expands and fades.
-  struct Smoke {
-    glm::vec3 p{};
-    float age = 0.f;
-    float life = 1.6f;
-  };
-  std::vector<Smoke> smoke;
-  // Explosion flash: an expanding bright star that fades over its life.
-  struct Explosion {
-    glm::vec3 p{};
-    float age = 0.f;
-    float life = 0.6f;
-  };
-  std::vector<Explosion> explosions;
-  float missile_reload = 0.f;  // seconds until the launcher can fire again
-
-  // ---- Helicopter weapons -------------------------------------------------
-  // Pilot fires forward rocket pods (LMB), the co-pilot/gunner auto-engages
-  // ground targets with a chin cannon + rockets, and flares (X) punch out a
-  // countermeasure burst that decoys guided threats.
-  float heli_rocket_cd = 0.f;  // pilot rocket-pod ripple cooldown
-  float heli_gun_cd = 0.f;     // AI gunner cannon cooldown
-  float heli_grocket_cd = 0.f; // AI gunner rocket cooldown
-  float heli_flare_cd = 0.f;   // flare dispenser cooldown
-  // Gunner-station state (AI or player). Tracks a locked target and how long it
-  // has been held so the gun doesn't chatter the instant anything appears, and
-  // so the HUD can show SCANNING vs ENGAGING honestly.
-  int gunner_target = -1;      // enemy index the gunner is tracking, or -1
-  float gunner_acquire = 0.f;  // seconds the current target has been in sight
-  bool gunner_engaging = false;// true only on frames the gun/rockets actually fire
-  struct Flare {
-    glm::vec3 p{};
-    glm::vec3 v{};
-    float life = 0.f;
-  };
-  std::vector<Flare> flares;
-
-  float fire_cooldown = 0.f;  // seconds until next shot allowed
-  float muzzle_flash = 0.f;   // >0 while flash visible
-  float recoil = 0.f;         // 0..1 recoil amount, decays
-  bool ballistic = true;      // true = physical projectiles, false = hitscan
-  constexpr float kMuzzleSpeed = 340.f;    // m/s
-  constexpr float kBulletGravity = -9.81f;  // real gravity for drop
-  constexpr float kBulletLife = 3.0f;       // seconds before despawn
-  constexpr float kBulletDrag = 0.0011f;    // quadratic air-drag coefficient
-  // Wind: a horizontal breeze that both slows and drifts bullets (drag is
-  // computed relative to the moving air, so downrange rounds get carried).
-  glm::vec3 wind_base(2.6f, 0.f, 1.4f);
-  glm::vec3 wind = wind_base;
-
-  // ---- Enemies: soldier targets with reactive engage AI -------------------
-  // Enemies use the same skinned soldier body. Hit registration is done against
-  // capsule colliders that track the animated skeleton bones (head/torso/limb),
-  // updated every frame. Squads defend the map's objectives rather than swarming
-  // the spawn: they detect the player by line of sight, take a moment to react,
-  // then fire in controlled bursts with distance-based accuracy.
-  struct Enemy {
-    glm::vec3 pos{};    // feet position
-    glm::vec3 home{};   // patrol anchor / respawn origin
-    float yaw = 0.f;    // facing (radians)
-    float health = 100.f;
-    float anim_time = 0.f;
-    float alert = 0.f;        // 0..1 awareness, ramps with LOS, decays without
-    float burst_cooldown = 0.f;  // time until next burst
-    int burst_left = 0;          // rounds remaining in current burst
-    float shot_timer = 0.f;      // time until next round within a burst
-    float hit_flash = 0.f;
-    float death_time = 0.f;
-    bool alive = true;
-    bool moving = false;
-    glm::vec3 patrol_target{};  // current wander waypoint near home
-    float patrol_wait = 0.f;    // dwell timer when idling at a waypoint
-    std::vector<Capsule> caps;   // world-space bone capsules (refreshed per frame)
-  };
-  std::vector<Enemy> enemies;
-  auto frand = []() { return static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX); };
-  // Sea surface height (or far below everything when the level has no water). Used
-  // everywhere spawns are resolved so neither the player nor bots ever end up
-  // standing on the sea floor beneath the water plane.
   const float water_y = atmo.has_water ? atmo.water_level : -1e9f;
-  // Resting surface at (x,z): terrain, or a solid deck above it near `refy`
-  // (carrier flight deck / bridge). Shared by enemy placement and post filtering.
+  auto frand = []() { return static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX); };
   auto ground_surface = [&](float x, float z, float refy) -> float {
     const float terr = world.terrain_height(x, z);
     if (refy > terr + 1.0f) {
@@ -2010,170 +2072,14 @@ int main(int argc, char** argv) {
     }
     return terr;
   };
-  auto drop = [&](Enemy& en) {  // snap feet to the ground — or a deck above it
-    const float terr = world.terrain_height(en.pos.x, en.pos.z);
-    float y = terr;
-    // If the post sits on a raised deck (carrier/bridge), probe downward from the
-    // post height so defenders stand ON the deck, not on the sea floor under it.
-    const float ref = en.home.y;
-    if (ref > terr + 1.0f) {
-      const auto dn =
-          world.raycast({en.pos.x, ref + 8.f, en.pos.z}, {0.f, -1.f, 0.f}, 60.f);
-      if (dn.hit && std::fabs(dn.normal.y) > 0.4f && dn.point.y > terr + 1.0f &&
-          dn.point.y <= ref + 8.5f) {
-        y = dn.point.y;
-      }
-    }
-    en.pos.y = y;
-  };
-  if (have_soldier) {
-    // Garrison the objectives: a small squad defends each above-water control
-    // point except the one the player spawns on. Enemies are spread out around
-    // their post, so you meet a few at a time as you advance across the map.
-    const float min_from_spawn = 55.f;  // keep the immediate spawn area safe
-    // The map's spawn markers are dense (dozens of points), so garrisoning every
-    // one would blanket the level in hundreds of enemies. Thin them to a handful
-    // of well-separated objectives and cap the total force so fights stay sparse
-    // and readable, more like real infantry contact than a firing line.
-    constexpr float kMinPostSpacing = 90.f;  // objectives at least this far apart
-    constexpr std::size_t kMaxPosts = 10;    // distinct garrisoned objectives
-    constexpr std::size_t kMaxEnemies = 28;  // hard cap on total defenders
-    std::vector<glm::vec3> candidates;
-    for (const auto& cp : control_points) {
-      if (glm::distance(glm::vec2(cp.x, cp.z), glm::vec2(spawn.x, spawn.z)) < min_from_spawn) continue;
-      // Skip objectives whose ground sits below the sea surface — garrisoning them
-      // would drop defenders underwater on the sea floor.
-      if (ground_surface(cp.x, cp.z, cp.y) < water_y - 0.3f) continue;
-      candidates.push_back(cp);
-    }
-    std::shuffle(candidates.begin(), candidates.end(),
-                 std::mt19937{std::random_device{}()});
-    std::vector<glm::vec3> posts;
-    for (const auto& cp : candidates) {
-      bool too_close = false;
-      for (const auto& p : posts) {
-        if (glm::distance(glm::vec2(cp.x, cp.z), glm::vec2(p.x, p.z)) < kMinPostSpacing) {
-          too_close = true;
-          break;
-        }
-      }
-      if (too_close) continue;
-      posts.push_back(cp);
-      if (posts.size() >= kMaxPosts) break;
-    }
-    if (posts.empty()) {
-      // No usable objectives: scatter a handful far out in random directions.
-      for (int i = 0; i < 5; ++i) {
-        const float ang = frand() * 6.2831853f;
-        const float r = 80.f + frand() * 80.f;
-        posts.push_back(glm::vec3(spawn.x + std::cos(ang) * r, 0.f, spawn.z + std::sin(ang) * r));
-      }
-    }
-    for (const auto& post : posts) {
-      if (enemies.size() >= kMaxEnemies) break;
-      const int squad = 2 + (std::rand() % 2);  // 2-3 defenders per objective
-      for (int i = 0; i < squad; ++i) {
-        Enemy en;
-        const float ang = frand() * 6.2831853f;
-        const float r = frand() * 22.f;  // dispersed around the objective
-        en.home = glm::vec3(post.x + std::cos(ang) * r, post.y, post.z + std::sin(ang) * r);
-        en.pos = en.home;
-        en.patrol_target = en.home;
-        drop(en);
-        // Never place a defender below the sea surface (dispersal may land one on a
-        // beach that dips underwater); skip it rather than drown it.
-        if (en.pos.y < water_y - 0.3f) continue;
-        en.home.y = en.pos.y;
-        en.yaw = frand() * 6.2831853f;
-        en.burst_cooldown = 0.5f + frand();
-        enemies.push_back(en);
-      }
-    }
-    std::cout << "Enemies: " << enemies.size() << " defenders across " << posts.size()
-              << " objectives\n";
-  }
-  int player_kills = 0;
-  int player_deaths = 0;
-  float player_health = 100.f;
-  float player_regen_delay = 0.f;
 
-  // Rebuild an enemy's bone-tracked capsules from its current animation pose.
-  auto update_capsules = [&](Enemy& en, const bf2::AnimationClip* clip, int frame) {
-    const bf2::PosedSkeleton posed = bf2::pose_skeleton(soldier_ske, clip, frame);
-    if (posed.world_positions.size() < 48) return;
-    const float cy = std::cos(en.yaw), sy = std::sin(en.yaw);
-    auto to_world = [&](const glm::vec3& m) {
-      // model-space (x right, y up, z fwd) -> yaw-rotated world at feet.
-      return glm::vec3(en.pos.x + m.x * cy + m.z * sy, en.pos.y + m.y,
-                       en.pos.z - m.x * sy + m.z * cy);
-    };
-    en.caps.clear();
-    for (const auto& bp : kBonePairs) {
-      if (bp.a >= static_cast<int>(posed.world_positions.size()) ||
-          bp.b >= static_cast<int>(posed.world_positions.size())) continue;
-      Capsule c;
-      c.a = to_world(posed.world_positions[bp.a]);
-      c.b = to_world(posed.world_positions[bp.b]);
-      c.r = bp.r;
-      c.zone = bp.zone;
-      en.caps.push_back(c);
-    }
+  using EnemyHit = dalian::EnemyHit;
+  auto shoot_enemies = [&](const glm::vec3& o, const glm::vec3& dir, float maxd) {
+    return game_sim.raycast_enemies(o, dir, maxd);
   };
-
-  struct EnemyHit { int idx = -1; int zone = 0; float dist = 1e30f; glm::vec3 point{}; };
-  // Nearest capsule hit along ray o + dir*t (dir normalised), within maxd.
-  auto shoot_enemies = [&](const glm::vec3& o, const glm::vec3& dir, float maxd) -> EnemyHit {
-    EnemyHit best;
-    const glm::vec3 q1 = o + dir * maxd;
-    for (std::size_t i = 0; i < enemies.size(); ++i) {
-      if (!enemies[i].alive) continue;
-      for (const auto& c : enemies[i].caps) {
-        float s;
-        const float d2 = closest_seg_seg_sq(o, q1, c.a, c.b, s);
-        if (d2 <= c.r * c.r) {
-          const float t = s * maxd;
-          if (t < best.dist) {
-            best.dist = t;
-            best.idx = static_cast<int>(i);
-            best.zone = c.zone;
-            best.point = o + dir * t;
-          }
-        }
-      }
-    }
-    return best;
-  };
-  auto damage_enemy = [&](int idx, int zone) {
-    Enemy& en = enemies[idx];
-    const float dmg = zone == 2 ? 100.f : (zone == 1 ? 42.f : 20.f);  // head / torso / limb
-    en.health -= dmg;
-    en.hit_flash = 0.12f;
-    en.alert = 1.f;  // being shot instantly alerts
-    if (en.health <= 0.f) {
-      en.alive = false;
-      en.death_time = 0.f;
-      ++player_kills;
-    }
-  };
-
-  // Area-of-effect blast: damage every living enemy within `radius` of the
-  // detonation, falling off with distance. Used by missile impacts.
+  auto damage_enemy = [&](int idx, int zone) { game_sim.apply_enemy_damage(idx, zone); };
   auto explode_at = [&](const glm::vec3& center, float radius, float max_damage) {
-    for (auto& en : enemies) {
-      if (!en.alive) continue;
-      const glm::vec3 chest(en.pos.x, en.pos.y + 1.0f, en.pos.z);
-      const float d = glm::length(chest - center);
-      if (d > radius) continue;
-      const float falloff = 1.f - (d / radius);
-      en.health -= max_damage * falloff * falloff;
-      en.hit_flash = 0.15f;
-      en.alert = 1.f;
-      if (en.health <= 0.f) {
-        en.alive = false;
-        en.death_time = 0.f;
-        ++player_kills;
-      }
-    }
+    game_sim.apply_explosion(center, radius, max_damage);
   };
 
   float yaw = -90.f;    // looking toward -Z
@@ -2332,7 +2238,33 @@ int main(int argc, char** argv) {
   // ===== BF2-style class loadout, spawn selection & gadgets =================
   int player_faction_id =
       session_mp.enabled ? session_mp.faction_id : settings.default_faction;
-  float deploy_faction_scroll = 0.f;
+  // Each map has two geographic teams (Side 1 / Side 2) with their own spawn sets.
+  // Before the match, assign any army to each side, then choose which side you play.
+  dalian::TeamId fight_for_team = dalian::TeamId::Team1;
+  if (player_faction_id == team2_faction_id) {
+    fight_for_team = dalian::TeamId::Team2;
+  } else if (player_faction_id != team1_faction_id) {
+    team1_faction_id = player_faction_id;
+    if (team1_faction_id == team2_faction_id) team2_faction_id = 3;
+    fight_for_team = dalian::TeamId::Team1;
+  }
+  game_sim.set_match_factions(team1_faction_id, team2_faction_id, fight_for_team);
+  player_team = fight_for_team;
+  player_faction_id =
+      player_team == dalian::TeamId::Team1 ? team1_faction_id : team2_faction_id;
+  int enemy_faction_id =
+      player_team == dalian::TeamId::Team1 ? team2_faction_id : team1_faction_id;
+  float deploy_side1_scroll = 0.f;
+  float deploy_side2_scroll = 0.f;
+
+  auto map_side_label = [&](dalian::TeamId side) -> std::string {
+    for (const auto& cp : map_layout.control_points) {
+      if (cp.initial_team == side) return cp.label;
+    }
+    return side == dalian::TeamId::Team1 ? "Side 1" : "Side 2";
+  };
+  const std::string side1_home = map_side_label(dalian::TeamId::Team1);
+  const std::string side2_home = map_side_label(dalian::TeamId::Team2);
 
   struct KitDef {
     const char* name;
@@ -2356,58 +2288,97 @@ int main(int argc, char** argv) {
 
   const int kMagSize = 30;
   const int kReserveMags = 6;
-  int mag_ammo = kMagSize;
-  int reserve_ammo = kMagSize * kReserveMags;
+  mag_ammo = kMagSize;
+  reserve_ammo = kMagSize * kReserveMags;
+  player_stamina = 100.f;
+  reload_timer = 0.f;
+  reloading = false;
   int grenades_left = 0;
   int c4_left = 0;
   bool has_medkit = false;
   bool has_at = false;
-  float player_stamina = 100.f;
-  float reload_timer = 0.f;
-  bool reloading = false;
   float medkit_cd = 0.f;
 
   int selected_kit = 0;  // highlighted in the deploy screen
   int player_kit = 0;    // active kit after deploy
 
-  // Named spawn points derived from the map's control points (BF2 flags),
-  // thinned so they're well separated across the level.
-  struct SpawnPoint {
+  // Deploy map: one marker per capture point (BF2 shows flags, not every soldier spawn).
+  struct DeployMarker {
     std::string name;
-    glm::vec3 pos;
+    glm::vec3 map_pos;
+    glm::vec3 deploy_pos;
+    int bf2_cp_id = 0;
   };
-  std::vector<SpawnPoint> spawn_points;
+  std::vector<DeployMarker> deploy_markers;
   {
-    static const char* phon[] = {"ALPHA",   "BRAVO", "CHARLIE", "DELTA", "ECHO", "FOXTROT",
-                                 "GOLF",    "HOTEL", "INDIA",   "JULIET", "KILO", "LIMA"};
-    std::vector<glm::vec3> chosen;
-    for (const auto& cp : control_points) {
-      bool too_close = false;
-      for (const auto& p : chosen)
-        if (glm::distance(glm::vec2(cp.x, cp.z), glm::vec2(p.x, p.z)) < 55.f) {
-          too_close = true;
-          break;
-        }
-      if (too_close) continue;
-      chosen.push_back(cp);
-      if (chosen.size() >= 12) break;
+    std::unordered_map<int, std::size_t> cp_index;
+    for (const auto& cp : map_layout.control_points) {
+      cp_index[cp.bf2_id] = deploy_markers.size();
+      deploy_markers.push_back({cp.label, cp.pos, cp.pos, cp.bf2_id});
     }
-    if (chosen.empty()) chosen.push_back(spawn);
-    for (std::size_t i = 0; i < chosen.size(); ++i)
-      spawn_points.push_back({phon[i % 12], chosen[i]});
+    for (const auto& sp : map_layout.soldier_spawns) {
+      const auto it = cp_index.find(sp.bf2_cp_id);
+      if (it == cp_index.end()) continue;
+      DeployMarker& m = deploy_markers[it->second];
+      if (m.deploy_pos == m.map_pos) m.deploy_pos = sp.pos;
+    }
+    if (deploy_markers.empty()) {
+      static const char* phon[] = {"ALPHA",   "BRAVO", "CHARLIE", "DELTA", "ECHO", "FOXTROT",
+                                   "GOLF",    "HOTEL", "INDIA",   "JULIET", "KILO", "LIMA"};
+      std::vector<glm::vec3> chosen;
+      for (const auto& cp : control_points) {
+        bool too_close = false;
+        for (const auto& p : chosen)
+          if (glm::distance(glm::vec2(cp.x, cp.z), glm::vec2(p.x, p.z)) < 55.f) {
+            too_close = true;
+            break;
+          }
+        if (too_close) continue;
+        chosen.push_back(cp);
+        if (chosen.size() >= 12) break;
+      }
+      if (chosen.empty()) chosen.push_back(spawn);
+      for (std::size_t i = 0; i < chosen.size(); ++i)
+        deploy_markers.push_back({phon[i % 12], chosen[i], chosen[i], 0});
+    }
   }
   int selected_spawn = 0;
+  auto spawn_point_owned = [&](std::size_t idx) -> bool {
+    if (idx >= deploy_markers.size()) return false;
+    const auto& m = deploy_markers[idx];
+    if (m.bf2_cp_id != 0) return game_sim.can_team_spawn_at_cp(m.bf2_cp_id, player_team);
+    return game_sim.can_team_spawn_at(m.deploy_pos, player_team);
+  };
+  auto pick_spawnable = [&]() {
+    for (std::size_t i = 0; i < deploy_markers.size(); ++i) {
+      if (spawn_point_owned(i)) {
+        selected_spawn = static_cast<int>(i);
+        return;
+      }
+    }
+  };
   {
     float best = 1e30f;
-    for (std::size_t i = 0; i < spawn_points.size(); ++i) {
-      const float d = glm::distance(glm::vec2(spawn_points[i].pos.x, spawn_points[i].pos.z),
+    for (std::size_t i = 0; i < deploy_markers.size(); ++i) {
+      const float d = glm::distance(glm::vec2(deploy_markers[i].deploy_pos.x,
+                                              deploy_markers[i].deploy_pos.z),
                                     glm::vec2(spawn.x, spawn.z));
       if (d < best) {
         best = d;
         selected_spawn = static_cast<int>(i);
       }
     }
+    if (!spawn_point_owned(static_cast<std::size_t>(selected_spawn))) pick_spawnable();
   }
+
+  auto sync_player_from_sides = [&]() {
+    player_faction_id =
+        player_team == dalian::TeamId::Team1 ? team1_faction_id : team2_faction_id;
+    enemy_faction_id =
+        player_team == dalian::TeamId::Team1 ? team2_faction_id : team1_faction_id;
+    game_sim.set_match_factions(team1_faction_id, team2_faction_id, player_team);
+    pick_spawnable();
+  };
 
   // Thrown/placed gadgets.
   struct Grenade {
@@ -2420,6 +2391,7 @@ int main(int argc, char** argv) {
 
   bool deploy_open = shot_path.empty();  // headless captures skip the spawn menu
   if (std::getenv("BF2_DEPLOYSHOT")) deploy_open = true;  // force menu for capture
+  if (!deploy_open) game_sim.begin_match();
   bool deploy_click = false;
 
   // Push an (x,z) point out of any vehicle hull it overlaps, treating each
@@ -2542,10 +2514,13 @@ int main(int argc, char** argv) {
     has_at = k.at;
     reloading = false;
     reload_timer = 0.f;
-    if (!spawn_points.empty()) {
-      const glm::vec3 safe = find_safe_spawn(spawn_points[selected_spawn].pos);
-      player.position = {safe.x, safe.y + player.eye_height + 0.5f, safe.z};
-      player.vertical_velocity = 0.f;
+    if (!deploy_markers.empty()) {
+      if (!spawn_point_owned(static_cast<std::size_t>(selected_spawn))) pick_spawnable();
+      if (spawn_point_owned(static_cast<std::size_t>(selected_spawn))) {
+        const glm::vec3 safe = find_safe_spawn(deploy_markers[selected_spawn].deploy_pos);
+        player.position = {safe.x, safe.y + player.eye_height + 0.5f, safe.z};
+        player.vertical_velocity = 0.f;
+      }
     }
     player_health = 100.f;
     player_stamina = 100.f;
@@ -2566,40 +2541,95 @@ int main(int argc, char** argv) {
   auto run_deploy_ui = [&](int mx, int my, bool clicked) {
     constexpr float W = 1600.f, H = 900.f;
     renderer.ui_rect(0, 0, W, H, 0.05f, 0.06f, 0.08f, 0.86f);
-    const auto& fac_def = dalian::faction_at(player_faction_id);
-    const char* fac = fac_def.army;
+    const auto& fac_you = dalian::faction_at(player_faction_id);
+    const auto& fac_en = dalian::faction_at(enemy_faction_id);
     renderer.ui_text(40, 26, 3.0f, "DEPLOYMENT", 0.92f, 0.94f, 0.97f, 1.f);
-    renderer.ui_text(40, 66, 2.0f, fac_def.country, 0.55f, 0.75f, 1.0f, 1.f);
-    renderer.ui_text(40, 92, 1.4f, fac, 0.55f, 0.65f, 0.85f, 1.f);
-    renderer.ui_text(40, 114, 1.2f, map_label.c_str(), 0.55f, 0.57f, 0.62f, 1.f);
+    char matchup[160];
+    std::snprintf(matchup, sizeof(matchup), "%s  vs  %s", fac_you.country, fac_en.country);
+    renderer.ui_text(40, 66, 2.0f, matchup, 0.55f, 0.75f, 1.0f, 1.f);
+    renderer.ui_text(40, 92, 1.2f, map_label.c_str(), 0.55f, 0.57f, 0.62f, 1.f);
+    char side_hint[192];
+    std::snprintf(side_hint, sizeof(side_hint), "Side 1: %s   |   Side 2: %s", side1_home.c_str(),
+                  side2_home.c_str());
+    renderer.ui_text(40, 112, 1.05f, side_hint, 0.5f, 0.58f, 0.68f, 0.95f);
 
-    // Faction picker (choose who you fight for).
-    const float fx = 40, fy = 132, fw = 260, fh = 180;
-    renderer.ui_text(fx, fy - 22, 1.4f, "SELECT FACTION", 0.7f, 0.72f, 0.76f, 1.f);
-    renderer.ui_rect(fx, fy, fw, fh, 0.04f, 0.05f, 0.06f, 0.95f);
-    const float frow = 24.f;
-    deploy_faction_scroll =
-        std::clamp(deploy_faction_scroll, 0.f,
-                   std::max(0.f, static_cast<float>(dalian::faction_count()) * frow - fh));
-    const int fstart = static_cast<int>(deploy_faction_scroll / frow);
-    for (std::size_t i = fstart; i < dalian::faction_count() &&
-                                static_cast<int>(i) < fstart + static_cast<int>(fh / frow) + 2;
-         ++i) {
-      const float ry = fy + static_cast<float>(i) * frow - deploy_faction_scroll;
-      if (ry < fy || ry > fy + fh - frow) continue;
-      const bool sel = static_cast<int>(i) == player_faction_id;
-      const bool hov = rect_hit(mx, my, fx, ry, fw, frow);
-      renderer.ui_rect(fx, ry, fw, frow - 2, sel ? 0.16f : (hov ? 0.11f : 0.07f),
-                       sel ? 0.28f : (hov ? 0.14f : 0.09f), sel ? 0.42f : (hov ? 0.18f : 0.11f),
-                       0.96f);
-      const auto& fd = dalian::faction_at(static_cast<int>(i));
-      char fline[128];
-      std::snprintf(fline, sizeof(fline), "%s", fd.country);
-      renderer.ui_text(fx + 8, ry + 4, 1.1f, fline, 0.9f, 0.92f, 0.94f, 1.f);
-      if (clicked && hov) {
-        player_faction_id = static_cast<int>(i);
-        if (net.active()) net.set_faction(static_cast<std::uint16_t>(player_faction_id));
+    // Assign any army to each geographic map side (each side has its own spawn set).
+    const float fx = 40, fy = 132, fw = 260, fh = 130, frow = 24.f;
+
+    auto draw_side_army_picker = [&](float x, float y, float w, float h, float& scroll,
+                                     int selected_id, const char* title, const char* subtitle,
+                                     auto on_pick) {
+      renderer.ui_text(x, y - 22, 1.35f, title, 0.7f, 0.72f, 0.76f, 1.f);
+      renderer.ui_text(x, y - 6, 0.95f, subtitle, 0.5f, 0.62f, 0.78f, 0.9f);
+      renderer.ui_rect(x, y, w, h, 0.04f, 0.05f, 0.06f, 0.95f);
+      scroll = std::clamp(scroll, 0.f,
+                          std::max(0.f, static_cast<float>(dalian::faction_count()) * frow - h));
+      const int start = static_cast<int>(scroll / frow);
+      for (std::size_t i = start; i < dalian::faction_count() &&
+                                  static_cast<int>(i) < start + static_cast<int>(h / frow) + 2;
+           ++i) {
+        const float ry = y + static_cast<float>(i) * frow - scroll;
+        if (ry < y || ry > y + h - frow) continue;
+        const bool sel = static_cast<int>(i) == selected_id;
+        const bool hov = rect_hit(mx, my, x, ry, w, frow);
+        renderer.ui_rect(x, ry, w, frow - 2, sel ? 0.16f : (hov ? 0.11f : 0.07f),
+                         sel ? 0.28f : (hov ? 0.14f : 0.09f), sel ? 0.42f : (hov ? 0.18f : 0.11f),
+                         0.96f);
+        const auto& fd = dalian::faction_at(static_cast<int>(i));
+        renderer.ui_text(x + 8, ry + 4, 1.05f, fd.country, 0.9f, 0.92f, 0.94f, 1.f);
+        if (clicked && hov) on_pick(static_cast<int>(i));
       }
+    };
+
+    char side1_title[96];
+    std::snprintf(side1_title, sizeof(side1_title), "SIDE 1 ARMY");
+    draw_side_army_picker(fx, fy, fw, fh, deploy_side1_scroll, team1_faction_id, side1_title,
+                          side1_home.c_str(), [&](int fid) {
+                            if (fid == team2_faction_id) return;
+                            team1_faction_id = fid;
+                            sync_player_from_sides();
+                          });
+
+    const float s2y = fy + fh + 24;
+    char side2_title[96];
+    std::snprintf(side2_title, sizeof(side2_title), "SIDE 2 ARMY");
+    draw_side_army_picker(fx, s2y, fw, fh, deploy_side2_scroll, team2_faction_id, side2_title,
+                          side2_home.c_str(), [&](int fid) {
+                            if (fid == team1_faction_id) return;
+                            team2_faction_id = fid;
+                            sync_player_from_sides();
+                          });
+
+    // Choose which map side (and spawn set) you play on.
+    const float pfy = s2y + fh + 22;
+    renderer.ui_text(fx, pfy - 18, 1.35f, "FIGHT FOR", 0.7f, 0.72f, 0.76f, 1.f);
+    const float pbw = (fw - 8.f) * 0.5f;
+    const float pbh = 42.f;
+    const auto& fac_s1 = dalian::faction_at(team1_faction_id);
+    const auto& fac_s2 = dalian::faction_at(team2_faction_id);
+    const bool play_side1 = player_team == dalian::TeamId::Team1;
+    const bool play_side2 = player_team == dalian::TeamId::Team2;
+    const bool hov_s1 = rect_hit(mx, my, fx, pfy, pbw, pbh);
+    const bool hov_s2 = rect_hit(mx, my, fx + pbw + 8.f, pfy, pbw, pbh);
+    renderer.ui_rect(fx, pfy, pbw, pbh, play_side1 ? 0.14f : (hov_s1 ? 0.1f : 0.07f),
+                     play_side1 ? 0.32f : (hov_s1 ? 0.16f : 0.1f),
+                     play_side1 ? 0.48f : (hov_s1 ? 0.2f : 0.12f), 0.96f);
+    renderer.ui_rect(fx + pbw + 8.f, pfy, pbw, pbh, play_side2 ? 0.14f : (hov_s2 ? 0.1f : 0.07f),
+                     play_side2 ? 0.32f : (hov_s2 ? 0.16f : 0.1f),
+                     play_side2 ? 0.48f : (hov_s2 ? 0.2f : 0.12f), 0.96f);
+    renderer.ui_text(fx + 8.f, pfy + 6.f, 1.0f, "SIDE 1", 0.75f, 0.82f, 0.95f, 1.f);
+    renderer.ui_text(fx + 8.f, pfy + 22.f, 0.95f, fac_s1.country, 0.88f, 0.9f, 0.92f, 1.f);
+    renderer.ui_text(fx + pbw + 16.f, pfy + 6.f, 1.0f, "SIDE 2", 0.95f, 0.55f, 0.45f, 1.f);
+    renderer.ui_text(fx + pbw + 16.f, pfy + 22.f, 0.95f, fac_s2.country, 0.88f, 0.9f, 0.92f, 1.f);
+    if (clicked && hov_s1) {
+      player_team = dalian::TeamId::Team1;
+      sync_player_from_sides();
+      if (net.active()) net.set_faction(static_cast<std::uint16_t>(player_faction_id));
+    }
+    if (clicked && hov_s2) {
+      player_team = dalian::TeamId::Team2;
+      sync_player_from_sides();
+      if (net.active()) net.set_faction(static_cast<std::uint16_t>(player_faction_id));
     }
 
     // Kit column.
@@ -2633,15 +2663,16 @@ int main(int argc, char** argv) {
     // Spawn map.
     const float mpx = 610, mpy = 132, mpw = W - 650, mph = H - 250;
     renderer.ui_text(mpx, mpy - 24, 1.6f, "SELECT SPAWN POINT", 0.7f, 0.72f, 0.76f, 1.f);
+    renderer.ui_text(mpx, mpy - 44, 1.1f, "Your side's flags only", 0.55f, 0.75f, 0.95f, 0.9f);
     renderer.ui_rect(mpx, mpy, mpw, mph, 0.08f, 0.11f, 0.10f, 0.96f);
     renderer.ui_rect(mpx, mpy, mpw, 3, 0.3f, 0.5f, 0.6f, 1.f);
     renderer.ui_rect(mpx, mpy + mph - 3, mpw, 3, 0.3f, 0.5f, 0.6f, 1.f);
     glm::vec2 mn(1e30f, 1e30f), mx2(-1e30f, -1e30f);
-    for (const auto& s : spawn_points) {
-      mn.x = std::min(mn.x, s.pos.x);
-      mn.y = std::min(mn.y, s.pos.z);
-      mx2.x = std::max(mx2.x, s.pos.x);
-      mx2.y = std::max(mx2.y, s.pos.z);
+    for (const auto& m : deploy_markers) {
+      mn.x = std::min(mn.x, m.map_pos.x);
+      mn.y = std::min(mn.y, m.map_pos.z);
+      mx2.x = std::max(mx2.x, m.map_pos.x);
+      mx2.y = std::max(mx2.y, m.map_pos.z);
     }
     glm::vec2 span = mx2 - mn;
     if (span.x < 1.f) span.x = 1.f;
@@ -2651,38 +2682,67 @@ int main(int argc, char** argv) {
       const float u = (p.x - mn.x) / span.x, v = (p.z - mn.y) / span.y;
       return glm::vec2(mpx + pad + u * (mpw - 2 * pad), mpy + pad + v * (mph - 2 * pad));
     };
-    for (std::size_t i = 0; i < spawn_points.size(); ++i) {
-      const glm::vec2 c = to_map(spawn_points[i].pos);
+    for (std::size_t i = 0; i < deploy_markers.size(); ++i) {
+      const glm::vec2 c = to_map(deploy_markers[i].map_pos);
+      const bool owned = spawn_point_owned(i);
       const bool sel = static_cast<int>(i) == selected_spawn;
       const float ms = sel ? 20.f : 15.f;
-      const bool hov = rect_hit(mx, my, c.x - ms * 0.5f, c.y - ms * 0.5f, ms, ms);
-      renderer.ui_rect(c.x - ms * 0.5f, c.y - ms * 0.5f, ms, ms, sel ? 0.2f : (hov ? 0.5f : 0.16f),
-                       sel ? 0.85f : (hov ? 0.65f : 0.5f), sel ? 0.4f : (hov ? 0.5f : 0.32f), 1.f);
-      renderer.ui_text(c.x + ms * 0.6f, c.y - 7, 1.3f, spawn_points[i].name.c_str(), 0.9f, 0.92f,
-                       0.95f, 1.f);
+      const bool hov = owned && rect_hit(mx, my, c.x - ms * 0.5f, c.y - ms * 0.5f, ms, ms);
+      float rr, rg, rb;
+      if (owned) {
+        rr = sel ? 0.2f : (hov ? 0.35f : 0.16f);
+        rg = sel ? 0.75f : (hov ? 0.65f : 0.5f);
+        rb = sel ? 1.0f : (hov ? 0.8f : 0.65f);
+      } else {
+        rr = 0.45f;
+        rg = 0.18f;
+        rb = 0.16f;
+      }
+      renderer.ui_rect(c.x - ms * 0.5f, c.y - ms * 0.5f, ms, ms, rr, rg, rb, owned ? 1.f : 0.45f);
+      const float label_w = renderer.ui_text_width(deploy_markers[i].name.c_str(), 1.15f);
+      renderer.ui_text(c.x - label_w * 0.5f, c.y - ms * 0.5f - 14.f, 1.15f,
+                       deploy_markers[i].name.c_str(), owned ? 0.9f : 0.55f, owned ? 0.92f : 0.45f,
+                       owned ? 0.95f : 0.42f, owned ? 1.f : 0.65f);
+      if (!owned) {
+        const float lw = renderer.ui_text_width("LOCKED", 0.85f);
+        renderer.ui_text(c.x - lw * 0.5f, c.y + ms * 0.55f, 0.85f, "LOCKED", 0.95f, 0.4f, 0.35f, 0.8f);
+      }
       if (clicked && hov) selected_spawn = static_cast<int>(i);
     }
 
+    const bool can_deploy =
+        deploy_markers.empty() || spawn_point_owned(static_cast<std::size_t>(selected_spawn));
+
     // Deploy button.
     const float bw = 240, bh = 54, bx = W - bw - 40, by = H - bh - 36;
-    const bool bhov = rect_hit(mx, my, bx, by, bw, bh);
+    const bool bhov = can_deploy && rect_hit(mx, my, bx, by, bw, bh);
     renderer.ui_rect(bx, by, bw, bh, bhov ? 0.15f : 0.1f, bhov ? 0.55f : 0.4f, bhov ? 0.25f : 0.16f,
-                     1.f);
+                     can_deploy ? 1.f : 0.45f);
     const float tw = renderer.ui_text_width("DEPLOY", 2.6f);
-    renderer.ui_text(bx + (bw - tw) * 0.5f, by + 16, 2.6f, "DEPLOY", 0.96f, 1.0f, 0.96f, 1.f);
+    renderer.ui_text(bx + (bw - tw) * 0.5f, by + 16, 2.6f, "DEPLOY", can_deploy ? 0.96f : 0.55f,
+                     can_deploy ? 1.0f : 0.55f, can_deploy ? 0.96f : 0.5f, 1.f);
     if (clicked && bhov) {
       apply_loadout();
+      if (!match_started) game_sim.begin_match();
       if (have_game_audio) game_audio.play_weapon_deploy(resources, !third_person);
       deploy_open = false;
     }
   };
 
+  bool jet_afterburner = false;
+  float last_jet_w_tap = -10.f;
+  bool jet_w_was_down = false;
+  bool jet_gear_toggle = false;
+
   while (running) {
     bool launch_requested = false;  // set by the T key, serviced after camera update
     bool kamikaze_launch_requested = false;
     bool heli_flare_requested = false;  // set by X while piloting a helicopter
+    bool pending_enter_exit = false;
+    int pending_seat_switch = -1;
     deploy_click = false;
     air_stick_moved = false;
+    jet_gear_toggle = false;
     // Free the cursor for menu interaction; capture it for mouse-look otherwise.
     const SDL_bool want_rel = (mouse_look && !deploy_open) ? SDL_TRUE : SDL_FALSE;
     if (SDL_GetRelativeMouseMode() != want_rel) SDL_SetRelativeMouseMode(want_rel);
@@ -2703,7 +2763,8 @@ int main(int argc, char** argv) {
           pause_open = true;  // in-game pause menu (Alt+F4 / window X to quit)
         }
       } else if (deploy_open && e.type == SDL_MOUSEWHEEL) {
-        deploy_faction_scroll -= e.wheel.y * 24.f;
+        deploy_side1_scroll -= e.wheel.y * 24.f;
+        deploy_side2_scroll -= e.wheel.y * 24.f;
       } else if (deploy_open && e.type == SDL_MOUSEBUTTONDOWN &&
                  e.button.button == SDL_BUTTON_LEFT) {
         deploy_click = true;
@@ -2721,86 +2782,10 @@ int main(int argc, char** argv) {
       } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_v && have_soldier) {
         third_person = !third_person;
       } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_e && !drone_mode) {
-        // Enter the nearest vehicle, or exit the current one (BF2-style).
-        if (in_vehicle >= 0) {
-          // Dismount: step out beside the vehicle onto whatever solid surface is
-          // there. Using the vehicle's own height as the reference means you step
-          // onto a carrier deck / bridge instead of dropping through it to the sea
-          // floor below (find_safe_spawn probes the deck and clears hulls/walls).
-          Vehicle& v = vehicles[in_vehicle];
-          const float hd = glm::radians(v.heading);
-          const glm::vec3 side(std::cos(hd), 0.f, -std::sin(hd));
-          glm::vec3 want = v.pos + side * 4.0f;
-          want.y = v.pos.y;  // reference height for the deck/surface probe
-          const glm::vec3 safe = find_safe_spawn(want);
-          player.position = {safe.x, safe.y + player.eye_height + 0.3f, safe.z};
-          player.vertical_velocity = 0.f;
-          // Level a helicopter's attitude on exit so a parked airframe doesn't
-          // stay frozen mid-bank, and rebuild its transform level.
-          if (v.is_air) {
-            v.pitch = 0.f;
-            v.roll = 0.f;
-            v.vel = glm::vec3(0.f);
-            const float hrad = glm::radians(v.heading);
-            v.model = glm::rotate(glm::translate(glm::mat4(1.0f), v.pos), hrad, glm::vec3(0, 1, 0));
-          }
-          for (auto& s : v.seats) s.occupant = -1;  // crew leaves with the player
-          // Resume the on-foot view facing the way the vehicle pointed, and clear
-          // any leftover flight-stick deflection.
-          yaw = 90.f - v.heading;
-          air_pitch_stick = air_roll_stick = 0.f;
-          in_vehicle = -1;
-          player_seat = 0;
-        } else {
-          int best = -1;
-          float best_d2 = 6.0f * 6.0f;  // enter radius (m)
-          for (std::size_t i = 0; i < vehicles.size(); ++i) {
-            // Only real vehicles (skip static props / stationary weapons).
-            if (vehicles[i].mesh_key.find("vehicles/") == std::string::npos) continue;
-            const glm::vec3 d(vehicles[i].pos.x - player.position.x, 0.f,
-                              vehicles[i].pos.z - player.position.z);
-            const float d2 = d.x * d.x + d.z * d.z;
-            if (d2 < best_d2) {
-              best_d2 = d2;
-              best = static_cast<int>(i);
-            }
-          }
-          if (best >= 0) {
-            in_vehicle = best;
-            player_seat = 0;  // you always board into the driver/pilot seat
-            air_pitch_stick = air_roll_stick = 0.f;
-            Vehicle& nv = vehicles[best];
-            for (auto& s : nv.seats) s.occupant = -1;
-            if (!nv.seats.empty()) nv.seats[0].occupant = 0;    // you drive/pilot
-            if (nv.seats.size() > 1) nv.seats[1].occupant = 1;  // an AI mans the gun
-            // BF2 captures the mouse for flight — relative look must stay on.
-            if (nv.is_air) {
-              mouse_look = true;
-              SDL_SetRelativeMouseMode(SDL_TRUE);
-              int dx = 0, dy = 0;
-              SDL_GetRelativeMouseState(&dx, &dy);  // discard warp delta
-              nv.pitch = 0.f;
-              nv.roll = 0.f;
-              nv.vel = glm::vec3(0.f);
-              nv.throttle = 0.f;
-              nv.wheels_on_ground = true;
-              air_pitch_stick = air_roll_stick = 0.f;
-              air_input_grace = 0.35f;
-            }
-          }
-        }
+        pending_enter_exit = true;
       } else if (e.type == SDL_KEYDOWN && in_vehicle >= 0 && e.key.keysym.sym >= SDLK_F1 &&
                  e.key.keysym.sym <= SDLK_F8) {
-        // BF2-style seat switch: F1..Fn select a crew seat. If a bot is there it
-        // swaps into your vacated seat (so an AI can take over the controls).
-        const int want = static_cast<int>(e.key.keysym.sym - SDLK_F1);
-        Vehicle& v = vehicles[in_vehicle];
-        if (want < static_cast<int>(v.seats.size()) && want != player_seat) {
-          const int prev = v.seats[want].occupant;      // -1 empty, 1 AI
-          v.seats[player_seat].occupant = prev == 1 ? 1 : -1;  // bot takes old seat
-          v.seats[want].occupant = 0;                    // you take the new seat
-          player_seat = want;
-        }
+        pending_seat_switch = static_cast<int>(e.key.keysym.sym - SDLK_F1);
       } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_f) {
         ballistic = !ballistic;
       } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_r && !drone_mode &&
@@ -2816,6 +2801,10 @@ int main(int argc, char** argv) {
         }
       } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_t && !drone_mode) {
         launch_requested = true;  // fire an AT missile (from a launcher/vehicle)
+      } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_g && !drone_mode &&
+                 in_vehicle >= 0 && in_vehicle < static_cast<int>(vehicles.size()) &&
+                 vehicles[in_vehicle].is_air && !vehicles[in_vehicle].is_heli && player_seat == 0) {
+        jet_gear_toggle = true;
       } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_g && !drone_mode &&
                  in_vehicle < 0 && !deploy_open) {
         // Throw a frag grenade in an arc along the aim direction.
@@ -2909,9 +2898,11 @@ int main(int argc, char** argv) {
         const float sens_scale = sensitivity / 0.12f;
         const float pitch_sens = (av.is_heli ? 0.020f : 0.032f) * sens_scale;
         const float roll_sens = (av.is_heli ? 0.016f : 0.018f) * sens_scale;
+        const float ground_pitch_scale =
+            (!av.is_heli && av.wheels_on_ground && !av.jet_airborne) ? 0.28f : 1.f;
         // Pull back on stick (mouse toward you / cursor down) = positive pitch input.
-        air_pitch_stick =
-            std::clamp(air_pitch_stick + e.motion.yrel * pitch_sens * inv, -1.f, 1.f);
+        air_pitch_stick = std::clamp(
+            air_pitch_stick + e.motion.yrel * pitch_sens * inv * ground_pitch_scale, -1.f, 1.f);
         if (av.is_heli) {
           air_roll_stick = std::clamp(air_roll_stick + e.motion.xrel * roll_sens, -1.f, 1.f);
         } else if (!av.wheels_on_ground) {
@@ -2957,13 +2948,6 @@ int main(int argc, char** argv) {
     float dt = static_cast<float>(now - prev) / static_cast<float>(SDL_GetPerformanceFrequency());
     prev = now;
     dt = std::clamp(dt, 0.f, 0.05f);
-    air_input_grace = std::max(0.f, air_input_grace - dt);
-    if (in_vehicle >= 0 && vehicles[in_vehicle].is_air && player_seat == 0 &&
-        air_input_grace <= 0.f && !air_stick_moved) {
-      const float decay = std::exp(-5.f * dt);
-      air_pitch_stick *= decay;
-      air_roll_stick *= decay;
-    }
 
     // Pump the network early so this frame renders the freshest remote states.
     // `net_fired` / `net_fire_*` capture a shot taken this frame for replication.
@@ -3013,29 +2997,123 @@ int main(int argc, char** argv) {
       signal = 1.f;
     }
 
-    // Rotor spool: aircraft you're piloting wind up to full RPM over a few
-    // seconds; parked/exited ones wind back down. Rotor blade angle accumulates
-    // at a rate proportional to RPM, so a parked heli's blades sit still.
-    {
-      const float fdt = dt > 0.f ? dt : 1.f / 60.f;
-      for (std::size_t i = 0; i < vehicles.size(); ++i) {
-        Vehicle& av = vehicles[i];
-        if (!av.is_air) continue;
-        const float target = (static_cast<int>(i) == in_vehicle) ? 1.f : 0.f;
-        const float rate = target > av.rotor_rpm ? 1.f / 6.f : 1.f / 4.f;  // 6s up, 4s down
-        av.rotor_rpm = glm::clamp(av.rotor_rpm + glm::clamp(target - av.rotor_rpm, -rate * fdt,
-                                                            rate * fdt),
-                                  0.f, 1.f);
-        av.rotor_spin += fdt * 62.f * av.rotor_rpm;  // spin scales with RPM
+    const Uint8* keys = SDL_GetKeyboardState(nullptr);
+    const Uint32 mouse = SDL_GetMouseState(nullptr, nullptr);
+    voice_cooldown = std::max(0.f, voice_cooldown - dt);
+    medkit_cd = std::max(0.f, medkit_cd - dt);
+    snapshot_log_timer += dt;
+
+    if (!drone_mode) {
+      if (shot_missile && frame_no == std::max(2, shot_frames - 12)) launch_requested = true;
+      dalian::PlayerInput inp{};
+      const bool in_jet_pilot =
+          in_vehicle >= 0 && in_vehicle < static_cast<int>(vehicles.size()) &&
+          vehicles[in_vehicle].is_air && !vehicles[in_vehicle].is_heli && player_seat == 0;
+      if (keys != nullptr && !deploy_open) {
+        glm::vec3 move(0.f);
+        if (keys[SDL_SCANCODE_W]) move += flat_front;
+        if (keys[SDL_SCANCODE_S]) move -= flat_front;
+        if (keys[SDL_SCANCODE_D]) move += right;
+        if (keys[SDL_SCANCODE_A]) move -= right;
+        inp.move_wish = move;
+        inp.sprint = keys[SDL_SCANCODE_LSHIFT];
+        inp.jump = keys[SDL_SCANCODE_SPACE];
+        const bool w_down = keys[SDL_SCANCODE_W];
+        if (in_jet_pilot) {
+          if (w_down && !jet_w_was_down) {
+            const float t = game_sim.state().round_time;
+            if (t - last_jet_w_tap < 0.38f) jet_afterburner = !jet_afterburner;
+            last_jet_w_tap = t;
+          }
+          if (keys[SDL_SCANCODE_LCTRL]) jet_afterburner = true;
+          const float sprint =
+              in_vehicle >= 0 ? vehicles[in_vehicle].jet_sprint : 0.f;
+          if (jet_afterburner && sprint <= 0.01f) jet_afterburner = false;
+          inp.boost = jet_afterburner && sprint > 0.01f;
+        } else {
+          inp.boost = keys[SDL_SCANCODE_LSHIFT];
+        }
+        jet_w_was_down = w_down;
+        inp.gear_toggle = jet_gear_toggle;
+        inp.throttle_up = keys[SDL_SCANCODE_W];
+        inp.throttle_down = keys[SDL_SCANCODE_S];
+        inp.yaw_left = keys[SDL_SCANCODE_A];
+        inp.yaw_right = keys[SDL_SCANCODE_D];
       }
-    }
-    // Ground-vehicle wheel spin (roll angle from road speed).
-    {
-      const float fdt = dt > 0.f ? dt : 1.f / 60.f;
-      for (auto& gv : vehicles) {
-        if (gv.is_air || gv.wheels.empty()) continue;
-        const float rate = gv.speed / 0.32f;
-        for (float& ws : gv.wheel_spin) ws += rate * fdt;
+      inp.look_forward = front;
+      inp.look_right = right;
+      inp.eye = glm::vec3(player.position.x, player.position.y, player.position.z);
+      inp.fire = (mouse & SDL_BUTTON(SDL_BUTTON_LEFT)) != 0;
+      inp.fire_secondary = (mouse & SDL_BUTTON(SDL_BUTTON_RIGHT)) != 0;
+      inp.invert_air = settings.invert_air;
+      inp.deploy_open = deploy_open;
+      inp.mouse_look = mouse_look;
+      inp.drone_mode = false;
+      inp.reloading_blocked = reloading;
+      inp.air_pitch_stick = air_pitch_stick;
+      inp.air_roll_stick = air_roll_stick;
+      inp.air_stick_moved = air_stick_moved;
+      inp.enter_exit = pending_enter_exit;
+      inp.seat_switch = pending_seat_switch;
+      inp.launch_missile = launch_requested;
+      inp.flare_request = heli_flare_requested;
+      pending_enter_exit = false;
+      pending_seat_switch = -1;
+      launch_requested = false;
+      heli_flare_requested = false;
+      game_sim.tick(dt, inp);
+      if (in_jet_pilot && jet_afterburner && in_vehicle >= 0 &&
+          vehicles[in_vehicle].jet_sprint > 0.01f) {
+        const Vehicle& jv = vehicles[in_vehicle];
+        for (const glm::vec3& ex : {jv.jet_exhaust_l, jv.jet_exhaust_r}) {
+          const glm::vec4 wp = jv.model * glm::vec4(ex, 1.f);
+          smoke.push_back({glm::vec3(wp), 0.f, 0.28f});
+        }
+      }
+      const auto& ev = game_sim.events();
+      if (ev.fired_shot) {
+        net_fired = true;
+        net_fire_o = ev.fire_origin;
+        net_fire_d = ev.fire_dir;
+        if (have_game_audio) game_audio.play_weapon_fire(resources, !third_person);
+      }
+      if (ev.play_reload && have_game_audio) {
+        game_audio.play_weapon_reload(resources, !third_person);
+        game_audio.play_voice(resources, voice_bank, "AUTO_MOODGP_reloading");
+      }
+      if (ev.out_of_ammo_voice && voice_cooldown <= 0.f && have_game_audio) {
+        game_audio.play_voice(resources, voice_bank, "out_of_ammo");
+        voice_cooldown = 2.5f;
+      }
+      if (ev.open_deploy && !match_over) {
+        deploy_open = true;
+        pick_spawnable();
+      }
+      if (!ev.voice_cue.empty() && have_game_audio && voice_cooldown <= 0.f) {
+        if (dalian::play_conquest_voice(resources, game_audio, voice_bank, ev.voice_cue)) {
+          voice_cooldown = 1.8f;
+        }
+      }
+      if (ev.vehicle_exited) {
+        yaw = ev.exit_yaw_deg;
+        air_pitch_stick = air_roll_stick = 0.f;
+        jet_afterburner = false;
+      }
+      if (ev.capture_mouse) {
+        mouse_look = true;
+        SDL_SetRelativeMouseMode(SDL_TRUE);
+      }
+      if (ev.discard_mouse_delta) {
+        int dx = 0, dy = 0;
+        SDL_GetRelativeMouseState(&dx, &dy);
+      }
+      if (std::getenv("BF2_SNAPSHOT_DEBUG") && snapshot_log_timer >= 1.f) {
+        snapshot_log_timer = 0.f;
+        const auto snap = game_sim.build_snapshot(1, yaw);
+        std::cout << "[snapshot] t=" << snap.round_time << " tickets=" << snap.tickets.team1_tickets
+                  << "/" << snap.tickets.team2_tickets << " cps=" << snap.control_points.size()
+                  << " vehicles=" << snap.vehicles.size() << " projectiles=" << snap.projectiles.size()
+                  << '\n';
       }
     }
 
@@ -3080,8 +3158,7 @@ int main(int argc, char** argv) {
       }
     }
 
-    // Movement.
-    const Uint8* keys = SDL_GetKeyboardState(nullptr);
+    // Drone piloting (not yet in GameSim).
     if (drone_mode) {
       // Fly the quad: W/S set throttle, A/D yaw, mouse pitch/roll (self-centring).
       if (keys != nullptr) {
@@ -3141,796 +3218,12 @@ int main(int argc, char** argv) {
       // The operator's body stays put while piloting.
       player.desired_velocity = {0.f, 0.f, 0.f};
       world.step_character(player, dt > 0.f ? dt : 1.f / 60.f);
-    } else if (in_vehicle >= 0) {
-      // ---- Vehicle driving ----------------------------------------------
-      Vehicle& v = vehicles[in_vehicle];
-      const float step = dt > 0.f ? dt : 1.f / 60.f;
-      const bool boost = keys != nullptr && keys[SDL_SCANCODE_LSHIFT];
-      // Move the vehicle by `delta`, but crash-stop against solid obstacles
-      // (building walls, etc). We cast along the travel direction from bumper
-      // height and only block on near-vertical surfaces (|normal.y| small) so
-      // that terrain slopes and ramps don't falsely stop the vehicle. Returns
-      // true if it hit something (so the caller can kill momentum).
-      const float veh_radius = v.is_air ? 3.0f : 2.4f;
-      auto move_vehicle = [&](const glm::vec3& delta) -> bool {
-        const float dist = glm::length(glm::vec3(delta.x, 0.f, delta.z));
-        if (dist < 1e-4f) {
-          v.pos += delta;
-          return false;
-        }
-        const glm::vec3 d = glm::normalize(glm::vec3(delta.x, 0.f, delta.z));
-        const glm::vec3 o(v.pos.x, v.pos.y + 1.2f, v.pos.z);
-        const auto hit = world.raycast({o.x, o.y, o.z}, {d.x, d.y, d.z}, dist + veh_radius);
-        if (hit.hit && hit.distance < dist + veh_radius && std::fabs(hit.normal.y) < 0.6f) {
-          // Stop just short of the wall; slide is intentionally disabled so it
-          // reads as a real crash rather than a smooth glide.
-          const float back = std::max(0.f, hit.distance - veh_radius);
-          v.pos += d * back;
-          return true;
-        }
-        v.pos += delta;
-        return false;
-      };
-      // Landing surface for aircraft: the terrain, or a solid deck below the
-      // aircraft (carrier flight deck / helipad on a structure). Lets aircraft
-      // take off from and set down on the carrier instead of sinking to the sea.
-      auto air_floor = [&]() -> float {
-        float f = world.terrain_height(v.pos.x, v.pos.z);
-        const auto dn = world.raycast({v.pos.x, v.pos.y + 4.f, v.pos.z}, {0.f, -1.f, 0.f}, 220.f);
-        if (dn.hit && std::fabs(dn.normal.y) > 0.4f && dn.point.y > f + 1.0f &&
-            dn.point.y <= v.pos.y + 4.f) {
-          f = dn.point.y;
-        }
-        return f + v.land_clearance;
-      };
-      const bool driving = player_seat == 0;  // only the pilot/driver flies it
-      if (v.is_air && v.is_heli) {
-        // ---- BF2 helicopter flight (matches the retail control scheme) ----
-        //   W / S       collective: increase (W) / decrease (S) motor — up/down
-        //   A / D       yaw (tail rotor) — turn left / right
-        //   Mouse X     roll/slide (bank); Mouse Y cyclic pitch (fwd/back tilt)
-        //   Shift       extra power (boost)
-        // The cyclic is an ATTITUDE command that holds where you leave it, so you
-        // actively fly it level (there's no auto-centre) — pure BF2 feel.
-        // Off the pilot seat an autopilot holds a stable hover so you can shoot.
-        float coll_in = 0.f, yaw_in = 0.f;
-        float pitch_cmd = 0.f, roll_cmd = 0.f;
-        // Deeper nose-over range so you can really tip forward and accelerate; roll
-        // is a gentler range — BF2 strafe uses only SLIGHT mouse left/right.
-        const float max_pitch = 42.f, max_roll = 28.f;
-        if (driving && keys != nullptr) {
-          if (keys[SDL_SCANCODE_W]) coll_in += 1.f;  // climb
-          if (keys[SDL_SCANCODE_S]) coll_in -= 1.f;  // descend
-          if (keys[SDL_SCANCODE_SPACE]) coll_in += 1.f;  // fine climb (alt)
-          if (keys[SDL_SCANCODE_LCTRL]) coll_in -= 1.f;  // fine descend (alt)
-          if (keys[SDL_SCANCODE_A]) yaw_in += 1.f;   // yaw left
-          if (keys[SDL_SCANCODE_D]) yaw_in -= 1.f;   // yaw right
-          // Cyclic tilt from the flight stick: mouse forward (stick < 0) tips the
-          // nose down to fly forward. Roll is INVERTED here so mouse-left banks
-          // left / mouse-right banks right (matching how BF2 reads), and the
-          // gentler max makes the bank progressive across the mouse range.
-          pitch_cmd = air_pitch_stick * max_pitch;
-          roll_cmd = -air_roll_stick * max_roll;
-        }
-        // Rotor must be spun up before it can fly; all authority scales with RPM,
-        // so a freshly-entered heli spools up for a few seconds before lifting.
-        const float authority = v.rotor_rpm;
-        auto approach = [&](float cur, float cmd, float rate) {
-          return cur + (cmd - cur) * std::min(1.f, rate * step);
-        };
-        v.pitch = approach(v.pitch, pitch_cmd * authority, 3.4f);
-        v.roll = approach(v.roll, roll_cmd * authority, 2.8f);
-        // Yaw the aircraft from the pedals (turns while hovering, too).
-        v.heading += yaw_in * 48.f * step * authority;
-        const float hd = glm::radians(v.heading);
-        const glm::vec3 fwd(std::sin(hd), 0.f, std::cos(hd));
-        const glm::vec3 rgt(std::cos(hd), 0.f, -std::sin(hd));  // aircraft right
-        // Horizontal thrust from the cyclic: nose-down (pitch<0) pushes forward,
-        // and banking (roll) slides the chopper sideways — the BF2 "strafe".
-        const float pwr = (boost ? 46.f : 32.f) * authority;
-        v.vel += fwd * (-std::sin(glm::radians(v.pitch)) * pwr) * step;
-        v.vel += rgt * (std::sin(glm::radians(v.roll)) * pwr * 0.7f) * step;
-        // Collective lift vs gravity: neutral collective at full RPM holds a
-        // hover; W adds lift to climb, S removes it to descend. When nobody is
-        // flying, the autopilot bleeds off any climb/sink to hold altitude.
-        float lift;
-        if (driving) {
-          lift = (9.81f + coll_in * 15.f) * authority;
-        } else {
-          lift = (9.81f - v.vel.y * 2.0f) * authority;  // hover hold
-          v.pitch = approach(v.pitch, 0.f, 2.0f);       // autopilot levels out
-          v.roll = approach(v.roll, 0.f, 2.0f);
-        }
-        v.vel.y += (lift - 9.81f) * step;
-        // Aerodynamic drag (stronger horizontally) bleeds momentum.
-        v.vel.x -= v.vel.x * 0.9f * step;
-        v.vel.z -= v.vel.z * 0.9f * step;
-        v.vel.y -= v.vel.y * 1.4f * step;
-        v.vel = glm::clamp(v.vel, glm::vec3(-95.f), glm::vec3(95.f));
-        // Integrate horizontally (with building collision), then vertically.
-        if (move_vehicle(glm::vec3(v.vel.x, 0.f, v.vel.z) * step)) {
-          v.vel.x *= 0.1f;
-          v.vel.z *= 0.1f;
-        }
-        v.pos.y += v.vel.y * step;
-        // Land on terrain or a deck below, using the true skid height.
-        const float floor_y = air_floor();
-        if (v.pos.y < floor_y) {
-          v.pos.y = floor_y;
-          if (v.vel.y < 0.f) v.vel.y = 0.f;
-          // Settle to level once the skids are on the ground.
-          v.pitch = approach(v.pitch, 0.f, 4.0f);
-          v.roll = approach(v.roll, 0.f, 4.0f);
-        }
-        // Diagnostic (BF2_HELIDEMO): pin an airborne bank so a headless capture
-        // shows the pitch/roll attitude model. No effect in normal play.
-        if (std::getenv("BF2_HELIDEMO")) {
-          v.rotor_rpm = 1.f;
-          v.pitch = -18.f;
-          v.roll = 28.f;
-          v.pos.y = world.terrain_height(v.pos.x, v.pos.z) + 25.f;
-        }
-      } else if (v.is_air) {
-        // ---- BF2 fixed-wing jet ------------------------------------------------
-        // Ground: W throttle, A/D rudder, pull BACK on mouse to rotate once rolling.
-        // Air: mouse pitch/roll; bank to turn. Stick springs to center when released.
-        auto approach = [&](float cur, float cmd, float rate) {
-          return cur + (cmd - cur) * std::min(1.f, rate * step);
-        };
-        constexpr float kTakeoff = 28.f;    // ~100 km/h
-        constexpr float kRotateMin = 12.f;  // start reading rotation input
-
-        float thr_in = 0.f, yaw_in = 0.f;
-        if (driving && keys != nullptr) {
-          if (keys[SDL_SCANCODE_W]) thr_in += 1.f;
-          if (keys[SDL_SCANCODE_S]) thr_in -= 1.f;
-          if (keys[SDL_SCANCODE_A]) yaw_in -= 1.f;
-          if (keys[SDL_SCANCODE_D]) yaw_in += 1.f;
-        }
-        v.throttle = glm::clamp(v.throttle + thr_in * step * 0.55f, 0.f, 1.f);
-        if (thr_in <= 0.f) v.throttle = glm::max(0.f, v.throttle - step * 0.05f);
-
-        const float floor_y = air_floor();
-        const float hd = glm::radians(v.heading);
-        const glm::vec3 flat_fwd(std::sin(hd), 0.f, std::cos(hd));
-        float fwd_spd = glm::dot(glm::vec3(v.vel.x, 0.f, v.vel.z), flat_fwd);
-        const bool on_ground = v.pos.y <= floor_y + 0.22f && v.vel.y <= 1.2f;
-        v.wheels_on_ground = on_ground;
-
-        if (on_ground) {
-          v.pos.y = floor_y;
-          v.vel.y = 0.f;
-          v.roll = approach(v.roll, 0.f, 14.f);
-          air_roll_stick = approach(air_roll_stick, 0.f, 12.f);
-
-          const float thrust = (boost ? 38.f : 26.f) * v.throttle;
-          if (v.throttle > 0.04f && thr_in >= 0.f)
-            fwd_spd += thrust * step;
-          else
-            fwd_spd -= (thr_in < 0.f ? 34.f : 11.f) * step *
-                       glm::max(0.15f, std::fabs(fwd_spd) / 15.f);
-          fwd_spd = glm::clamp(fwd_spd, -5.f, boost ? 58.f : 48.f);
-          v.vel = flat_fwd * fwd_spd;
-
-          const float steer = 42.f * glm::clamp(std::fabs(fwd_spd) / 10.f, 0.08f, 1.f);
-          v.heading += yaw_in * steer * step;
-
-          // Pull back (positive pitch stick) to rotate nose up once rolling.
-          if (fwd_spd >= kRotateMin && air_pitch_stick > 0.04f) {
-            const float t = glm::clamp((fwd_spd - kRotateMin) / (kTakeoff - kRotateMin), 0.f, 1.f);
-            v.pitch = approach(v.pitch, air_pitch_stick * 24.f * t, 6.f);
-          } else {
-            v.pitch = approach(v.pitch, 0.f, 12.f);
-          }
-
-          if (move_vehicle(flat_fwd * fwd_spd * step)) fwd_spd *= 0.15f;
-          v.vel = flat_fwd * fwd_spd;
-
-          if (fwd_spd >= kTakeoff && v.pitch >= 5.f) {
-            v.vel = flat_fwd * fwd_spd;
-            v.vel.y = std::sin(glm::radians(v.pitch)) * fwd_spd * 0.32f;
-            v.pos.y += v.vel.y * step;
-            if (v.pos.y <= floor_y + 0.22f) {
-              v.pos.y = floor_y;
-              v.vel.y = 0.f;
-            } else {
-              v.wheels_on_ground = false;
-            }
-          }
-        } else {
-          v.wheels_on_ground = false;
-          float spd = glm::length(v.vel);
-          const float ctrl = glm::clamp(spd / 30.f, 0.4f, 1.f);
-
-          // Pitch: pull back = nose up. Roll: mouse left = bank left.
-          v.pitch += air_pitch_stick * 55.f * ctrl * step;
-          v.roll -= air_roll_stick * 50.f * ctrl * step;
-          v.pitch = glm::clamp(v.pitch, -55.f, 55.f);
-          v.roll = glm::clamp(v.roll, -75.f, 75.f);
-
-          const float bank_turn =
-              std::sin(glm::radians(v.roll)) * 52.f * glm::clamp(spd / 26.f, 0.f, 1.f);
-          v.heading += (bank_turn + yaw_in * 22.f) * step;
-
-          const float pr = glm::radians(v.pitch);
-          const glm::vec3 nose(std::sin(hd) * std::cos(pr), std::sin(pr),
-                               std::cos(hd) * std::cos(pr));
-          const float max_thrust = boost ? 52.f : 34.f;
-          v.vel += nose * (v.throttle * max_thrust) * step;
-
-          spd = glm::length(v.vel);
-          if (spd > 24.f)
-            v.vel = glm::mix(v.vel, nose * spd, std::min(1.f, 1.1f * step));
-          v.vel -= v.vel * (0.08f + 0.0025f * spd) * step;
-
-          const float lift = glm::clamp(spd / kTakeoff, 0.f, 1.f);
-          v.vel.y -= 9.81f * (1.f - lift) * step;
-          v.vel = glm::clamp(v.vel, glm::vec3(-200.f), glm::vec3(200.f));
-
-          if (move_vehicle(glm::vec3(v.vel.x, 0.f, v.vel.z) * step)) {
-            v.vel.x *= 0.12f;
-            v.vel.z *= 0.12f;
-          }
-          v.pos.y += v.vel.y * step;
-
-          if (v.pos.y <= floor_y + 0.22f && v.vel.y <= 0.f) {
-            v.pos.y = floor_y;
-            v.vel.y = 0.f;
-            v.wheels_on_ground = true;
-            v.roll = approach(v.roll, 0.f, 8.f);
-            if (spd < kTakeoff) v.pitch = approach(v.pitch, 0.f, 6.f);
-          }
-        }
-        if (std::getenv("BF2_JETDEMO")) {
-          v.throttle = 1.f;
-          v.pitch = 12.f;
-          v.roll = 18.f;
-          v.pos.y = world.terrain_height(v.pos.x, v.pos.z) + 40.f;
-        }
-      } else {
-        // Ground vehicle: throttle + steer, glued to the terrain.
-        const float accel = 18.f, max_spd = boost ? 30.f : 20.f, brake = 34.f;
-        bool throttling = false;
-        if (driving && keys != nullptr) {
-          if (keys[SDL_SCANCODE_W]) {
-            v.speed += accel * step;
-            throttling = true;
-          }
-          if (keys[SDL_SCANCODE_S]) {
-            v.speed -= accel * step;
-            throttling = true;
-          }
-          // Steering scales with speed and reverses when backing up.
-          const float turn = 75.f * step * std::clamp(std::fabs(v.speed) / 8.f, 0.15f, 1.f);
-          const float dir = v.speed >= 0.f ? 1.f : -1.f;
-          if (keys[SDL_SCANCODE_A]) v.heading += turn * dir;
-          if (keys[SDL_SCANCODE_D]) v.heading -= turn * dir;
-          float steer_target = 0.f;
-          if (keys[SDL_SCANCODE_A]) steer_target = 0.42f;
-          if (keys[SDL_SCANCODE_D]) steer_target = -0.42f;
-          v.visual_steer = glm::mix(v.visual_steer, steer_target, 1.f - std::exp(-10.f * step));
-        }
-        if (!throttling) {  // engine braking / rolling resistance
-          const float d = brake * 0.4f * step;
-          v.speed = std::fabs(v.speed) <= d ? 0.f : v.speed - d * (v.speed > 0 ? 1.f : -1.f);
-        }
-        v.speed = std::clamp(v.speed, -max_spd * 0.5f, max_spd);
-        const float hd = glm::radians(v.heading);
-        const glm::vec3 fwd(std::sin(hd), 0.f, std::cos(hd));
-        // Crash into buildings instead of clipping through them.
-        if (move_vehicle(fwd * v.speed * step)) {
-          const float impact = std::fabs(v.speed);
-          v.speed = 0.f;
-          if (impact > 12.f) player_health -= (impact - 12.f) * 3.f;  // hard crash hurts
-        }
-        // Rest on whatever solid surface is directly beneath the chassis, not
-        // just the heightmap: casting down catches bridge decks, road props and
-        // rail beds laid over the terrain, so the vehicle drives across them
-        // instead of sinking to the ground below.
-        auto ground_at = [&](float x, float z) -> float {
-          const float terr = world.terrain_height(x, z);
-          float s = terr;
-          const float top = std::max(v.pos.y, terr) + 2.0f;
-          const auto dn = world.raycast({x, top, z}, {0.f, -1.f, 0.f}, 12.f);
-          if (dn.hit && dn.normal.y > 0.5f) s = std::max(s, top - dn.distance);
-          return s;
-        };
-        const glm::vec3 fdir(std::sin(hd), 0.f, std::cos(hd));
-        const glm::vec3 sdir(fdir.z, 0.f, -fdir.x);  // right
-        const float L = 2.4f, Wd = 1.3f;             // approx half wheelbase / track
-        const float hF = ground_at(v.pos.x + fdir.x * L, v.pos.z + fdir.z * L);
-        const float hB = ground_at(v.pos.x - fdir.x * L, v.pos.z - fdir.z * L);
-        const float hR = ground_at(v.pos.x + sdir.x * Wd, v.pos.z + sdir.z * Wd);
-        const float hL = ground_at(v.pos.x - sdir.x * Wd, v.pos.z - sdir.z * Wd);
-        v.pos.y = ground_at(v.pos.x, v.pos.z) + v.clearance;
-        // Chassis normal from the four wheel-contact heights (spans the wheelbase
-        // so it rides smoothly over bumps, like real suspension).
-        const float dFwd = (hF - hB) / (2.f * L);
-        const float dSide = (hR - hL) / (2.f * Wd);
-        const glm::vec3 target_n =
-            glm::normalize(glm::vec3(0.f, 1.f, 0.f) - fdir * dFwd - sdir * dSide);
-        const float k = 1.f - std::exp(-8.f * step);  // suspension response
-        v.ground_normal = glm::normalize(glm::mix(v.ground_normal, target_n, k));
-      }
-      // Rebuild the body transform. Aircraft bank/pitch with their flight
-      // attitude; ground vehicles tilt so the chassis up-axis follows the
-      // (smoothed) ground normal. Parts follow via v.model * part.local.
-      {
-        const float hrad = glm::radians(v.heading);
-        if (v.is_air) {
-          glm::mat4 m = glm::translate(glm::mat4(1.0f), v.pos);
-          m = glm::rotate(m, hrad, glm::vec3(0, 1, 0));                   // yaw
-          m = glm::rotate(m, glm::radians(-v.pitch), glm::vec3(1, 0, 0));  // pitch (nose down = fwd)
-          m = glm::rotate(m, glm::radians(-v.roll), glm::vec3(0, 0, 1));   // bank
-          v.model = m;
-        } else {
-          const glm::vec3 up = v.ground_normal;
-          const glm::vec3 fdir(std::sin(hrad), 0.f, std::cos(hrad));
-          const glm::vec3 rgt = glm::normalize(glm::cross(up, fdir));
-          const glm::vec3 fwd2 = glm::normalize(glm::cross(rgt, up));
-          glm::mat4 R(1.0f);
-          R[0] = glm::vec4(rgt, 0.f);
-          R[1] = glm::vec4(up, 0.f);
-          R[2] = glm::vec4(fwd2, 0.f);
-          v.model = glm::translate(glm::mat4(1.0f), v.pos) * R;
-        }
-      }
-      // Keep the soldier "with" the vehicle so re-exit / HUD stays sane.
-      player.position = {v.pos.x, v.pos.y + player.eye_height, v.pos.z};
-      player.vertical_velocity = 0.f;
-    } else if (keys != nullptr && !deploy_open) {
-      glm::vec3 move(0.f);
-      if (keys[SDL_SCANCODE_W]) move += flat_front;
-      if (keys[SDL_SCANCODE_S]) move -= flat_front;
-      if (keys[SDL_SCANCODE_D]) move += right;
-      if (keys[SDL_SCANCODE_A]) move -= right;
-      const bool wants_move = glm::length(move) > 0.001f;
-      // Sprint drains stamina; when exhausted you drop back to a jog and must
-      // recover before sprinting again.
-      const bool wants_sprint = keys[SDL_SCANCODE_LSHIFT] && wants_move;
-      const bool can_sprint = wants_sprint && player_stamina > 5.f;
-      if (can_sprint) {
-        player_stamina = std::max(0.f, player_stamina - 22.f * dt);
-      } else {
-        player_stamina = std::min(100.f, player_stamina + (wants_move ? 8.f : 16.f) * dt);
-      }
-      const float speed = can_sprint ? 12.f : 6.5f;
-      if (wants_move) {
-        move = glm::normalize(move) * speed;
-      }
-      player.desired_velocity = {move.x, 0.f, move.z};
-      if (keys[SDL_SCANCODE_SPACE] && player.on_ground) {
-        player.vertical_velocity = 6.5f;
-      }
-      world.step_character(player, dt > 0.f ? dt : 1.f / 60.f);
-      // Solid vehicles: push the walker out of any hull it walked into.
-      {
-        float px = player.position.x, pz = player.position.z;
-        if (push_out_of_vehicles(px, pz, player.position.y - player.eye_height, in_vehicle)) {
-          player.position.x = px;
-          player.position.z = pz;
-        }
-      }
-    } else {
-      player.desired_velocity = {0.f, 0.f, 0.f};
-      world.step_character(player, dt > 0.f ? dt : 1.f / 60.f);
     }
 
     const glm::vec3 eye(player.position.x, player.position.y, player.position.z);
 
-    // Shooting: automatic fire while left mouse is held.
-    voice_cooldown = std::max(0.f, voice_cooldown - dt);
-    fire_cooldown = std::max(0.f, fire_cooldown - dt);
-    muzzle_flash = std::max(0.f, muzzle_flash - dt);
-    recoil = std::max(0.f, recoil - dt * 6.f);
-    // Reload / gadget cooldowns.
-    reload_timer = std::max(0.f, reload_timer - dt);
-    medkit_cd = std::max(0.f, medkit_cd - dt);
-    if (reloading && reload_timer <= 0.f) {
-      const int need = kMagSize - mag_ammo;
-      const int take = std::min(need, reserve_ammo);
-      mag_ammo += take;
-      reserve_ammo -= take;
-      reloading = false;
-    }
-
-    const Uint32 mouse = SDL_GetMouseState(nullptr, nullptr);
-    const bool lmb = (mouse & SDL_BUTTON(SDL_BUTTON_LEFT)) != 0;
-    const bool rmb = (mouse & SDL_BUTTON(SDL_BUTTON_RIGHT)) != 0;
-    if (lmb && mouse_look && !drone_mode && in_vehicle < 0 && !deploy_open && !reloading &&
-        mag_ammo <= 0 && voice_cooldown <= 0.f) {
-      if (have_game_audio) {
-        game_audio.play_voice(resources, voice_bank, "out_of_ammo");
-        voice_cooldown = 2.5f;
-      }
-    }
-    if (lmb && mouse_look && !drone_mode && in_vehicle < 0 && !deploy_open && !reloading &&
-        mag_ammo > 0 && fire_cooldown <= 0.f) {
-      --mag_ammo;
-      // Auto-reload once the magazine runs dry.
-      if (mag_ammo == 0 && reserve_ammo > 0) {
-        reloading = true;
-        reload_timer = 2.0f;
-        if (have_game_audio) {
-          game_audio.play_weapon_reload(resources, !third_person);
-          game_audio.play_voice(resources, voice_bank, "AUTO_MOODGP_reloading");
-        }
-      }
-      fire_cooldown = 0.1f;  // ~600 rpm
-      muzzle_flash = 0.045f;
-      recoil = std::min(1.f, recoil + 0.6f);
-      if (have_game_audio) game_audio.play_weapon_fire(resources, !third_person);
-      const glm::vec3 muzzle = eye + front * 0.6f + right * 0.18f - glm::vec3(0, 1, 0) * 0.12f;
-      // Replicate this shot to other players (tracer + impact on their clients).
-      net_fired = true;
-      net_fire_o = muzzle;
-      net_fire_d = front;
-      if (ballistic) {
-        // Spawn a physical bullet from the muzzle along the aim direction.
-        projectiles.push_back({muzzle, front * kMuzzleSpeed, kBulletLife});
-      } else {
-        // Hitscan: instant ray to first hit (nearest of terrain/enemy).
-        const auto hit = world.raycast({eye.x, eye.y, eye.z}, {front.x, front.y, front.z}, 400.f);
-        const float terr = hit.hit ? hit.distance : 400.f;
-        const auto eh = shoot_enemies(eye, front, terr);
-        if (eh.idx >= 0) {
-          damage_enemy(eh.idx, eh.zone);
-          tracers.push_back({muzzle, eh.point, 0.06f});
-          impacts.push_back({eh.point, 0.4f});
-        } else {
-          const glm::vec3 end =
-              hit.hit ? glm::vec3(hit.point.x, hit.point.y, hit.point.z) : eye + front * 400.f;
-          tracers.push_back({muzzle, end, 0.06f});
-          if (hit.hit) impacts.push_back({end, 0.6f});
-        }
-      }
-    }
-
-    // ---- Helicopter weapon systems -----------------------------------------
-    heli_rocket_cd = std::max(0.f, heli_rocket_cd - dt);
-    heli_gun_cd = std::max(0.f, heli_gun_cd - dt);
-    heli_grocket_cd = std::max(0.f, heli_grocket_cd - dt);
-    heli_flare_cd = std::max(0.f, heli_flare_cd - dt);
-    if (in_vehicle >= 0 && vehicles[in_vehicle].is_air) {
-      Vehicle& hv = vehicles[in_vehicle];
-      const float hrad = glm::radians(hv.heading);
-      const float prad = glm::radians(hv.pitch);
-      // Aircraft nose direction (yaw + cyclic pitch): rockets fire along this.
-      const glm::vec3 nose = glm::normalize(glm::vec3(std::sin(hrad) * std::cos(prad),
-                                                      std::sin(prad),
-                                                      std::cos(hrad) * std::cos(prad)));
-      const glm::vec3 rightv(std::cos(hrad), 0.f, -std::sin(hrad));
-
-      // Fire an unguided rocket from `origin` along `dir`, reusing the missile
-      // flight model (no guidance, short-lived, high boost) + launch effects.
-      auto fire_rocket = [&](const glm::vec3& origin, const glm::vec3& dir) {
-        ActiveMissile am;
-        am.m.guided = false;
-        am.m.has_target = false;
-        am.m.position = origin;
-        am.m.velocity = dir * 60.f;
-        am.m.boost_accel = 190.f;
-        am.m.boost_time = 1.1f;
-        am.m.max_speed = 240.f;
-        am.m.turn_rate = 0.f;
-        am.m.life = 6.f;
-        am.m.gravity = 3.0f;  // rockets barely drop over their short flight
-        am.m.mass = 8.f;
-        am.prev_pos = origin;
-        missiles.push_back(am);
-        explosions.push_back({origin, 0.f, 0.15f});
-        smoke.push_back({origin, 0.f, 0.9f});
-      };
-
-      const bool is_pilot = player_seat == 0;
-      // Pilot: LMB ripple-fires the forward rocket pods (alternating L/R tubes).
-      if (is_pilot && lmb && mouse_look && !deploy_open && heli_rocket_cd <= 0.f) {
-        heli_rocket_cd = 0.28f;
-        static int pod_side = 0;
-        const glm::vec3 pod = hv.pos + nose * 3.0f - glm::vec3(0.f, 0.4f, 0.f) +
-                              rightv * (pod_side++ % 2 == 0 ? 1.1f : -1.1f);
-        fire_rocket(pod, nose);
-      }
-
-      // Flares (X): countermeasure burst that also decoys guided threats nearby.
-      if (heli_flare_requested && heli_flare_cd <= 0.f) {
-        heli_flare_cd = 3.0f;
-        for (int i = 0; i < 10; ++i) {
-          const float a = (static_cast<float>(i) / 10.f) * 6.2832f;
-          const glm::vec3 vv(std::cos(a) * 6.f, -2.f - (i % 3) * 2.f, std::sin(a) * 6.f);
-          flares.push_back({hv.pos - glm::vec3(0.f, 0.6f, 0.f), vv, 2.4f});
-        }
-        for (auto& am : missiles) {
-          if (am.m.alive && am.m.guided && glm::distance(am.m.position, hv.pos) < 140.f) {
-            am.m.guided = false;  // seeker distracted by the flare bloom
-            am.homing_enemy = -1;
-          }
-        }
-      }
-
-      // ---- Gunner station (chin cannon + rockets) ---------------------------
-      // The gunner seat is manned either by an AI crewman (when the player is
-      // flying) or by the player (after switching seats with F2). The gunner
-      // only shoots at an enemy it can actually see, within a forward arc, and
-      // only after briefly tracking it — no more constant chatter at nothing.
-      const int gunner_seat = 1;
-      const bool has_gunner = hv.seats.size() > gunner_seat;
-      const bool player_gunning = has_gunner && player_seat == gunner_seat;
-      const bool ai_gunning =
-          has_gunner && hv.seats[gunner_seat].occupant == 1 && player_seat != gunner_seat;
-      gunner_engaging = false;
-      if (has_gunner && (ai_gunning || player_gunning)) {
-        const glm::vec3 gun = hv.pos + glm::vec3(0.f, -0.6f, 0.f) + nose * 2.0f;
-        const glm::vec3 nose_flat = glm::normalize(glm::vec3(nose.x, 0.f, nose.z));
-
-        // Acquire/keep a visible target within range and a forward arc.
-        auto visible = [&](int i, float& out_range) -> bool {
-          if (i < 0 || i >= static_cast<int>(enemies.size()) || !enemies[i].alive) return false;
-          const glm::vec3 ep(enemies[i].pos.x, enemies[i].pos.y + 1.0f, enemies[i].pos.z);
-          const glm::vec3 to = ep - gun;
-          const float d = glm::length(to);
-          if (d < 1e-3f || d > 200.f) return false;  // sensible engagement range
-          const glm::vec3 dir = to / d;
-          const glm::vec3 dir_flat = glm::normalize(glm::vec3(dir.x, 0.f, dir.z));
-          if (glm::dot(dir_flat, nose_flat) < 0.30f) return false;  // ~72° forward arc
-          const auto h = world.raycast({gun.x, gun.y, gun.z}, {dir.x, dir.y, dir.z}, d - 1.5f);
-          if (h.hit) return false;  // no line of sight
-          out_range = d;
-          return true;
-        };
-
-        int tgt = -1;
-        float range = 0.f;
-        if (ai_gunning) {
-          // Keep the current target if still valid; otherwise pick the closest.
-          float cur_range = 0.f;
-          if (gunner_target >= 0 && visible(gunner_target, cur_range)) {
-            tgt = gunner_target;
-            range = cur_range;
-          } else {
-            float best = 1e30f;
-            for (std::size_t i = 0; i < enemies.size(); ++i) {
-              float r = 0.f;
-              if (visible(static_cast<int>(i), r) && r < best) {
-                best = r;
-                tgt = static_cast<int>(i);
-                range = r;
-              }
-            }
-          }
-          // Track for a short beat before opening fire (no snap-firing).
-          if (tgt >= 0 && tgt == gunner_target) {
-            gunner_acquire += dt;
-          } else {
-            gunner_acquire = 0.f;
-          }
-          gunner_target = tgt;
-        }
-
-        const bool ai_ready = ai_gunning && tgt >= 0 && gunner_acquire > 0.4f;
-        // The player-gunner fires on LMB along the aim; the AI fires when locked.
-        if (player_gunning) {
-          const glm::vec3 aim = front;  // player aims with the mouse
-          if (lmb && mouse_look && !deploy_open && heli_gun_cd <= 0.f) {
-            heli_gun_cd = 0.09f;
-            gunner_engaging = true;
-            const glm::vec3 sd = glm::normalize(
-                aim + glm::vec3((std::rand() % 100 - 50) / 1100.f, (std::rand() % 100 - 50) / 1100.f,
-                                (std::rand() % 100 - 50) / 1100.f));
-            const auto eh = shoot_enemies(gun, sd, 260.f);
-            if (eh.idx >= 0) {
-              damage_enemy(eh.idx, eh.zone);
-              tracers.push_back({gun, eh.point, 0.05f});
-              impacts.push_back({eh.point, 0.35f});
-            } else {
-              tracers.push_back({gun, gun + sd * 260.f, 0.05f});
-            }
-          }
-          if (rmb && heli_grocket_cd <= 0.f) {
-            heli_grocket_cd = 1.2f;
-            fire_rocket(gun + nose * 1.0f, front);
-          }
-        } else if (ai_ready) {
-          const glm::vec3 ep(enemies[tgt].pos.x, enemies[tgt].pos.y + 1.0f, enemies[tgt].pos.z);
-          const glm::vec3 dir = glm::normalize(ep - gun);
-          if (heli_gun_cd <= 0.f) {
-            heli_gun_cd = 0.11f;  // ~550 rpm cannon
-            gunner_engaging = true;
-            const glm::vec3 sd = glm::normalize(
-                dir + glm::vec3((std::rand() % 100 - 50) / 900.f, (std::rand() % 100 - 50) / 900.f,
-                                (std::rand() % 100 - 50) / 900.f));
-            const auto eh = shoot_enemies(gun, sd, range + 2.f);
-            if (eh.idx >= 0) {
-              damage_enemy(eh.idx, eh.zone);
-              tracers.push_back({gun, eh.point, 0.05f});
-              impacts.push_back({eh.point, 0.35f});
-            } else {
-              tracers.push_back({gun, gun + sd * range, 0.05f});
-            }
-          }
-          if (heli_grocket_cd <= 0.f && range < 160.f) {
-            heli_grocket_cd = 4.0f;  // periodic rocket salvo at armour/clusters
-            fire_rocket(gun + nose * 1.0f, dir);
-          }
-        }
-      } else {
-        gunner_target = -1;
-        gunner_acquire = 0.f;
-      }
-    }
-
-    // Advance / expire flares (countermeasure pyrotechnics): they fall under
-    // gravity and leave a bright trail rendered via the tracer effect.
-    for (auto& fl : flares) {
-      fl.life -= dt;
-      fl.v.y -= 6.f * dt;
-      const glm::vec3 np = fl.p + fl.v * dt;
-      tracers.push_back({fl.p, np, 0.05f});
-      fl.p = np;
-    }
-    flares.erase(std::remove_if(flares.begin(), flares.end(),
-                                [](const Flare& f) { return f.life <= 0.f; }),
-                 flares.end());
-
-    // Deterministic timestep for missile flight in headless capture so --shot can
-    // reproduce a launch; live gameplay uses the real frame dt.
+    // Deterministic timestep for client-only gadgets in headless capture.
     const float mdt = shot_path.empty() ? dt : (1.f / 60.f);
-    if (shot_missile && frame_no == std::max(2, shot_frames - 12)) launch_requested = true;
-
-    // --- Missile launcher (R): fire a guided/ballistic missile from the nearest
-    // vehicle. Locks onto an enemy under the crosshair if there is one, else
-    // arcs toward the aimed ground point (or lofts ballistically at the sky). ---
-    missile_reload = std::max(0.f, missile_reload - dt);
-    if (launch_requested && missile_reload <= 0.f) {
-      missile_reload = 1.4f;
-      // Launch from the nearest placed vehicle's turret; fall back to the
-      // player's shoulder so the launcher still works with no vehicle nearby.
-      glm::vec3 launch = eye + front * 0.8f - glm::vec3(0.f, 0.2f, 0.f);
-      float best_d2 = 70.f * 70.f;
-      for (const auto& v : vehicles) {
-        const glm::vec3 d = v.origin - eye;
-        const float d2 = glm::dot(d, d);
-        if (d2 < best_d2) {
-          best_d2 = d2;
-          launch = v.origin + glm::vec3(0.f, 2.6f, 0.f);  // ~turret/tube height
-        }
-      }
-      ActiveMissile am;
-      am.m.position = launch;
-      // Aim: lock an enemy under the crosshair, else the aimed surface point,
-      // else an unguided ballistic loft when pointed at open sky.
-      const auto th = world.raycast({eye.x, eye.y, eye.z}, {front.x, front.y, front.z}, 2000.f);
-      const float terr = th.hit ? th.distance : 2000.f;
-      const auto eh = shoot_enemies(eye, front, terr);
-      glm::vec3 aim_point;
-      if (eh.idx >= 0) {
-        am.homing_enemy = eh.idx;
-        am.m.guided = true;
-        am.m.has_target = true;
-        aim_point = glm::vec3(enemies[eh.idx].pos.x, enemies[eh.idx].pos.y + 1.0f,
-                              enemies[eh.idx].pos.z);
-      } else if (th.hit) {
-        am.m.guided = true;
-        am.m.has_target = true;
-        aim_point = glm::vec3(th.point.x, th.point.y, th.point.z);
-      } else {
-        am.m.guided = false;  // ballistic arc
-        am.m.has_target = false;
-        aim_point = eye + front * 800.f;
-      }
-      am.m.target = aim_point;
-      glm::vec3 dir0 = aim_point - launch;
-      if (glm::length(dir0) < 1e-3f) dir0 = front;
-      dir0 = glm::normalize(dir0);
-      am.m.velocity = dir0 * 55.f;  // tube-exit speed; the motor accelerates it
-      if (shot_missile) {
-        // Headless demo: fire from the camera straight down the (now open) view so
-        // the round's flight path + exhaust trail are clearly visible in frame.
-        am.m.position = eye;
-        am.prev_pos = eye;
-        am.m.boost_accel = 130.f;
-        am.m.max_speed = 260.f;
-      }
-      am.prev_pos = launch;
-      missiles.push_back(am);
-      if (std::getenv("BF2_MISSILE_DEBUG")) {
-        std::fprintf(stderr, "[missile] LAUNCH frame=%d pos=%.1f,%.1f,%.1f vel=%.1f,%.1f,%.1f\n",
-                     frame_no, am.m.position.x, am.m.position.y, am.m.position.z, am.m.velocity.x,
-                     am.m.velocity.y, am.m.velocity.z);
-      }
-      // Launch signature: bright flash + an exhaust cloud back down the tube.
-      explosions.push_back({launch, 0.f, 0.25f});
-      for (int i = 0; i < 6; ++i) {
-        smoke.push_back({launch - dir0 * (0.3f * static_cast<float>(i)), 0.f, 1.2f});
-      }
-    }
-
-    // --- Integrate live missiles: guidance + boost + gravity, spawn the exhaust
-    // trail, and detonate on contact (segment raycast), proximity, or ground. ---
-    for (auto& am : missiles) {
-      if (!am.m.alive) continue;
-      // Keep homing onto the tracked enemy's chest; drop the lock if it dies.
-      if (am.homing_enemy >= 0 && am.homing_enemy < static_cast<int>(enemies.size())) {
-        const Enemy& te = enemies[am.homing_enemy];
-        if (te.alive) {
-          am.m.target = glm::vec3(te.pos.x, te.pos.y + 1.0f, te.pos.z);
-        } else {
-          am.homing_enemy = -1;
-        }
-      }
-      am.prev_pos = am.m.position;
-      am.m.update(mdt);
-
-      const glm::vec3 seg = am.m.position - am.prev_pos;
-      const float seg_len = glm::length(seg);
-      bool detonate = false;
-      glm::vec3 boom = am.m.position;
-      if (seg_len > 1e-4f) {
-        const glm::vec3 sd = seg / seg_len;
-        const auto hit = world.raycast({am.prev_pos.x, am.prev_pos.y, am.prev_pos.z},
-                                       {seg.x, seg.y, seg.z}, seg_len);
-        const float terr_d = hit.hit ? hit.distance : 1e30f;
-        const auto eh = shoot_enemies(am.prev_pos, sd, seg_len);
-        if (eh.idx >= 0 && eh.dist < terr_d) {
-          detonate = true;
-          boom = eh.point;
-        } else if (hit.hit) {
-          detonate = true;
-          boom = glm::vec3(hit.point.x, hit.point.y, hit.point.z);
-        }
-      }
-      if (!detonate && am.homing_enemy >= 0 &&
-          am.homing_enemy < static_cast<int>(enemies.size())) {
-        const Enemy& te = enemies[am.homing_enemy];
-        const glm::vec3 chest(te.pos.x, te.pos.y + 1.f, te.pos.z);
-        if (te.alive && glm::length(chest - am.m.position) < 2.5f) {
-          detonate = true;
-          boom = am.m.position;
-        }
-      }
-      if (!detonate) {
-        const float gh = world.terrain_height(am.m.position.x, am.m.position.z);
-        if (am.m.position.y <= gh + 0.2f) {
-          detonate = true;
-          boom = glm::vec3(am.m.position.x, gh, am.m.position.z);
-        }
-      }
-      if (!am.m.alive) {  // reached end of life -> airburst
-        detonate = true;
-        boom = am.m.position;
-      }
-
-      // Exhaust trail.
-      am.smoke_timer -= mdt;
-      if (am.smoke_timer <= 0.f) {
-        am.smoke_timer = 0.012f;
-        if (smoke.size() < 6000) {
-          smoke.push_back({am.m.position - am.m.forward() * 0.6f, 0.f, 1.5f});
-        }
-      }
-
-      if (detonate) {
-        am.m.alive = false;
-        explosions.push_back({boom, 0.f, 0.7f});
-        explode_at(boom, 9.f, 150.f);
-        for (int i = 0; i < 10; ++i) smoke.push_back({boom, 0.f, 1.8f});
-        if (std::getenv("BF2_MISSILE_DEBUG")) {
-          std::fprintf(stderr, "[missile] DETONATE frame=%d at %.1f,%.1f,%.1f age=%.2f\n", frame_no,
-                       boom.x, boom.y, boom.z, am.m.age);
-        }
-      }
-    }
-    for (auto& s : smoke) s.age += mdt;
-    for (auto& ex : explosions) ex.age += mdt;
-    smoke.erase(std::remove_if(smoke.begin(), smoke.end(),
-                               [](const Smoke& s) { return s.age >= s.life; }),
-                smoke.end());
-    explosions.erase(std::remove_if(explosions.begin(), explosions.end(),
-                                    [](const Explosion& ex) { return ex.age >= ex.life; }),
-                     explosions.end());
-    missiles.erase(std::remove_if(missiles.begin(), missiles.end(),
-                                  [](const ActiveMissile& a) { return !a.m.alive; }),
-                   missiles.end());
 
     // Thrown frag grenades: ballistic arc, detonate on ground contact or fuse.
     for (auto& gr : live_grenades) {
@@ -3959,197 +3252,6 @@ int main(int argc, char** argv) {
     live_grenades.erase(std::remove_if(live_grenades.begin(), live_grenades.end(),
                                        [](const Grenade& g) { return g.fuse <= -0.5f; }),
                         live_grenades.end());
-
-    // Integrate physical projectiles: gravity + a segment raycast per frame so
-    // fast bullets can't tunnel through geometry.
-    // Gentle gusting so the wind isn't perfectly constant.
-    {
-      const float t = static_cast<float>(now) / static_cast<float>(SDL_GetPerformanceFrequency());
-      const float gust = 0.7f + 0.3f * std::sin(t * 0.37f);
-      wind = wind_base * gust;
-    }
-    for (auto& pr : projectiles) {
-      pr.life -= dt;
-      if (pr.life <= 0.f) continue;
-      pr.vel.y += kBulletGravity * dt;
-      // Quadratic drag relative to the air: slows the round and drifts it downwind.
-      const glm::vec3 rel = pr.vel - wind;
-      const float rspd = glm::length(rel);
-      if (rspd > 1e-3f) pr.vel -= rel * (kBulletDrag * rspd * dt);
-      const glm::vec3 next = pr.pos + pr.vel * dt;
-      const glm::vec3 seg = next - pr.pos;
-      const float seg_len = glm::length(seg);
-      if (seg_len > 1e-5f) {
-        const glm::vec3 sd = seg / seg_len;
-        const auto hit = world.raycast({pr.pos.x, pr.pos.y, pr.pos.z},
-                                       {seg.x, seg.y, seg.z}, seg_len);
-        const float terr = hit.hit ? hit.distance : 1e30f;
-        const auto eh = shoot_enemies(pr.pos, sd, seg_len);
-        if (eh.idx >= 0 && eh.dist < terr) {
-          damage_enemy(eh.idx, eh.zone);
-          impacts.push_back({eh.point, 0.4f});
-          tracers.push_back({pr.pos, eh.point, 0.05f});
-          pr.life = 0.f;
-          continue;
-        }
-        if (hit.hit) {
-          impacts.push_back({glm::vec3(hit.point.x, hit.point.y, hit.point.z), 0.6f});
-          // Short tracer at the terminal segment, then kill the bullet.
-          tracers.push_back({pr.pos, glm::vec3(hit.point.x, hit.point.y, hit.point.z), 0.05f});
-          pr.life = 0.f;
-          continue;
-        }
-      }
-      pr.pos = next;
-    }
-
-    for (auto& t : tracers) t.life -= dt;
-    for (auto& im : impacts) im.life -= dt;
-    tracers.erase(std::remove_if(tracers.begin(), tracers.end(),
-                                 [](const Tracer& t) { return t.life <= 0.f; }),
-                  tracers.end());
-    impacts.erase(std::remove_if(impacts.begin(), impacts.end(),
-                                 [](const Impact& im) { return im.life <= 0.f; }),
-                  impacts.end());
-    projectiles.erase(std::remove_if(projectiles.begin(), projectiles.end(),
-                                     [](const Projectile& p) { return p.life <= 0.f; }),
-                      projectiles.end());
-
-    // Enemy AI + player health. Enemies acquire the player by line of sight,
-    // ramp an "alert" awareness (reaction time), then fire controlled bursts
-    // with distance-based accuracy. Only the closest few actually shoot at once
-    // so you're never deleted by a whole garrison the instant you're seen.
-    player_regen_delay = std::max(0.f, player_regen_delay - dt);
-    if (player_regen_delay <= 0.f && player_health < 100.f) {
-      player_health = std::min(100.f, player_health + 12.f * dt);
-    }
-    constexpr float kSightRange = 65.f;   // can spot/advance from this far
-    constexpr float kEngageRange = 40.f;  // only opens fire once this close
-    constexpr int kMaxShooters = 2;       // simultaneous attackers cap
-    // Gather living enemies with LOS, sorted by distance; only the nearest few fire.
-    struct Contact { int idx; float dist; };
-    std::vector<Contact> contacts;
-    for (std::size_t i = 0; i < enemies.size(); ++i) {
-      Enemy& en = enemies[i];
-      if (!en.alive) {
-        en.death_time += dt;
-        if (en.death_time > 330.f) {  // respawn only after ~5.5 min: clear the map first
-          en.pos = en.home;
-          drop(en);
-          en.alive = true;
-          en.health = 100.f;
-          en.hit_flash = 0.f;
-          en.alert = 0.f;
-          en.burst_left = 0;
-          en.burst_cooldown = 1.f + frand();
-        }
-        continue;
-      }
-      en.hit_flash = std::max(0.f, en.hit_flash - dt);
-      en.anim_time += dt;
-      const glm::vec3 chest = en.pos + glm::vec3(0.f, 1.35f, 0.f);
-      const glm::vec3 to_player = eye - chest;
-      const float dist = glm::length(to_player);
-      bool los = false;
-      if (dist > 1e-3f && dist < kSightRange) {
-        const glm::vec3 dir = to_player / dist;
-        const auto hit = world.raycast({chest.x, chest.y, chest.z}, {dir.x, dir.y, dir.z}, dist);
-        los = !hit.hit || hit.distance >= dist - 1.5f;
-      }
-      // Alert ramps while the target is visible (reaction delay), decays otherwise.
-      // A slow ramp gives the player a real window to react or break contact —
-      // BF2-bot "sluggish", not an instant-lock aimbot.
-      en.alert = std::clamp(en.alert + (los ? dt / 1.6f : -dt / 2.5f), 0.f, 1.f);
-      en.moving = false;
-      if (los && dist < kEngageRange) {
-        en.yaw = std::atan2(to_player.x, to_player.z);
-        // Close the gap toward a preferred fighting distance; hold and shoot inside it.
-        if (dist > 35.f) {
-          const glm::vec3 step =
-              glm::normalize(glm::vec3(to_player.x, 0.f, to_player.z)) * 3.0f * dt;
-          en.pos.x += step.x;
-          en.pos.z += step.z;
-          en.moving = true;
-        }
-        contacts.push_back({static_cast<int>(i), dist});
-      } else if (los) {
-        // Spotted the player but out of engage range: advance to contact.
-        en.yaw = std::atan2(to_player.x, to_player.z);
-        const glm::vec3 step = glm::normalize(glm::vec3(to_player.x, 0.f, to_player.z)) * 2.4f * dt;
-        en.pos.x += step.x;
-        en.pos.z += step.z;
-        en.moving = true;
-      } else {
-        // No contact: idle patrol around the home post so squads feel alive.
-        const glm::vec2 to_wp(en.patrol_target.x - en.pos.x, en.patrol_target.z - en.pos.z);
-        const float wp_dist = glm::length(to_wp);
-        if (wp_dist < 1.2f) {
-          en.patrol_wait -= dt;
-          if (en.patrol_wait <= 0.f) {
-            const float a = frand() * 6.2831853f;
-            const float r = 3.f + frand() * 13.f;
-            en.patrol_target =
-                glm::vec3(en.home.x + std::cos(a) * r, 0.f, en.home.z + std::sin(a) * r);
-            en.patrol_wait = 1.5f + frand() * 3.5f;  // pause on arrival next time
-          }
-        } else {
-          const glm::vec3 step = glm::normalize(glm::vec3(to_wp.x, 0.f, to_wp.y)) * 1.5f * dt;
-          en.pos.x += step.x;
-          en.pos.z += step.z;
-          en.yaw = std::atan2(to_wp.x, to_wp.y);
-          en.moving = true;
-        }
-      }
-      drop(en);
-      // Refresh bone capsules from the current pose for next-frame hit reg.
-      const bf2::AnimationClip* clip =
-          (en.moving && have_clip_walk) ? &clip_walk : (have_clip_stand ? &clip_stand : nullptr);
-      int frame = 0;
-      if (clip && clip->frame_count > 0) frame = static_cast<int>(en.anim_time * 30.f) % clip->frame_count;
-      update_capsules(en, clip, frame);
-    }
-    // Let only the nearest shooters actually fire this frame.
-    std::sort(contacts.begin(), contacts.end(),
-              [](const Contact& a, const Contact& b) { return a.dist < b.dist; });
-    for (std::size_t c = 0; c < contacts.size(); ++c) {
-      Enemy& en = enemies[contacts[c].idx];
-      const float dist = contacts[c].dist;
-      const bool can_shoot = static_cast<int>(c) < kMaxShooters && en.alert >= 1.0f;
-      en.burst_cooldown = std::max(0.f, en.burst_cooldown - dt);
-      if (!can_shoot) continue;
-      if (en.burst_left <= 0) {
-        if (en.burst_cooldown <= 0.f) {
-          en.burst_left = 3 + (std::rand() % 3);  // 3-5 round burst
-          en.shot_timer = 0.f;
-        }
-        continue;
-      }
-      en.shot_timer -= dt;
-      if (en.shot_timer > 0.f) continue;
-      en.shot_timer = 0.14f;  // ~430 rpm within a burst
-      if (--en.burst_left <= 0) en.burst_cooldown = 2.4f + frand() * 2.4f;  // longer pause between bursts
-      const glm::vec3 chest = en.pos + glm::vec3(0.f, 1.35f, 0.f);
-      const glm::vec3 dir = glm::normalize(eye - chest);
-      const glm::vec3 muz = chest + dir * 0.3f;
-      const float sp = 0.7f + dist * 0.09f;  // spread grows quickly with range
-      const glm::vec3 aim =
-          eye + glm::vec3((frand() - 0.5f), (frand() - 0.5f), (frand() - 0.5f)) * sp;
-      tracers.push_back({muz, aim, 0.05f});
-      // Accuracy falls off sharply with distance so anything past point-blank is a
-      // real gamble; damage per round is modest so health regen keeps you alive
-      // through a burst or two if you take cover.
-      const float phit = std::clamp(0.42f - dist / 70.f, 0.02f, 0.3f);
-      if (frand() < phit && !deploy_open) {
-        player_health -= 4.f + frand() * 4.f;
-        player_regen_delay = 3.f;
-      }
-    }
-    if (player_health <= 0.f && !deploy_open) {
-      // Killed: open the deploy screen so you re-pick kit/spawn (BF2 style).
-      ++player_deaths;
-      player_health = 100.f;
-      deploy_open = true;
-    }
 
     // ---- Multiplayer: publish our state, ingest remote shots ----------------
     if (net.active()) {
@@ -4207,8 +3309,8 @@ int main(int argc, char** argv) {
       if (const char* cd = std::getenv("BF2_CHASEDIST")) dist = std::atof(cd);
       if (v.is_air && player_seat == 0) {
         const glm::vec3 center = v.pos + glm::vec3(0.f, 1.5f, 0.f);
-        if (!v.is_heli && v.wheels_on_ground) {
-          // Runway chase: level view while taxiing (BF2 — mouse not flying yet).
+        if (!v.is_heli && !v.jet_airborne) {
+          // Runway chase: level view while taxiing / rolling (BF2 — mouse not flying yet).
           const float hd = glm::radians(v.heading);
           const glm::vec3 flat_fwd(std::sin(hd), 0.f, std::cos(hd));
           cam = center - flat_fwd * dist + glm::vec3(0.f, dist * 0.22f, 0.f);
@@ -4345,6 +3447,18 @@ int main(int argc, char** argv) {
     }
 
     // Vehicles (static props at their spawn points): body + attached child parts.
+    const auto apply_gear_tuck = [](const glm::mat4& rest, float anim, float angle, int axis) {
+      if (anim <= 0.0005f) return rest;
+      const float rad = glm::radians(-anim * angle);
+      glm::mat4 tuck(1.f);
+      if (axis == 0)
+        tuck = glm::rotate(tuck, rad, glm::vec3(0, 1, 0));
+      else if (axis == 2)
+        tuck = glm::rotate(tuck, rad, glm::vec3(0, 0, 1));
+      else
+        tuck = glm::rotate(tuck, rad, glm::vec3(1, 0, 0));
+      return rest * tuck;
+    };
     for (const auto& v : vehicles) {
       const glm::vec3 d = v.origin - cam;
       if (glm::dot(d, d) > draw_dist2) continue;
@@ -4357,16 +3471,27 @@ int main(int argc, char** argv) {
                                true);
         ++drawn;
       }
+      const float gear_anim = (v.is_air && !v.is_heli) ? v.jet_gear_anim : 0.f;
       for (std::size_t wi = 0; wi < v.wheels.size(); ++wi) {
         const auto& wslot = v.wheels[wi];
         const auto wit = vehicle_cache.find(wslot.mesh_key);
         if (wit == vehicle_cache.end() || wit->second.vao == 0) continue;
-        glm::mat4 pm = v.model * wslot.rest;
+        glm::mat4 pm = v.model * apply_gear_tuck(wslot.rest, gear_anim, wslot.gear_tuck_angle,
+                                                 wslot.gear_tuck_axis);
         if (wslot.steers) pm = glm::rotate(pm, v.visual_steer, glm::vec3(0, 1, 0));
         const float spin = wi < v.wheel_spin.size() ? v.wheel_spin[wi] : 0.f;
         pm = glm::rotate(pm, spin, glm::vec3(1, 0, 0));
         const glm::mat4 mvp = view_proj * pm;
         renderer.draw_textured(wit->second, glm::value_ptr(mvp), glm::value_ptr(pm));
+        ++drawn;
+      }
+      for (const auto& gslot : v.gear_parts) {
+        const auto git = vehicle_cache.find(gslot.mesh_key);
+        if (git == vehicle_cache.end() || git->second.vao == 0) continue;
+        const glm::mat4 pm =
+            v.model * apply_gear_tuck(gslot.rest, gear_anim, gslot.gear_tuck_angle, gslot.gear_tuck_axis);
+        const glm::mat4 mvp = view_proj * pm;
+        renderer.draw_textured(git->second, glm::value_ptr(mvp), glm::value_ptr(pm));
         ++drawn;
       }
       for (const auto& part : v.parts) {
@@ -4557,10 +3682,10 @@ int main(int argc, char** argv) {
 
     // Translucent water plane at sea level, centred on the camera so it always
     // reaches the horizon. Drawn after opaque geometry so blending is correct.
-    if (atmo.has_water) {
+    if (atmo.has_water && cam.y < atmo.water_level + 400.f) {
       const float t_sec =
           static_cast<float>(now) / static_cast<float>(SDL_GetPerformanceFrequency());
-      renderer.draw_water(glm::value_ptr(view_proj), atmo.water_level, cam.x, cam.z, 3000.f, t_sec,
+      renderer.draw_water(glm::value_ptr(view_proj), atmo.water_level, cam.x, cam.z, 1800.f, t_sec,
                           glm::value_ptr(atmo.water_color));
     }
 
@@ -4890,19 +4015,39 @@ int main(int argc, char** argv) {
           renderer.ui_text(W * 0.5f - tw * 0.5f, H * 0.6f, 1.8f, p, 0.95f, 0.9f, 0.5f, 1.f);
         }
       } else if (in_vehicle >= 0 && vehicles[in_vehicle].is_air) {
-        // Helicopter cockpit HUD: altitude, an artificial horizon read-out of
-        // the current attitude, rocket/flare readiness and gunner status.
+        // Helicopter / jet cockpit HUD with radar altimeter and quaternion attitude.
         const Vehicle& v = vehicles[in_vehicle];
+        const glm::quat q_yaw = glm::angleAxis(glm::radians(v.heading), glm::vec3(0, 1, 0));
+        const glm::quat q_pitch = glm::angleAxis(glm::radians(-v.pitch), glm::vec3(1, 0, 0));
+        const glm::quat q_roll = glm::angleAxis(glm::radians(-v.roll), glm::vec3(0, 0, 1));
+        const glm::quat orient = q_yaw * q_pitch * q_roll;
+        const glm::vec3 nose = orient * glm::vec3(0.f, 0.f, 1.f);
+        const glm::vec3 body_up = orient * glm::vec3(0.f, 1.f, 0.f);
+        const float pitch_hud = glm::degrees(std::asin(glm::clamp(nose.y, -1.f, 1.f)));
+        const float bank_hud = glm::degrees(std::atan2(-body_up.x, body_up.y));
+
+        const auto alt_ray =
+            world.raycast({v.pos.x, v.pos.y + 2.f, v.pos.z}, {0.f, -1.f, 0.f}, 6000.f);
+        const float radar_alt =
+            alt_ray.hit ? std::max(0.f, alt_ray.distance - (v.is_heli ? 1.5f : v.land_clearance + 0.5f))
+                        : v.pos.y;
+        const float spd_kmh = glm::length(v.vel) * 3.6f;
+
         char buf[96];
         if (v.is_heli) {
-          std::snprintf(buf, sizeof(buf), "ALT %.0f m    SPD %.0f km/h    RPM %.0f%%", v.pos.y,
-                        glm::length(glm::vec3(v.vel.x, 0.f, v.vel.z)) * 3.6f, v.rotor_rpm * 100.f);
+          std::snprintf(buf, sizeof(buf), "ALT %.0f m    SPD %.0f km/h    RPM %.0f%%", radar_alt,
+                        spd_kmh, v.rotor_rpm * 100.f);
+          renderer.ui_text(30, H - 46, 1.8f, buf, 0.7f, 0.9f, 0.75f, 1.f);
         } else {
-          std::snprintf(buf, sizeof(buf), "ALT %.0f m    SPD %.0f km/h    THR %.0f%%", v.pos.y,
-                        glm::length(v.vel) * 3.6f, v.throttle * 100.f);
+          const bool ab_on = jet_afterburner && v.jet_sprint > 0.01f;
+          const char* gear =
+              v.jet_gear_anim > 0.95f ? "UP" : (v.jet_gear_anim < 0.05f ? "DN" : "...");
+          std::snprintf(buf, sizeof(buf), "ALT %.0f m    SPD %.0f km/h    ENG %.0f%%    AB %.0f%%    GEAR %s",
+                        radar_alt, spd_kmh, v.jet_rpm * 100.f, v.jet_sprint * 100.f, gear);
+          renderer.ui_text(30, H - 46, 1.8f, buf, ab_on ? 1.f : 0.7f, ab_on ? 0.55f : 0.9f,
+                           ab_on ? 0.25f : 0.75f, 1.f);
         }
-        renderer.ui_text(30, H - 46, 1.8f, buf, 0.7f, 0.9f, 0.75f, 1.f);
-        std::snprintf(buf, sizeof(buf), "PITCH %+.0f   BANK %+.0f", -v.pitch, v.roll);
+        std::snprintf(buf, sizeof(buf), "PITCH %+.0f   BANK %+.0f", pitch_hud, bank_hud);
         renderer.ui_text(30, H - 70, 1.4f, buf, 0.6f, 0.8f, 0.85f, 1.f);
         // Weapons block, bottom-right.
         const bool rk = heli_rocket_cd <= 0.f;
@@ -4967,6 +4112,133 @@ int main(int argc, char** argv) {
           renderer.ui_text(px + 12.f, py + 26.f + i * lh, 1.25f, line, r, g, b, 1.f);
         }
       }
+
+      // ---- Conquest HUD: ticket bleed + tactical minimap --------------------
+      if (!deploy_open && !drone_mode && !conquest_points.empty()) {
+        auto team_rgb = [](dalian::TeamId t, float& r, float& g, float& b) {
+          if (t == dalian::TeamId::Team1) {
+            r = 0.55f;
+            g = 0.75f;
+            b = 1.0f;
+          } else if (t == dalian::TeamId::Team2) {
+            r = 0.95f;
+            g = 0.35f;
+            b = 0.3f;
+          } else {
+            r = 0.5f;
+            g = 0.52f;
+            b = 0.55f;
+          }
+        };
+
+        const auto& fac_friendly = dalian::faction_at(player_faction_id);
+        const auto& fac_enemy = dalian::faction_at(enemy_faction_id);
+        const bool player_is_team1 = player_team == dalian::TeamId::Team1;
+        const int friendly_tickets =
+            player_is_team1 ? tickets.team1_tickets : tickets.team2_tickets;
+        const int enemy_tickets = player_is_team1 ? tickets.team2_tickets : tickets.team1_tickets;
+        const float bar_w = 420.f;
+        const float bar_x = W * 0.5f - bar_w * 0.5f;
+        const float bar_y = H - 52.f;
+        renderer.ui_rect(bar_x, bar_y, bar_w, 36.f, 0.05f, 0.06f, 0.08f, 0.72f);
+        renderer.ui_text(bar_x + 16.f, bar_y + 8.f, 2.4f, std::to_string(friendly_tickets).c_str(),
+                         0.65f, 0.82f, 1.0f, 1.f);
+        const float t2w = renderer.ui_text_width(std::to_string(enemy_tickets).c_str(), 2.4f);
+        renderer.ui_text(bar_x + bar_w - t2w - 16.f, bar_y + 8.f, 2.4f,
+                         std::to_string(enemy_tickets).c_str(), 0.95f, 0.4f, 0.35f, 1.f);
+        const float mid_x = bar_x + bar_w * 0.5f;
+        renderer.ui_text(mid_x - renderer.ui_text_width(fac_friendly.country, 1.1f) * 0.5f,
+                         bar_y + 22.f, 1.1f, fac_friendly.country, 0.55f, 0.7f, 0.95f, 0.85f);
+        renderer.ui_text(mid_x - renderer.ui_text_width(fac_enemy.country, 1.1f) * 0.5f, bar_y - 2.f,
+                         1.1f, fac_enemy.country, 0.9f, 0.45f, 0.4f, 0.85f);
+
+        const float mmx = 24.f;
+        const float mmy = 118.f;
+        const float mmw = 200.f;
+        const float mmh = 200.f;
+        renderer.ui_rect(mmx, mmy, mmw, mmh, 0.06f, 0.08f, 0.1f, 0.82f);
+        renderer.ui_rect(mmx, mmy, mmw, 2.f, 0.35f, 0.5f, 0.6f, 1.f);
+        glm::vec2 mn(1e30f), mx(-1e30f);
+        for (const auto& cp : conquest_points) {
+          mn.x = std::min(mn.x, cp.pos.x);
+          mn.y = std::min(mn.y, cp.pos.z);
+          mx.x = std::max(mx.x, cp.pos.x);
+          mx.y = std::max(mx.y, cp.pos.z);
+        }
+        mn.x = std::min(mn.x, player.position.x);
+        mn.y = std::min(mn.y, player.position.z);
+        mx.x = std::max(mx.x, player.position.x);
+        mx.y = std::max(mx.y, player.position.z);
+        glm::vec2 span = mx - mn;
+        if (span.x < 80.f) span.x = 80.f;
+        if (span.y < 80.f) span.y = 80.f;
+        const float pad = 18.f;
+        dalian::MinimapProjector minimap;
+        minimap.configure(mn, mx, mmx + pad, mmy + pad, mmw - 2.f * pad, mmh - 2.f * pad);
+        for (const auto& cp : conquest_points) {
+          const glm::vec2 c = minimap.world_to_minimap(cp.pos);
+          float cr, cg, cb;
+          team_rgb(cp.owner, cr, cg, cb);
+          const float sz = 10.f;
+          renderer.ui_rect(c.x - sz * 0.5f, c.y - sz * 0.5f, sz, sz, cr * 0.35f, cg * 0.35f, cb * 0.35f,
+                           0.95f);
+          renderer.ui_rect(c.x - sz * 0.5f, c.y - sz * 0.5f, sz * cp.capture_progress, sz, cr, cg, cb,
+                           0.95f);
+          if (cp.capturer != cp.owner && cp.capture_progress > 0.01f) {
+            float ar, ag, ab;
+            team_rgb(cp.capturer, ar, ag, ab);
+            renderer.ui_rect(c.x - sz * 0.5f, c.y - sz * 0.5f, sz, 2.f, ar, ag, ab, 1.f);
+          }
+        }
+        const glm::vec2 pmm = minimap.world_to_minimap(
+            {player.position.x, player.position.y - player.eye_height, player.position.z});
+        renderer.ui_rect(pmm.x - 4.f, pmm.y - 4.f, 8.f, 8.f, 0.95f, 0.95f, 0.95f, 1.f);
+        const int mins = static_cast<int>(round_time) / 60;
+        const int secs = static_cast<int>(round_time) % 60;
+        char rbuf[32];
+        std::snprintf(rbuf, sizeof(rbuf), "%d:%02d", mins, secs);
+        renderer.ui_text(mmx + 8.f, mmy + mmh + 6.f, 1.2f, rbuf, 0.75f, 0.78f, 0.82f, 0.9f);
+
+        for (const auto& cp : conquest_points) {
+          if (dalian::xz_distance_sq({player.position.x, player.position.y - player.eye_height,
+                              player.position.z},
+                             cp.pos) > cp.radius * cp.radius)
+            continue;
+          if (cp.capturer == player_team && cp.owner != player_team && cp.capture_progress > 0.01f) {
+            const int pct = static_cast<int>(cp.capture_progress * 100.f);
+            char cap[48];
+            std::snprintf(cap, sizeof(cap), "CAPTURING %s  %d%%", cp.name.c_str(), pct);
+            const float cw = renderer.ui_text_width(cap, 1.5f);
+            renderer.ui_rect(W * 0.5f - cw * 0.5f - 12.f, H * 0.72f - 8.f, cw + 24.f, 28.f, 0.05f,
+                             0.08f, 0.12f, 0.78f);
+            renderer.ui_text(W * 0.5f - cw * 0.5f, H * 0.72f, 1.5f, cap, 0.55f, 0.85f, 1.0f, 1.f);
+            break;
+          }
+        }
+      }
+
+      if (match_over && match_started && !deploy_open) {
+        const bool player_won = winning_team == player_team;
+        const char* headline = player_won ? "VICTORY" : "DEFEAT";
+        float hr, hg, hb;
+        if (player_won) {
+          hr = 0.45f;
+          hg = 0.85f;
+          hb = 1.0f;
+        } else {
+          hr = 0.95f;
+          hg = 0.35f;
+          hb = 0.3f;
+        }
+        renderer.ui_rect(W * 0.5f - 220.f, H * 0.5f - 60.f, 440.f, 120.f, 0.04f, 0.05f, 0.07f, 0.88f);
+        const float hw = renderer.ui_text_width(headline, 4.2f);
+        renderer.ui_text(W * 0.5f - hw * 0.5f, H * 0.5f - 10.f, 4.2f, headline, hr, hg, hb, 1.f);
+        char sub[96];
+        std::snprintf(sub, sizeof(sub), "Tickets  %d  -  %d", tickets.team1_tickets,
+                      tickets.team2_tickets);
+        const float sw = renderer.ui_text_width(sub, 1.6f);
+        renderer.ui_text(W * 0.5f - sw * 0.5f, H * 0.5f - 44.f, 1.6f, sub, 0.85f, 0.88f, 0.9f, 1.f);
+      }
       renderer.end_ui();
     }
 
@@ -5000,19 +4272,25 @@ int main(int argc, char** argv) {
                                     : "mouse pitch/roll, A/D yaw, W/S throttle, B recall");
       } else if (in_vehicle >= 0) {
         const Vehicle& v = vehicles[in_vehicle];
+        float drive_readout = v.is_air ? v.pos.y : v.speed * 3.6f;
+        const char* drive_unit = v.is_air ? "m alt" : "km/h";
+        if (v.is_air && !v.is_heli && v.wheels_on_ground) {
+          drive_readout = v.jet_rpm * 100.f;
+          drive_unit = "% ENG";
+        }
         std::snprintf(title, sizeof(title),
                       "Project Dalian  |  DRIVING %s  |  %.0f %s  |  HP %.0f  |  %.0f fps  |  %s",
-                      v.is_air ? "AIRCRAFT" : "GROUND",
-                      v.is_air ? v.pos.y : v.speed * 3.6f,
-                      v.is_air ? "m alt" : "km/h",
-                      player_health, dt > 0 ? 1.f / dt : 0.f,
+                      v.is_air ? "AIRCRAFT" : "GROUND", drive_readout, drive_unit, player_health,
+                      dt > 0 ? 1.f / dt : 0.f,
                       (v.is_air && v.is_heli)
-                          ? "W/S collective, A/D yaw, mouse roll+pitch, LMB rockets, "
+                          ? "W up / S down, A/D yaw, mouse cyclic, Shift boost, LMB rockets, "
                             "X flares, F1-F2 seats, E exit"
                       : v.is_air
                           ? (v.wheels_on_ground
-                                 ? "W throttle, A/D rudder, pull BACK mouse to rotate, E exit"
-                                 : "W/S throttle, mouse pitch/roll, A/D rudder, Shift boost, E exit")
+                                 ? "W spool engines, double-tap W/Ctrl afterburner, G gear, A/D "
+                                   "rudder, pull BACK after ~72 km/h to rotate, E exit"
+                                 : "W/S throttle, mouse pitch/roll, double-tap W/Ctrl afterburner, "
+                                   "G gear, A/D rudder, E exit")
                           : "W/S drive, A/D steer, Shift boost, F1-F3 seats, E exit");
       } else {
         std::snprintf(title, sizeof(title),

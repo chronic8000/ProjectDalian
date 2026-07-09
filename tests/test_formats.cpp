@@ -15,6 +15,12 @@
 #include "engine/formats/mesh/bf2_mesh.hpp"
 #include "engine/core/resource_manager.hpp"
 #include "engine/core/template_resolver.hpp"
+#include "engine/core/static_object_parser.hpp"
+#include "engine/core/overgrowth_parser.hpp"
+#include "engine/core/overgrowth_instances.hpp"
+#include "engine/core/compiled_roads_parser.hpp"
+#include "engine/formats/terrain/heightmap_cluster.hpp"
+#include "engine/formats/terrain/terrain_con_parser.hpp"
 #include "engine/formats/terrain/terrain_loader.hpp"
 #include "engine/physics/physics_world.hpp"
 #include "engine/script/con_interpreter.hpp"
@@ -68,6 +74,13 @@ int main() {
   check(placer.instances().size() == 2, "Object.create parses two placements");
   check(placer.instances().size() == 2 && placer.instances()[0].position[1] == 20.f,
         "Object.absolutePosition parses y");
+
+  check(bf2::static_object_parser_self_test(), "StaticObjectParser self-test");
+  check(bf2::terrain_con_parser_self_test(), "TerrainConParser self-test");
+  check(bf2::overgrowth_parser_self_test(), "OvergrowthParser self-test");
+  check(bf2::overgrowth_instances_self_test(), "OvergrowthInstances self-test");
+  check(bf2::compiled_roads_parser_self_test(), "CompiledRoadsParser self-test");
+  check(bf2::heightmap_cluster_self_test(), "HeightmapCluster self-test");
 
   // Character controller clamps to a flat terrain surface.
   {

@@ -21,7 +21,8 @@ public:
 
   // Returns a GL texture id for the given BF2 texture path, or 0 if it cannot be
   // found/loaded. Results (including failures) are cached.
-  std::uint32_t get(const std::string& bf2_path);
+  // mesh_folder: optional archive directory of the mesh (resolves DDS beside the mesh).
+  std::uint32_t get(const std::string& bf2_path, const std::string& mesh_folder = {});
 
   void clear();
 

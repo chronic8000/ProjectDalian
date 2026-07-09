@@ -55,7 +55,11 @@ void TemplateResolver::build_from_static_objects(const std::string& static_objec
     if (tokens.size() < 2) continue;
     if (lower(tokens[0]) != "run") continue;
     std::string con_vpath = normalize_run_path(tokens[1]);
-    if (lower(con_vpath).rfind(".con") == std::string::npos) continue;
+    const std::string lc_path = lower(con_vpath);
+    const bool is_script = lc_path.size() >= 4 &&
+                           (lc_path.rfind(".con") == lc_path.size() - 4 ||
+                            lc_path.rfind(".tweak") == lc_path.size() - 6);
+    if (!is_script) continue;
     if (std::find(visited_.begin(), visited_.end(), lower(con_vpath)) != visited_.end()) continue;
     visited_.push_back(lower(con_vpath));
     if (const auto bytes = resources_.read_bytes(con_vpath)) {
@@ -86,16 +90,45 @@ void TemplateResolver::parse_object_con(const std::string& script, const std::st
   }
 
   for (const auto& [name, geom] : template_geometry) {
-    // Preferred layout: <folder>/meshes/<geom>.staticmesh
-    const std::string candidate = folder + "/meshes/" + geom + ".staticmesh";
-    if (resources_.archives().exists(candidate)) {
-      template_to_mesh_[name] = candidate;
-      continue;
+    const std::string mesh_subdir = folder + "/meshes/" + geom;
+    const char* exts[] = {".staticmesh", ".bundledmesh"};
+    bool resolved = false;
+    for (const char* ext : exts) {
+      const std::string candidate = mesh_subdir + ext;
+      if (resources_.archives().exists(candidate)) {
+        template_to_mesh_[name] = candidate;
+        resolved = true;
+        break;
+      }
     }
-    // Fallback: <folder>/<geom>.staticmesh
-    const std::string flat = folder + "/" + geom + ".staticmesh";
-    if (resources_.archives().exists(flat)) {
-      template_to_mesh_[name] = flat;
+    if (resolved) continue;
+    // Fallback: mesh directly under object folder.
+    for (const char* ext : exts) {
+      const std::string flat = folder + "/" + geom + ext;
+      if (resources_.archives().exists(flat)) {
+        template_to_mesh_[name] = flat;
+        break;
+      }
+    }
+  }
+
+  // Follow nested `run` lines (multi-part templates, helipad .tweak siblings, etc.).
+  std::istringstream in2(script);
+  while (std::getline(in2, line)) {
+    const auto tokens = tokenize(line);
+    if (tokens.size() < 2) continue;
+    if (lower(tokens[0]) != "run") continue;
+    std::string child = normalize_run_path(tokens[1]);
+    const std::string lc_child = lower(child);
+    const bool is_script = lc_child.size() >= 4 &&
+                           (lc_child.rfind(".con") == lc_child.size() - 4 ||
+                            lc_child.rfind(".tweak") == lc_child.size() - 6);
+    if (!is_script) continue;
+    if (std::find(visited_.begin(), visited_.end(), lc_child) != visited_.end()) continue;
+    visited_.push_back(lc_child);
+    if (const auto bytes = resources_.read_bytes(child)) {
+      const std::string child_script(reinterpret_cast<const char*>(bytes->data()), bytes->size());
+      parse_object_con(child_script, child);
     }
   }
 }

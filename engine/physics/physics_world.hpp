@@ -6,6 +6,7 @@
 
 #include "engine/formats/collision/bf2_collision.hpp"
 #include "engine/formats/mesh/bf2_mesh.hpp"
+#include "engine/formats/terrain/heightmap_cluster.hpp"
 #include "engine/formats/terrain/terrain_loader.hpp"
 
 namespace bf2 {
@@ -32,6 +33,9 @@ public:
   // cell_size = world spacing between heightmap samples; centered maps the grid
   // onto world coordinates centred at the origin (BF2 convention).
   void set_terrain(const Terrain& terrain, float cell_size = 1.f, bool centered = false);
+  // When set, terrain_height() samples the full 3x3 BF2 heightmap cluster (secondary
+  // patches included) instead of the single merged/centered heightfield grid.
+  void set_heightmap_cluster(const HeightmapCluster* cluster) { heightmap_cluster_ = cluster; }
   void add_static_collision(const CollisionMesh& mesh);
   void add_body(const PhysicsBody& body);
   void step(float delta_seconds);
@@ -74,6 +78,7 @@ private:
   }
 
   Terrain terrain_{};
+  const HeightmapCluster* heightmap_cluster_ = nullptr;
   float cell_size_ = 1.f;
   bool centered_ = false;
   std::vector<CollisionMesh> static_colliders_;

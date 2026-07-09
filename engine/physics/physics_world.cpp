@@ -250,6 +250,9 @@ PhysicsWorld::RayHit PhysicsWorld::raycast(const Float3& origin, const Float3& d
 void PhysicsWorld::add_body(const PhysicsBody& body) { bodies_.push_back(body); }
 
 float PhysicsWorld::terrain_height(float x, float z) const {
+  if (heightmap_cluster_ != nullptr && heightmap_cluster_->valid()) {
+    return heightmap_cluster_->sample_height(x, z);
+  }
   if (terrain_.width == 0 || terrain_.height == 0) {
     return 0.f;
   }

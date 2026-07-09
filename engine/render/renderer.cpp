@@ -709,26 +709,17 @@ std::uint32_t create_water_program() {
     uniform float uTime;
     out vec4 FragColor;
 
-    // Sea surface built from summed DIRECTIONAL waves (Gerstner-style slopes).
-    // Value noise was producing an axis-aligned criss-cross weave; travelling
-    // sine waves aimed at off-axis, non-parallel headings roll naturally like a
-    // real swell. Each wave contributes an analytic slope so the normal (and its
-    // moving highlights) come for free without any tessellated geometry.
-    //   height h  = A * sin(dot(dir, p) * freq + t * speed)
-    //   dh/dp     = A * freq * cos(...) * dir     (used to build the normal)
+    // Sea surface built from three travelling sine waves (cheaper than six).
     vec3 seaNormal(vec2 p, out float crest) {
-      vec2 dirs[6] = vec2[](
+      vec2 dirs[3] = vec2[](
         normalize(vec2( 0.80,  0.32)),
         normalize(vec2(-0.52,  0.74)),
-        normalize(vec2( 0.28, -0.86)),
-        normalize(vec2(-0.88, -0.24)),
-        normalize(vec2( 0.16,  0.99)),
-        normalize(vec2( 0.95, -0.45)));
-      float freq[6] = float[](0.028, 0.049, 0.083, 0.13, 0.20, 0.31);
-      float amp[6]  = float[](1.00, 0.62, 0.38, 0.22, 0.13, 0.08);
-      float spd[6]  = float[](0.42, 0.63, 0.85, 1.15, 1.55, 2.0);
+        normalize(vec2( 0.28, -0.86)));
+      float freq[3] = float[](0.035, 0.062, 0.11);
+      float amp[3]  = float[](1.00, 0.55, 0.30);
+      float spd[3]  = float[](0.45, 0.70, 1.0);
       float sx = 0.0, sz = 0.0, h = 0.0;
-      for (int i = 0; i < 6; ++i) {
+      for (int i = 0; i < 3; ++i) {
         float ph = dot(dirs[i], p) * freq[i] + uTime * spd[i];
         h += sin(ph) * amp[i];
         float c = cos(ph) * amp[i] * freq[i];
@@ -736,24 +727,27 @@ std::uint32_t create_water_program() {
         sz += c * dirs[i].y;
       }
       crest = h;
-      // The slope scale controls choppiness; keep it moderate so the sea reads
-      // as gentle swell rather than sharp chop.
-      return normalize(vec3(-sx * 9.0, 1.0, -sz * 9.0));
+      return normalize(vec3(-sx * 6.0, 1.0, -sz * 6.0));
     }
     void main() {
       vec3 viewDir = normalize(uCamPos - vWorldPos);
+      float dist = distance(uCamPos, vWorldPos);
+      // Fade out fragments far from the camera to cut fill cost over open sea.
+      if (dist > 2200.0) {
+        float fade = clamp((dist - 2200.0) / 800.0, 0.0, 1.0);
+        if (fade > 0.98) discard;
+      }
       vec2 p = vWorldPos.xz;
       float crest;
       vec3 normal = seaNormal(p, crest);
-      float fres = pow(1.0 - max(dot(normal, viewDir), 0.0), 4.0);
-      vec3 col = mix(uWaterColor, uSkyColor, clamp(fres, 0.0, 0.85));
-      col *= 0.92 + 0.08 * crest;  // subtle crest/trough tint variation
-      // Sharp sun glint that skitters over the moving normals.
+      float fres = pow(1.0 - max(dot(normal, viewDir), 0.0), 3.0);
+      vec3 col = mix(uWaterColor, uSkyColor, clamp(fres * 0.75, 0.0, 0.7));
+      col *= 0.94 + 0.06 * crest;
       if (length(uSunDir) > 0.001) {
         vec3 hlf = normalize(normalize(-uSunDir) + viewDir);
-        col += uSunColor * pow(max(dot(normal, hlf), 0.0), 200.0) * 1.2;
+        col += uSunColor * pow(max(dot(normal, hlf), 0.0), 48.0) * 0.35;
       }
-      float alpha = mix(0.72, 0.96, fres);
+      float alpha = mix(0.55, 0.82, fres);
       if (uFogRange.y > 0.0) {
         float f = clamp((distance(uCamPos, vWorldPos) - uFogRange.x) /
                             max(uFogRange.y - uFogRange.x, 0.001),

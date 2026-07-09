@@ -1,5 +1,6 @@
 #include "terrain_colormap.hpp"
 
+#include "engine/formats/terrain/terrain_con_parser.hpp"
 #include "engine/formats/dds/dds_loader.hpp"
 
 #include <GL/glew.h>
@@ -20,19 +21,6 @@ std::string lower(std::string s) {
   std::transform(s.begin(), s.end(), s.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
   return s;
-}
-
-std::string folder_from_base(const std::string& base) {
-  std::string path = lower(base);
-  const auto slash = path.rfind('/');
-  if (slash == std::string::npos) {
-    return path;
-  }
-  const auto prev = path.rfind('/', slash - 1);
-  if (prev == std::string::npos) {
-    return path.substr(0, slash);
-  }
-  return path.substr(prev + 1, slash - prev - 1);
 }
 
 bool discover_tile_grid(ResourceManager& resources, const std::string& folder, int& rows,
@@ -376,32 +364,22 @@ float parse_heightmap_xz_scale(const std::string& heightdata_script, float defau
 }
 
 TerrainVisualConfig TerrainColormapLoader::parse_terrain_con(const std::string& script) {
-  TerrainVisualConfig cfg;
-  std::istringstream in(script);
-  std::string line;
-  while (std::getline(in, line)) {
-    std::istringstream ls(line);
-    std::string cmd;
-    ls >> cmd;
-    if (cmd == "terrain.colormapBaseName") {
-      std::string base;
-      ls >> base;
-      base.erase(std::remove(base.begin(), base.end(), '"'), base.end());
-      cfg.colormap_folder = folder_from_base(base);
-    } else if (cmd == "terrain.lightmapBaseName") {
-      std::string base;
-      ls >> base;
-      base.erase(std::remove(base.begin(), base.end(), '"'), base.end());
-      cfg.lightmap_folder = folder_from_base(base);
-    } else if (cmd == "terrain.detailmapBaseName") {
-      std::string base;
-      ls >> base;
-      base.erase(std::remove(base.begin(), base.end(), '"'), base.end());
-      cfg.detail_folder = folder_from_base(base);
-    } else if (cmd == "terrain.patchColormapSize") {
-      ls >> cfg.tile_size;
+  TerrainConParser parser;
+  parser.parse(script);
+  const TerrainConData& d = parser.data();
+
+  auto folder_from_prefix = [](const std::string& prefix) -> std::string {
+    if (prefix.size() >= 3 && prefix.compare(prefix.size() - 3, 3, "/tx") == 0) {
+      return prefix.substr(0, prefix.size() - 3);
     }
-  }
+    return prefix;
+  };
+
+  TerrainVisualConfig cfg;
+  cfg.colormap_folder = folder_from_prefix(d.colormap_tile_prefix);
+  cfg.lightmap_folder = folder_from_prefix(d.lightmap_tile_prefix);
+  cfg.detail_folder = folder_from_prefix(d.detailmap_tile_prefix);
+  cfg.tile_size = d.patch_colormap_size;
   return cfg;
 }
 
