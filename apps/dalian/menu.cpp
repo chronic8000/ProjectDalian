@@ -79,20 +79,22 @@ bool draw_button(bf2::Renderer& r, int mx, int my, float x, float y, float w, fl
 bool draw_checkbox(bf2::Renderer& r, int mx, int my, float x, float y, const char* label,
                    bool checked) {
   const float bs = 18.f;
-  const bool hov = rect_hit(r, mx, my, x, y, 260, bs + 4);
+  const float label_w = r.ui_text_width(label, 1.4f);
+  const float hit_w = std::min(420.f, bs + 14.f + label_w);
+  const bool hov = rect_hit(r, mx, my, x, y, hit_w, bs + 4);
   r.ui_rect(x, y, bs, bs, 0.08f, 0.09f, 0.10f, 1.f);
   if (checked) {
     r.ui_rect(x + 3, y + 3, bs - 6, bs - 6, UiTheme::kOrangeR, UiTheme::kOrangeG,
               UiTheme::kOrangeB, 1.f);
   }
-  r.ui_text(x + bs + 10, y + 2, 1.4f, label, hov ? 1.f : 0.85f, hov ? 0.88f : 0.82f,
-            hov ? 0.90f : 0.84f, 1.f);
+  draw_clipped_text(r, x + bs + 10, y + 2, 380.f, 1.4f, label, hov ? 1.f : 0.85f,
+                    hov ? 0.88f : 0.82f, hov ? 0.90f : 0.84f, 1.f);
   return hov;
 }
 
 bool draw_slider(bf2::Renderer& r, int mx, int my, bool clicked, float x, float y, float w,
                  const char* label, float& value, float vmin, float vmax) {
-  r.ui_text(x, y, 1.3f, label, 0.75f, 0.78f, 0.82f, 1.f);
+  draw_clipped_text(r, x, y, w + 80.f, 1.3f, label, 0.75f, 0.78f, 0.82f, 1.f);
   const float sy = y + 22;
   r.ui_rect(x, sy, w, 8, 0.10f, 0.11f, 0.12f, 1.f);
   const float t = (value - vmin) / (vmax - vmin);
@@ -100,7 +102,8 @@ bool draw_slider(bf2::Renderer& r, int mx, int my, bool clicked, float x, float 
             UiTheme::kOrangeB, 1.f);
   char buf[64];
   std::snprintf(buf, sizeof(buf), "%.0f", value);
-  r.ui_text(x + w + 12, sy - 4, 1.2f, buf, UiTheme::kOrangeR, UiTheme::kOrangeG,
+  const float vw = r.ui_text_width(buf, 1.2f);
+  r.ui_text(x + w - vw, sy - 4, 1.2f, buf, UiTheme::kOrangeR, UiTheme::kOrangeG,
             UiTheme::kOrangeB, 1.f);
   if (clicked && rect_hit(r, mx, my, x, sy - 6, w, 20)) {
     float dx = 0.f, dy = 0.f;
@@ -209,7 +212,7 @@ void draw_options_content(bf2::Renderer& r, Settings& settings, OptTab tab, int 
       if (clicked) res_open = !res_open;
     } else if (borderless) {
       r.ui_rect(ox, y, 280, 32, 0.08f, 0.09f, 0.10f, 0.75f);
-      r.ui_text(ox + 12, y + 8, 1.3f, rlabel, 0.55f, 0.58f, 0.62f, 1.f);
+      draw_clipped_text(r, ox + 12, y + 8, 256.f, 1.3f, rlabel, 0.55f, 0.58f, 0.62f, 1.f);
       res_open = false;
     }
     y += 50;
@@ -293,7 +296,8 @@ void draw_options_popups(bf2::Renderer& r, Settings& settings, OptTab tab, int m
                            bool clicked, int& res_idx, bool& res_open, int& fs_idx, bool& fs_open,
                            int& msaa_idx, bool& msaa_open, int& shadow_idx, bool& shadow_open,
                            const std::vector<DisplayModeEntry>& modes,
-                           const OptionPopupAnchors& anchors) {
+                           const OptionPopupAnchors& anchors, float& res_list_scroll) {
+  constexpr float H = 900.f;
   if (tab != OptTab::Video && tab != OptTab::Graphics) return;
   const char* fs_labels[] = {"WINDOWED", "BORDERLESS", "EXCLUSIVE"};
   const char* msaa_labels[] = {"OFF", "2x", "4x", "8x", "16x"};
@@ -304,10 +308,16 @@ void draw_options_popups(bf2::Renderer& r, Settings& settings, OptTab tab, int m
   if (tab == OptTab::Video && res_open && fs_idx != static_cast<int>(FullscreenMode::Borderless)) {
     const float y0 = anchors.res_y + 36;
     const int n = static_cast<int>(modes.size());
-    const float list_h = static_cast<float>(n) * 30.f + 8.f;
+    const float row_h = 30.f;
+    const float content_h = static_cast<float>(n) * row_h + 8.f;
+    const float max_h = std::max(120.f, H - y0 - 24.f);
+    const float list_h = std::min(content_h, max_h);
+    res_list_scroll = clamp_scroll(res_list_scroll, content_h, list_h);
     r.ui_rect(anchors.res_x, y0 - 4, 300, list_h, 0.04f, 0.05f, 0.06f, 0.98f);
-    for (int i = 0; i < n; ++i) {
-      const float dy = y0 + i * 30;
+    const int start = static_cast<int>(res_list_scroll / row_h);
+    for (int i = start; i < n && i < start + static_cast<int>(list_h / row_h) + 2; ++i) {
+      const float dy = y0 + i * row_h - res_list_scroll;
+      if (dy < y0 - 2 || dy > y0 + list_h - row_h) continue;
       if (draw_button(r, mx, my, anchors.res_x + 4, dy, 292, 28, modes[i].label.c_str())) {
         if (clicked) {
           res_idx = i;
@@ -453,6 +463,7 @@ bool run_options_panel(SDL_Window* window, bf2::Renderer& renderer, Settings& se
   bool res_open = false, fs_open = false, msaa_open = false, shadow_open = false;
   OptionPopupAnchors anchors{};
   float controls_scroll = 0.f;
+  float res_list_scroll = 0.f;
   int rebind_action = -1;
   bool capture_key = false;
   bool running = true;
@@ -476,6 +487,8 @@ bool run_options_panel(SDL_Window* window, bf2::Renderer& renderer, Settings& se
                  handle_controls_key_capture(e, settings, rebind_action, capture_key)) {
       } else if (e.type == SDL_MOUSEWHEEL && opt_tab == OptTab::Controls) {
         controls_scroll -= e.wheel.y * 24.f;
+      } else if (e.type == SDL_MOUSEWHEEL && opt_tab == OptTab::Video && res_open) {
+        res_list_scroll -= e.wheel.y * 28.f;
       } else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
         clicked = true;
       } else if (e.type == SDL_WINDOWEVENT &&
@@ -510,7 +523,7 @@ bool run_options_panel(SDL_Window* window, bf2::Renderer& renderer, Settings& se
                          anchors, controls_scroll, rebind_action, capture_key);
     draw_options_popups(renderer, settings, opt_tab, mx, my, clicked, res_idx, res_open, fs_idx,
                         fs_open, msaa_idx, msaa_open, shadow_idx, shadow_open, display_modes,
-                        anchors);
+                        anchors, res_list_scroll);
     const float bx = W - 220, by = H - 100;
     if (draw_button(renderer, mx, my, bx, by, 160, 40, "APPLY", true) && clicked) {
       settings.save();
@@ -558,6 +571,7 @@ MenuResult run_main_menu(SDL_Window* window, bf2::Renderer& renderer, Settings& 
   OptTab opt_tab = OptTab::Video;
   OptionPopupAnchors anchors{};
   float controls_scroll = 0.f;
+  float res_list_scroll = 0.f;
   int rebind_action = -1;
   bool capture_key = false;
 
@@ -587,6 +601,9 @@ MenuResult run_main_menu(SDL_Window* window, bf2::Renderer& renderer, Settings& 
                  handle_controls_key_capture(e, settings, rebind_action, capture_key)) {
       } else if (e.type == SDL_MOUSEWHEEL && tab == TopTab::Options && opt_tab == OptTab::Controls) {
         controls_scroll -= e.wheel.y * 24.f;
+      } else if (e.type == SDL_MOUSEWHEEL && tab == TopTab::Options && opt_tab == OptTab::Video &&
+                 res_open) {
+        res_list_scroll -= e.wheel.y * 28.f;
       } else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
         clicked = true;
       } else if (e.type == SDL_MOUSEWHEEL && tab == TopTab::Play) {
@@ -668,21 +685,24 @@ MenuResult run_main_menu(SDL_Window* window, bf2::Renderer& renderer, Settings& 
         if (sel)
           renderer.ui_rect(lx, ry, 4, row_h - 2, UiTheme::kOrangeR, UiTheme::kOrangeG,
                            UiTheme::kOrangeB, 1.f);
-        renderer.ui_text(lx + 12, ry + 10, 1.35f, maps[i].display_name.c_str(), 0.92f, 0.94f,
-                         0.96f, 1.f);
-        renderer.ui_text(lx + lw - 140, ry + 12, 1.1f, maps[i].mod_name.c_str(), 0.5f, 0.55f, 0.6f,
-                         1.f);
+        draw_clipped_text(renderer, lx + 12, ry + 10, lw - 160.f, 1.35f, maps[i].display_name.c_str(),
+                          0.92f, 0.94f, 0.96f, 1.f);
+        draw_clipped_text(renderer, lx + lw - 132, ry + 12, 120.f, 1.1f, maps[i].mod_name.c_str(),
+                          0.5f, 0.55f, 0.6f, 1.f);
         if (clicked && hov) selected_map = i;
       }
       const float dx = lx + lw + 30;
       if (selected_map >= 0 && selected_map < static_cast<int>(maps.size())) {
         const MapEntry& m = maps[selected_map];
-        renderer.ui_text(dx, ly, 2.0f, m.display_name.c_str(), 0.95f, 0.96f, 0.98f, 1.f);
+        draw_clipped_text(renderer, dx, ly, W - dx - 260.f, 2.0f, m.display_name.c_str(), 0.95f,
+                          0.96f, 0.98f, 1.f);
         char buf[256];
         std::snprintf(buf, sizeof(buf), "Mod: %s", m.mod_name.c_str());
-        renderer.ui_text(dx, ly + 36, 1.4f, buf, 0.65f, 0.68f, 0.72f, 1.f);
+        draw_clipped_text(renderer, dx, ly + 36, W - dx - 260.f, 1.4f, buf, 0.65f, 0.68f, 0.72f,
+                          1.f);
         std::snprintf(buf, sizeof(buf), "Folder: %s", m.folder.c_str());
-        renderer.ui_text(dx, ly + 58, 1.2f, buf, 0.55f, 0.58f, 0.62f, 1.f);
+        draw_clipped_text(renderer, dx, ly + 58, W - dx - 260.f, 1.2f, buf, 0.55f, 0.58f, 0.62f,
+                          1.f);
       } else {
         renderer.ui_text(dx, ly, 1.6f, "No maps found.", 0.7f, 0.72f, 0.75f, 1.f);
         renderer.ui_text(dx, ly + 28, 1.2f, "Set BF2 install path in Options or launch with a map path.",
@@ -697,12 +717,13 @@ MenuResult run_main_menu(SDL_Window* window, bf2::Renderer& renderer, Settings& 
       }
     } else if (tab == TopTab::Multiplayer) {
       renderer.ui_text(40, 80, 2.0f, "MULTIPLAYER", 0.95f, 0.96f, 0.98f, 1.f);
-      renderer.ui_text(40, 118, 1.35f,
-                       "Play cooperatively over LAN or Tailscale. Host a lobby or join an existing "
-                       "match.",
-                       0.6f, 0.63f, 0.68f, 1.f);
-      renderer.ui_text(40, 150, 1.2f, "Choose your faction and army in the lobby or deploy screen.",
-                       0.55f, 0.58f, 0.62f, 1.f);
+      draw_clipped_text(renderer, 40, 118, W - 80.f, 1.35f,
+                        "Play cooperatively over LAN or Tailscale. Host a lobby or join an existing "
+                        "match.",
+                        0.6f, 0.63f, 0.68f, 1.f);
+      draw_clipped_text(renderer, 40, 150, W - 80.f, 1.2f,
+                        "Choose your faction and army in the lobby or deploy screen.", 0.55f, 0.58f,
+                        0.62f, 1.f);
       if (draw_button(renderer, mx, my, 40, H - 120, 260, 52, "ENTER MULTIPLAYER", true) &&
           clicked) {
         if (run_multiplayer_flow(window, renderer, settings, maps, result)) running = false;
@@ -723,12 +744,12 @@ MenuResult run_main_menu(SDL_Window* window, bf2::Renderer& renderer, Settings& 
                            anchors, controls_scroll, rebind_action, capture_key);
       draw_options_popups(renderer, settings, opt_tab, mx, my, clicked, res_idx, res_open, fs_idx,
                           fs_open, msaa_idx, msaa_open, shadow_idx, shadow_open, display_modes,
-                          anchors);
+                          anchors, res_list_scroll);
       float y = H - 130;
       renderer.ui_text(48, y, 1.2f, "BF2 INSTALL PATH:", 0.75f, 0.78f, 0.82f, 1.f);
-      renderer.ui_text(48, y + 22, 1.1f,
-                       settings.bf2_root.empty() ? "(not set)" : settings.bf2_root.c_str(), 0.55f,
-                       0.58f, 0.62f, 1.f);
+      draw_clipped_text(renderer, 48, y + 22, W - 320.f, 1.1f,
+                        settings.bf2_root.empty() ? "(not set)" : settings.bf2_root.c_str(), 0.55f,
+                        0.58f, 0.62f, 1.f);
       const float bx = W - 220, by = H - 100;
       if (draw_button(renderer, mx, my, bx, by, 160, 40, "APPLY", true) && clicked) {
         settings.save();
@@ -740,9 +761,9 @@ MenuResult run_main_menu(SDL_Window* window, bf2::Renderer& renderer, Settings& 
       }
     }
 
-    renderer.ui_text(24, H - 28, 1.1f,
-                     "Alt+Enter / F11 display  |  Ctrl+Shift+W safe windowed  |  Alt+F4 quit", 0.45f,
-                     0.48f, 0.52f, 1.f);
+    draw_clipped_text(renderer, 24, H - 28, W - 48.f, 1.1f,
+                      "Alt+Enter / F11 display  |  Ctrl+Shift+W safe windowed  |  Alt+F4 quit",
+                      0.45f, 0.48f, 0.52f, 1.f);
     renderer.end_ui();
     renderer.end_frame();
     SDL_GL_SwapWindow(window);

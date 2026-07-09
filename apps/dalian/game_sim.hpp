@@ -45,6 +45,8 @@ struct SimInitParams {
   int bot_difficulty = 3;  // 1..5
   bool multiplayer = false;
   int connected_humans = 1;
+  std::string player_label = "You";
+  std::vector<std::string> bot_names;
 };
 
 struct EnemyHit {
@@ -75,7 +77,7 @@ public:
   EnemyHit raycast_enemies(const glm::vec3& o, const glm::vec3& dir, float maxd) const;
   void apply_explosion(const glm::vec3& center, float radius, float max_damage);
   void apply_enemy_damage(int idx, int zone);
-  void hurt_player(float damage);
+  void hurt_player(float damage, int killer_enemy_idx = -1, const char* killer_override = nullptr);
   bool can_team_spawn_at(const glm::vec3& pos, TeamId team, float epsilon = 2.5f) const;
   bool can_team_spawn_at_cp(int bf2_cp_id, TeamId team) const;
   snapshot::GameState build_snapshot(std::uint32_t local_player_id = 1,
@@ -94,6 +96,10 @@ private:
   void tick_fixed(float dt, const PlayerInput& input);
   void init_conquest();
   void spawn_defenders();
+  void push_kill_feed(const std::string& killer, const std::string& victim,
+                      const std::string& weapon);
+  std::string player_weapon_label() const;
+  std::string enemy_weapon_label() const;
   void decay_sticks(float dt, const PlayerInput& input);
   void step_vehicle_interaction(const PlayerInput& input);
   void step_rotor_spool(float dt, const PlayerInput& input);

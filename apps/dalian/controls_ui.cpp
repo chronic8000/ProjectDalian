@@ -41,9 +41,9 @@ bool draw_controls_options(bf2::Renderer& r, Settings& settings, int mx, int my,
   constexpr float list_h = 580.f;
   bool changed = false;
 
-  r.ui_text(ox, oy - 28, 1.35f,
-            "CONTROLS  —  click a row to rebind. LMB/RMB = fire / zoom (BF2 default).", 0.75f,
-            0.78f, 0.82f, 1.f);
+  draw_clipped_text(r, ox, oy - 28, 880.f, 1.35f,
+                    "CONTROLS  —  click a row to rebind. LMB/RMB = fire / zoom (BF2 default).",
+                    0.75f, 0.78f, 0.82f, 1.f);
 
   if (draw_slider(r, mx, my, clicked, ox + 520.f, oy - 24, 220, "MOUSE SENSITIVITY",
                   settings.mouse_sensitivity, 0.02f, 0.4f)) {
@@ -106,10 +106,10 @@ bool draw_controls_options(bf2::Renderer& r, Settings& settings, int mx, int my,
         sb = 0.95f;
         status = m.implemented ? "Dalian extra" : "Dalian stub";
       }
-      r.ui_text(ox + 10, y + 3, 1.05f, m.label, 0.88f, 0.90f, 0.93f, 1.f);
-      r.ui_text(ox + 422, y + 3, 1.05f, keybuf, 0.95f, 0.75f, 0.25f, 1.f);
-      r.ui_text(ox + 542, y + 3, 1.05f, status, sr, sg, sb, 1.f);
-      r.ui_text(ox + 682, y + 3, 1.0f, m.bf2_category, 0.6f, 0.63f, 0.66f, 1.f);
+      draw_clipped_text(r, ox + 10, y + 3, 400.f, 1.05f, m.label, 0.88f, 0.90f, 0.93f, 1.f);
+      draw_clipped_text(r, ox + 422, y + 3, 110.f, 1.05f, keybuf, 0.95f, 0.75f, 0.25f, 1.f);
+      draw_clipped_text(r, ox + 542, y + 3, 130.f, 1.05f, status, sr, sg, sb, 1.f);
+      draw_clipped_text(r, ox + 682, y + 3, 190.f, 1.0f, m.bf2_category, 0.6f, 0.63f, 0.66f, 1.f);
       if (clicked && hov && !capture_key) {
         rebind_action_index = static_cast<int>(i);
         capture_key = true;

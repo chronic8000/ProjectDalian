@@ -1,5 +1,9 @@
 #include "game_sim.hpp"
 
+#include "bot_names.hpp"
+
+#include <cstring>
+
 #include "bf2_effects.hpp"
 #include "hitbox_zones.hpp"
 
@@ -200,6 +204,22 @@ void GameSim::step_conquest(float dt) {
 
 void GameSim::clear_events() { events_ = SimEvents{}; }
 
+std::string GameSim::player_weapon_label() const {
+  if (!params_.weapon.name.empty()) return params_.weapon.name;
+  return "Rifle";
+}
+
+std::string GameSim::enemy_weapon_label() const {
+  if (!params_.enemy_weapon.name.empty()) return params_.enemy_weapon.name;
+  return "Rifle";
+}
+
+void GameSim::push_kill_feed(const std::string& killer, const std::string& victim,
+                             const std::string& weapon) {
+  if (killer.empty() || victim.empty()) return;
+  events_.kill_feed.push_back({killer, victim, weapon});
+}
+
 void GameSim::spawn_defenders() {
   if (!params_.have_soldier || !params_.world) return;
   if (!params_.bots_enabled || params_.bot_count <= 0) return;
@@ -276,6 +296,7 @@ void GameSim::spawn_defenders() {
   }
 
   std::shuffle(candidates.begin(), candidates.end(), std::mt19937{std::random_device{}()});
+  std::size_t bot_name_idx = 0;
   std::vector<glm::vec3> posts;
   for (const auto& cp : candidates) {
     bool too_close = false;
@@ -319,6 +340,7 @@ void GameSim::spawn_defenders() {
         en.damage = params_.enemy_weapon.damage;
         en.spread = params_.enemy_weapon.spread;
       }
+      en.name = pick_bot_name(params_.bot_names, bot_name_idx++);
       state_.enemies.push_back(en);
     }
   }
@@ -477,16 +499,31 @@ void GameSim::damage_enemy(int idx, int zone, float weapon_damage_override) {
     en.alive = false;
     en.death_time = 0.f;
     ++state_.player_kills;
+    const std::string victim = en.name.empty() ? "Enemy" : en.name;
+    push_kill_feed(params_.player_label.empty() ? "You" : params_.player_label, victim,
+                   player_weapon_label());
   }
 }
 
-void GameSim::hurt_player(float damage) {
+void GameSim::hurt_player(float damage, int killer_enemy_idx, const char* killer_override) {
   if (state_.match_over || damage <= 0.f) return;
   state_.player_health -= damage;
   state_.player_regen_delay = 3.f;
   if (state_.player_health <= 0.f) {
     ++state_.player_deaths;
     apply_death_ticket(state_.tickets, state_.player_team, conquest_cfg_);
+    std::string killer = "Unknown";
+    if (killer_override && killer_override[0]) {
+      killer = killer_override;
+    } else if (killer_enemy_idx >= 0 &&
+               killer_enemy_idx < static_cast<int>(state_.enemies.size())) {
+      const Enemy& ke = state_.enemies[static_cast<std::size_t>(killer_enemy_idx)];
+      killer = ke.name.empty() ? "Enemy" : ke.name;
+    }
+    push_kill_feed(killer, params_.player_label.empty() ? "You" : params_.player_label,
+                   (killer_override && std::strcmp(killer_override, "Vehicle") == 0)
+                       ? "Vehicle"
+                       : enemy_weapon_label());
     state_.player_health = 100.f;
     events_.open_deploy = true;
   }
@@ -507,6 +544,9 @@ void GameSim::explode_at(const glm::vec3& center, float radius, float max_damage
       en.alive = false;
       en.death_time = 0.f;
       ++state_.player_kills;
+      const std::string victim = en.name.empty() ? "Enemy" : en.name;
+      push_kill_feed(params_.player_label.empty() ? "You" : params_.player_label, victim,
+                     "Explosives");
     }
   }
   const glm::vec3 player_chest(state_.player.position.x, state_.player.position.y + 0.4f,
@@ -601,6 +641,9 @@ void GameSim::step_vehicle_fatal_collisions() {
       en.health = 0.f;
       en.death_time = 0.f;
       ++state_.player_kills;
+      const std::string victim = en.name.empty() ? "Enemy" : en.name;
+      push_kill_feed(params_.player_label.empty() ? "You" : params_.player_label, victim,
+                     "Vehicle");
       spawn_missile_detonation_fx(state_.smoke, state_.explosions,
                                   glm::vec3(en.pos.x, en.pos.y + 1.f, en.pos.z), 0.35f);
     }
@@ -609,7 +652,7 @@ void GameSim::step_vehicle_fatal_collisions() {
       const glm::vec2 d(player_feet.x - veh.pos.x, player_feet.z - veh.pos.z);
       if (glm::dot(d, d) <= kill_r * kill_r &&
           std::fabs(player_feet.y - veh.pos.y) <= veh.col_half.y + 2.5f) {
-        hurt_player(crush_dmg);
+        hurt_player(crush_dmg, -1, "Vehicle");
       }
     }
   }
@@ -1155,14 +1198,8 @@ void GameSim::step_enemies(float dt, const PlayerInput& input) {
     }
     if (hit_player) {
       const float base_dmg = en.damage > 1.f ? en.damage : 12.f;
-      hurt_player(base_dmg * (0.75f + frand() * 0.35f));
+      hurt_player(base_dmg * (0.75f + frand() * 0.35f), contacts[c].idx);
     }
-  }
-  if (state_.player_health <= 0.f && !input.deploy_open && !state_.match_over) {
-    ++state_.player_deaths;
-    apply_death_ticket(state_.tickets, state_.player_team, conquest_cfg_);
-    state_.player_health = 100.f;
-    events_.open_deploy = true;
   }
 }
 

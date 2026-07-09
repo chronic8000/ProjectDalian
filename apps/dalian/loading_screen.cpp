@@ -68,18 +68,18 @@ void LoadingScreen::draw(SDL_Window* window, bf2::Renderer& renderer, float prog
   renderer.ui_rect(panel_x, panel_y, panel_w, panel_h, 0.06f, 0.07f, 0.09f, 1.f);
   renderer.ui_rect(panel_x, panel_y, panel_w, 3.f, 0.95f, 0.55f, 0.08f, 0.85f);
   renderer.ui_text(panel_x + 20.f, panel_y + 16.f, 1.25f, "DALIAN PLANT", 0.55f, 0.57f, 0.62f, 1.f);
-  renderer.ui_text(panel_x + 20.f, panel_y + 44.f, 1.05f,
-                   "Before the First Volley plays while assets load.", 0.45f, 0.48f, 0.52f, 1.f);
-  renderer.ui_text(panel_x + 20.f, panel_y + 68.f, 1.05f, "Press Ready when you want to deploy.",
-                   0.45f, 0.48f, 0.52f, 1.f);
+  draw_clipped_text(renderer, panel_x + 20.f, panel_y + 44.f, panel_w - 40.f, 1.05f,
+                    "Before the First Volley plays while assets load.", 0.45f, 0.48f, 0.52f, 1.f);
+  draw_clipped_text(renderer, panel_x + 20.f, panel_y + 68.f, panel_w - 40.f, 1.05f,
+                    "Press Ready when you want to deploy.", 0.45f, 0.48f, 0.52f, 1.f);
 
   const char* headline = show_ready ? "READY" : "LOADING";
   renderer.ui_text(80, 80, 3.2f, headline, 0.95f, 0.96f, 0.98f, 1.f);
   if (phase && phase[0]) {
-    renderer.ui_text(80, 130, 2.0f, phase, 0.95f, 0.55f, 0.08f, 1.f);
+    draw_clipped_text(renderer, 80, 130, panel_x - 100.f, 2.0f, phase, 0.95f, 0.55f, 0.08f, 1.f);
   }
   if (detail && detail[0]) {
-    renderer.ui_text(80, 168, 1.35f, detail, 0.65f, 0.68f, 0.72f, 1.f);
+    draw_clipped_text(renderer, 80, 168, panel_x - 100.f, 1.35f, detail, 0.65f, 0.68f, 0.72f, 1.f);
   }
 
   const float bar_x = 80.f, bar_y = H - 160.f, bar_w = panel_x - bar_x - 40.f, bar_h = 22.f;
@@ -91,12 +91,12 @@ void LoadingScreen::draw(SDL_Window* window, bf2::Renderer& renderer, float prog
 
   if (show_ready) {
     draw_ready_button(renderer, mx, my, true);
-    renderer.ui_text(80, H - 110, 1.15f,
-                     "Click READY or press Enter / Space — music stops when you continue",
-                     0.45f, 0.48f, 0.52f, 1.f);
+    draw_clipped_text(renderer, 80, H - 110, panel_x - 60.f, 1.15f,
+                      "Click READY or press Enter / Space — music stops when you continue", 0.45f,
+                      0.48f, 0.52f, 1.f);
   } else {
-    renderer.ui_text(80, H - 110, 1.15f, "Loading level data — please wait...", 0.45f, 0.48f, 0.52f,
-                     1.f);
+    draw_clipped_text(renderer, 80, H - 110, panel_x - 60.f, 1.15f,
+                      "Loading level data — please wait...", 0.45f, 0.48f, 0.52f, 1.f);
   }
 
   renderer.end_ui();

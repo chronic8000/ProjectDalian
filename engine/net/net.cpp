@@ -523,13 +523,25 @@ void Net::poll(float dt) {
         if (role_ == Role::Server) {
           const std::uint32_t id =
               static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(ev.peer->data));
+          std::string left_name;
+          for (const auto& m : lobby_.members) {
+            if (m.id == id) {
+              left_name = m.name;
+              break;
+            }
+          }
           if (NetPlayer* s = slot(id, false)) s->active = false;
           for (auto it = lobby_.members.begin(); it != lobby_.members.end(); ++it) {
             if (it->id == id) {
+              if (left_name.empty()) left_name = it->name;
               lobby_.members.erase(it);
               break;
             }
           }
+          if (!left_name.empty())
+            std::printf("Net: player left (%s, id=%u)\n", left_name.c_str(), id);
+          else
+            std::printf("Net: player left (id=%u)\n", id);
           broadcast_lobby();
           ev.peer->data = nullptr;
         } else {

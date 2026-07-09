@@ -79,7 +79,8 @@ inline bool draw_text_field(bf2::Renderer& r, int mx, int my, bool clicked, floa
   }
   const char* show = field.buf[0] ? field.buf : placeholder;
   const float alpha = field.buf[0] ? 0.92f : 0.45f;
-  r.ui_text(x + 8, y + (h - 16) * 0.5f, 1.3f, show, alpha, alpha, alpha + 0.02f, 1.f);
+  const std::string clipped = truncate_text(r, show, 1.3f, w - 16.f);
+  r.ui_text(x + 8, y + (h - 16) * 0.5f, 1.3f, clipped.c_str(), alpha, alpha, alpha + 0.02f, 1.f);
   return clicked && hov;
 }
 

@@ -62,7 +62,7 @@ its respective owner.
   **Before the First Volley** plays during load only; **Ready** button lets you listen
   to the full track before deployment opens
 - **Resolution-agnostic UI** — all menus/HUD layout in a fixed 1600×900 design
-  space with uniform scaling and letterboxing (windowed, borderless, exclusive)
+  space with uniform scaling and letterboxing; long text clips instead of overlapping
 - **Dynamic resolution list** from SDL (includes desktop ultrawide modes)
 - **Settings persistence** (`%APPDATA%\ProjectDalian\ProjectDalian\settings.cfg`):
   video, graphics, audio, BF2 install path, player name, rebindable controls
@@ -79,7 +79,8 @@ its respective owner.
 - Late-join support (configurable)
 - Session discovery/advertising over UDP
 - **MP ticket grace** — bleed paused until 2 humans deployed or 90s elapse
-- Remote player minimap blips + improved position/yaw sync
+- **Kill feed** — top-right kill toasts with retail BF2 bot names; join/leave toasts for human players
+- Improved position/yaw sync for remote players
 - **Auto round restart** — 12s countdown after victory, then deploy again
 
 **Asset pipeline (verified byte-for-byte against retail BF2 assets):**

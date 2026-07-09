@@ -16,6 +16,8 @@
 #include "app_settings.hpp"
 #include "key_bindings.hpp"
 #include "loading_screen.hpp"
+#include "bot_names.hpp"
+#include "hud_feed.hpp"
 #include "ui_layout.hpp"
 #include "factions.hpp"
 #include "game_audio.hpp"
@@ -63,6 +65,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <unordered_set>
 #include <vector>
 
@@ -1982,7 +1985,9 @@ int main(int argc, char** argv) {
   };
   auto bind_weapon_sim = [&](bool refill_ammo) {
     if (weapon_index < weapon_profiles.size() && weapon_profiles[weapon_index].valid) {
-      game_sim.set_weapon_profile(weapon_profiles[weapon_index], refill_ammo);
+      auto wp = weapon_profiles[weapon_index];
+      wp.name = weapon_defs[weapon_index].name;
+      game_sim.set_weapon_profile(wp, refill_ammo);
     }
   };
   float voice_cooldown = 0.f;
@@ -2229,9 +2234,12 @@ int main(int argc, char** argv) {
     }
     sim_init.enemy_weapon =
         dalian::load_weapon_profile(resources, "weapons/handheld/rurif_ak47/rurif_ak47.tweak");
-    if (!sim_init.enemy_weapon.valid) {
+    if (sim_init.enemy_weapon.valid) {
+      sim_init.enemy_weapon.name = "AK-47";
+    } else {
       sim_init.enemy_weapon =
           dalian::load_weapon_profile(resources, "weapons/handheld/usrif_m16a2/usrif_m16a2.tweak");
+      if (sim_init.enemy_weapon.valid) sim_init.enemy_weapon.name = "M16A2";
     }
     sim_init.soldier_anims = soldier_anims;
     sim_init.missile_headless_demo = shot_missile;
@@ -2270,6 +2278,9 @@ int main(int argc, char** argv) {
       sim_init.bot_difficulty = settings.mp_bot_difficulty;
     }
     sim_init.multiplayer = session_mp.enabled;
+    sim_init.bot_names = dalian::load_bot_names(bf2_root);
+    sim_init.player_label = settings.player_name.empty() ? "You" : settings.player_name;
+    sim_init.weapon.name = weapon_defs[weapon_index].name;
     game_sim.init(sim_init);
     if (weapon_profile.valid) game_sim.set_weapon_profile(weapon_profile, true);
     game_sim.state().vehicles = std::move(loaded_vehicles);
@@ -2870,12 +2881,14 @@ int main(int argc, char** argv) {
     renderer.ui_text(40, 26, 3.0f, "DEPLOYMENT", 0.92f, 0.94f, 0.97f, 1.f);
     char matchup[160];
     std::snprintf(matchup, sizeof(matchup), "%s  vs  %s", fac_you.country, fac_en.country);
-    renderer.ui_text(40, 66, 2.0f, matchup, 0.55f, 0.75f, 1.0f, 1.f);
-    renderer.ui_text(40, 92, 1.2f, map_label.c_str(), 0.55f, 0.57f, 0.62f, 1.f);
+    dalian::draw_clipped_text(renderer, 40, 66, W - 620.f, 2.0f, matchup, 0.55f, 0.75f, 1.0f, 1.f);
+    dalian::draw_clipped_text(renderer, 40, 92, W - 620.f, 1.2f, map_label.c_str(), 0.55f, 0.57f,
+                              0.62f, 1.f);
     char side_hint[192];
     std::snprintf(side_hint, sizeof(side_hint), "Side 1: %s   |   Side 2: %s", side1_home.c_str(),
                   side2_home.c_str());
-    renderer.ui_text(40, 112, 1.05f, side_hint, 0.5f, 0.58f, 0.68f, 0.95f);
+    dalian::draw_clipped_text(renderer, 40, 112, W - 620.f, 1.05f, side_hint, 0.5f, 0.58f, 0.68f,
+                              0.95f);
 
     // Assign any army to each geographic map side (each side has its own spawn set).
     const float fx = 40, fy = 132, fw = 260, fh = 130, frow = 24.f;
@@ -2884,7 +2897,7 @@ int main(int argc, char** argv) {
                                      int selected_id, const char* title, const char* subtitle,
                                      auto on_pick) {
       renderer.ui_text(x, y - 22, 1.35f, title, 0.7f, 0.72f, 0.76f, 1.f);
-      renderer.ui_text(x, y - 6, 0.95f, subtitle, 0.5f, 0.62f, 0.78f, 0.9f);
+      dalian::draw_clipped_text(renderer, x, y - 6, w, 0.95f, subtitle, 0.5f, 0.62f, 0.78f, 0.9f);
       renderer.ui_rect(x, y, w, h, 0.04f, 0.05f, 0.06f, 0.95f);
       scroll = std::clamp(scroll, 0.f,
                           std::max(0.f, static_cast<float>(dalian::faction_count()) * frow - h));
@@ -2900,7 +2913,8 @@ int main(int argc, char** argv) {
                          sel ? 0.28f : (hov ? 0.14f : 0.09f), sel ? 0.42f : (hov ? 0.18f : 0.11f),
                          0.96f);
         const auto& fd = dalian::faction_at(static_cast<int>(i));
-        renderer.ui_text(x + 8, ry + 4, 1.05f, fd.country, 0.9f, 0.92f, 0.94f, 1.f);
+        dalian::draw_clipped_text(renderer, x + 8, ry + 4, w - 16.f, 1.05f, fd.country, 0.9f, 0.92f,
+                                  0.94f, 1.f);
         if (clicked && hov) on_pick(static_cast<int>(i));
       }
     };
@@ -2942,9 +2956,11 @@ int main(int argc, char** argv) {
                      play_side2 ? 0.32f : (hov_s2 ? 0.16f : 0.1f),
                      play_side2 ? 0.48f : (hov_s2 ? 0.2f : 0.12f), 0.96f);
     renderer.ui_text(fx + 8.f, pfy + 6.f, 1.0f, "SIDE 1", 0.75f, 0.82f, 0.95f, 1.f);
-    renderer.ui_text(fx + 8.f, pfy + 22.f, 0.95f, fac_s1.country, 0.88f, 0.9f, 0.92f, 1.f);
+    dalian::draw_clipped_text(renderer, fx + 8.f, pfy + 22.f, pbw - 16.f, 0.95f, fac_s1.country,
+                              0.88f, 0.9f, 0.92f, 1.f);
     renderer.ui_text(fx + pbw + 16.f, pfy + 6.f, 1.0f, "SIDE 2", 0.95f, 0.55f, 0.45f, 1.f);
-    renderer.ui_text(fx + pbw + 16.f, pfy + 22.f, 0.95f, fac_s2.country, 0.88f, 0.9f, 0.92f, 1.f);
+    dalian::draw_clipped_text(renderer, fx + pbw + 16.f, pfy + 22.f, pbw - 16.f, 0.95f,
+                              fac_s2.country, 0.88f, 0.9f, 0.92f, 1.f);
     if (clicked && hov_s1) {
       player_team = dalian::TeamId::Team1;
       sync_player_from_sides();
@@ -2967,7 +2983,8 @@ int main(int argc, char** argv) {
                        sel ? 0.28f : (hov ? 0.16f : 0.11f), sel ? 0.42f : (hov ? 0.20f : 0.13f),
                        0.96f);
       renderer.ui_rect(kx, y, 4, kh, sel ? 0.4f : 0.25f, sel ? 0.75f : 0.4f, 1.0f, 1.f);
-      renderer.ui_text(kx + 16, y + 12, 1.7f, kits[i].name, 0.93f, 0.95f, 0.97f, 1.f);
+      dalian::draw_clipped_text(renderer, kx + 16, y + 12, kw - 24.f, 1.7f, kits[i].name, 0.93f,
+                                0.95f, 0.97f, 1.f);
       if (clicked && hov) selected_kit = static_cast<int>(i);
     }
 
@@ -2979,9 +2996,9 @@ int main(int argc, char** argv) {
     char line[128];
     renderer.ui_text(kx, sy, 1.5f, "LOADOUT", 0.7f, 0.72f, 0.76f, 1.f);
     std::snprintf(line, sizeof(line), "Primary : %s", wn);
-    renderer.ui_text(kx, sy + 24, 1.5f, line, 0.86f, 0.88f, 0.9f, 1.f);
+    dalian::draw_clipped_text(renderer, kx, sy + 24, kw, 1.5f, line, 0.86f, 0.88f, 0.9f, 1.f);
     std::snprintf(line, sizeof(line), "Gadget  : %s", k.gadget);
-    renderer.ui_text(kx, sy + 44, 1.5f, line, 0.86f, 0.88f, 0.9f, 1.f);
+    dalian::draw_clipped_text(renderer, kx, sy + 44, kw, 1.5f, line, 0.86f, 0.88f, 0.9f, 1.f);
     renderer.ui_text(kx, sy + 64, 1.5f, "Sidearm : M9 Pistol", 0.7f, 0.72f, 0.75f, 1.f);
 
     // Spawn map.
@@ -3023,10 +3040,10 @@ int main(int argc, char** argv) {
         rb = 0.16f;
       }
       renderer.ui_rect(c.x - ms * 0.5f, c.y - ms * 0.5f, ms, ms, rr, rg, rb, owned ? 1.f : 0.45f);
-      const float label_w = renderer.ui_text_width(deploy_markers[i].name.c_str(), 1.15f);
-      renderer.ui_text(c.x - label_w * 0.5f, c.y - ms * 0.5f - 14.f, 1.15f,
-                       deploy_markers[i].name.c_str(), owned ? 0.9f : 0.55f, owned ? 0.92f : 0.45f,
-                       owned ? 0.95f : 0.42f, owned ? 1.f : 0.65f);
+      const float label_max = std::min(120.f, mpw - pad * 2.f);
+      dalian::draw_clipped_text(renderer, c.x - label_max * 0.5f, c.y - ms * 0.5f - 14.f, label_max,
+                                1.15f, deploy_markers[i].name.c_str(), owned ? 0.9f : 0.55f,
+                                owned ? 0.92f : 0.45f, owned ? 0.95f : 0.42f, owned ? 1.f : 0.65f);
       if (!owned) {
         const float lw = renderer.ui_text_width("LOCKED", 0.85f);
         renderer.ui_text(c.x - lw * 0.5f, c.y + ms * 0.55f, 0.85f, "LOCKED", 0.95f, 0.4f, 0.35f, 0.8f);
@@ -3058,6 +3075,8 @@ int main(int argc, char** argv) {
   bool jet_w_was_down = false;
   bool jet_gear_toggle = false;
   float match_restart_cd = 0.f;
+  dalian::HudFeed hud_feed;
+  std::unordered_map<std::uint32_t, std::string> tracked_net_players;
 
   while (running) {
     bool launch_requested = false;  // set by the T key, serviced after camera update
@@ -3271,6 +3290,32 @@ int main(int argc, char** argv) {
     // Pump the network early so this frame renders the freshest remote states.
     // `net_fired` / `net_fire_*` capture a shot taken this frame for replication.
     if (net.active()) net.poll(dt);
+    if (net.active()) {
+      std::unordered_set<std::uint32_t> active_remotes;
+      for (const auto& p : net.players()) {
+        if (!p.active || p.id == net.local_id()) continue;
+        active_remotes.insert(p.id);
+        if (!tracked_net_players.count(p.id)) {
+          std::string pname = net.lobby_player_name(p.id);
+          if (pname.empty()) pname = "Player";
+          tracked_net_players[p.id] = pname;
+          char msg[128];
+          std::snprintf(msg, sizeof(msg), "%s joined the battle", pname.c_str());
+          hud_feed.push(msg, 8.f, dalian::HudFeedLine::Kind::Join);
+        }
+      }
+      for (auto it = tracked_net_players.begin(); it != tracked_net_players.end();) {
+        if (active_remotes.count(it->first)) {
+          ++it;
+          continue;
+        }
+        char msg[128];
+        std::snprintf(msg, sizeof(msg), "%s left the server", it->second.c_str());
+        hud_feed.push(msg, 8.f, dalian::HudFeedLine::Kind::Leave);
+        it = tracked_net_players.erase(it);
+      }
+    }
+    hud_feed.tick(dt);
     if (advertise_session) {
       dalian::DiscoveryAdvert adv{};
       adv.game_port = session_mp.enabled ? session_mp.port : net_port;
@@ -3405,6 +3450,9 @@ int main(int argc, char** argv) {
       if (net.active() && !deploy_open) humans = 1 + net.peer_count();
       game_sim.set_connected_humans(humans);
       game_sim.tick(dt, inp);
+      for (const auto& kf : game_sim.events().kill_feed) {
+        hud_feed.push_kill(kf.killer, kf.victim, kf.weapon);
+      }
       if (!ambient_emitters.empty()) {
         dalian::step_ambient_emitters(ambient_emitters, smoke, dt);
       }
@@ -4360,34 +4408,8 @@ int main(int argc, char** argv) {
       renderer.begin_ui(window);
       constexpr float W = 1600.f, H = 900.f;
 
-      // Floating name + faction tags over remote players.
-      if (net.active() && !deploy_open) {
-        for (const auto& rp : net.players()) {
-          if (!rp.active || rp.id == net.local_id()) continue;
-          const glm::vec4 clip =
-              view_proj * glm::vec4(rp.rx, rp.ry + 2.15f, rp.rz, 1.f);
-          if (clip.w <= 0.05f) continue;
-          const float invw = 1.f / clip.w;
-          const float sx = (clip.x * invw * 0.5f + 0.5f) * static_cast<float>(cur_w);
-          const float sy = (1.f - (clip.y * invw * 0.5f + 0.5f)) * static_cast<float>(cur_h);
-          float dx = 0.f, dy = 0.f;
-          renderer.ui_unproject(static_cast<int>(sx), static_cast<int>(sy), dx, dy);
-          if (dx < 20.f || dx > W - 20.f || dy < 20.f || dy > H - 20.f) continue;
-          const std::string pname = net.lobby_player_name(rp.id);
-          const std::uint16_t fid =
-              rp.faction_id ? rp.faction_id : net.lobby_player_faction(rp.id);
-          const auto& fd = dalian::faction_at(static_cast<int>(fid));
-          char tag[160];
-          if (!pname.empty())
-            std::snprintf(tag, sizeof(tag), "%s  |  %s", pname.c_str(), fd.country);
-          else
-            std::snprintf(tag, sizeof(tag), "%s", fd.country);
-          const float tw = renderer.ui_text_width(tag, 1.15f);
-          renderer.ui_rect(dx - tw * 0.5f - 6.f, dy - 10.f, tw + 12.f, 20.f, 0.04f, 0.05f, 0.07f,
-                           0.72f);
-          renderer.ui_text(dx - tw * 0.5f, dy - 8.f, 1.15f, tag, 0.88f, 0.92f, 0.96f, 1.f);
-        }
-      }
+      // Kill feed + join toasts (top-right).
+      hud_feed.draw(renderer, W, H);
 
       if (deploy_open) {
         int lmx = 0, lmy = 0;
@@ -4411,9 +4433,10 @@ int main(int argc, char** argv) {
         const auto& fac_hud = dalian::faction_at(player_faction_id);
         const char* fac = fac_hud.country;
         std::snprintf(buf, sizeof(buf), "%s  -  %s", fac, kits[player_kit].name);
-        renderer.ui_rect(20, 20, renderer.ui_text_width(buf, 1.7f) + 20, 30, 0.05f, 0.06f, 0.08f,
-                         0.55f);
-        renderer.ui_text(30, 27, 1.7f, buf, 0.65f, 0.82f, 1.0f, 1.f);
+        const std::string fac_line = dalian::truncate_text(renderer, buf, 1.7f, W * 0.45f);
+        const float fac_w = renderer.ui_text_width(fac_line.c_str(), 1.7f);
+        renderer.ui_rect(20, 20, fac_w + 20, 30, 0.05f, 0.06f, 0.08f, 0.55f);
+        renderer.ui_text(30, 27, 1.7f, fac_line.c_str(), 0.65f, 0.82f, 1.0f, 1.f);
         // Multiplayer status badge under the faction line.
         if (net.active()) {
           char nb[96];
@@ -4425,13 +4448,25 @@ int main(int argc, char** argv) {
                           in_match);
           else
             std::snprintf(nb, sizeof(nb), "MP CONNECTING...");
-          renderer.ui_text(30, 56, 1.3f, nb, 0.55f, 0.95f, 0.75f, 1.f);
+          dalian::draw_clipped_text(renderer, 30, 56, 280.f, 1.3f, nb, 0.55f, 0.95f, 0.75f, 1.f);
           float ny = 78.f;
-          for (const auto& m : net.lobby().members) {
+          const float mp_list_max_y = 108.f;
+          const auto& members = net.lobby().members;
+          const std::size_t max_show = 3;
+          for (std::size_t mi = 0; mi < members.size() && mi < max_show; ++mi) {
+            if (ny > mp_list_max_y) break;
+            const auto& m = members[mi];
             char pline[80];
             std::snprintf(pline, sizeof(pline), "%s%s", m.is_host ? "[H] " : "    ", m.name.c_str());
-            renderer.ui_text(30, ny, 1.1f, pline, 0.75f, 0.78f, 0.82f, 0.95f);
+            dalian::draw_clipped_text(renderer, 30, ny, 260.f, 1.1f, pline, 0.75f, 0.78f, 0.82f,
+                                      0.95f);
             ny += 18.f;
+          }
+          if (members.size() > max_show) {
+            char more[32];
+            std::snprintf(more, sizeof(more), "+%zu more...", members.size() - max_show);
+            dalian::draw_clipped_text(renderer, 30, ny, 260.f, 1.0f, more, 0.6f, 0.63f, 0.66f,
+                                      0.9f);
           }
         }
 
@@ -4628,11 +4663,11 @@ int main(int argc, char** argv) {
         const float t2w = renderer.ui_text_width(std::to_string(enemy_tickets).c_str(), 2.4f);
         renderer.ui_text(bar_x + bar_w - t2w - 16.f, bar_y + 8.f, 2.4f,
                          std::to_string(enemy_tickets).c_str(), 0.95f, 0.4f, 0.35f, 1.f);
-        const float mid_x = bar_x + bar_w * 0.5f;
-        renderer.ui_text(mid_x - renderer.ui_text_width(fac_friendly.country, 1.1f) * 0.5f,
-                         bar_y + 22.f, 1.1f, fac_friendly.country, 0.55f, 0.7f, 0.95f, 0.85f);
-        renderer.ui_text(mid_x - renderer.ui_text_width(fac_enemy.country, 1.1f) * 0.5f, bar_y - 2.f,
-                         1.1f, fac_enemy.country, 0.9f, 0.45f, 0.4f, 0.85f);
+        dalian::draw_clipped_text(renderer, bar_x + 72.f, bar_y + 10.f, bar_w * 0.5f - 96.f, 1.0f,
+                                  fac_friendly.country, 0.55f, 0.7f, 0.95f, 0.85f);
+        dalian::draw_clipped_text(renderer, bar_x + bar_w * 0.5f + 24.f, bar_y + 10.f,
+                                  bar_w * 0.5f - 96.f, 1.0f, fac_enemy.country, 0.9f, 0.45f, 0.4f,
+                                  0.85f);
 
         const float mmx = 24.f;
         const float mmy = 118.f;
@@ -4675,23 +4710,16 @@ int main(int argc, char** argv) {
         const glm::vec2 pmm = minimap.world_to_minimap(
             {player.position.x, player.position.y - player.eye_height, player.position.z});
         renderer.ui_rect(pmm.x - 4.f, pmm.y - 4.f, 8.f, 8.f, 0.95f, 0.95f, 0.95f, 1.f);
-        if (net.active()) {
-          for (const auto& rp : net.players()) {
-            if (!rp.active || rp.id == net.local_id()) continue;
-            const glm::vec2 rmm = minimap.world_to_minimap({rp.rx, rp.ry, rp.rz});
-            renderer.ui_rect(rmm.x - 3.f, rmm.y - 3.f, 6.f, 6.f, 0.35f, 0.85f, 1.f, 1.f);
-          }
-        }
         if (session_mp.enabled && match_started && round_time < 90.f) {
-          renderer.ui_text(mmx, mmy + mmh + 4.f, 1.0f,
-                           "Ticket bleed paused — waiting for all players (90s grace)", 0.55f,
-                           0.72f, 0.55f, 0.9f);
+          dalian::draw_clipped_text(renderer, mmx, mmy + mmh + 4.f, mmw + 180.f, 1.0f,
+                                    "Ticket bleed paused — waiting for all players (90s grace)",
+                                    0.55f, 0.72f, 0.55f, 0.9f);
         }
         const int mins = static_cast<int>(round_time) / 60;
         const int secs = static_cast<int>(round_time) % 60;
         char rbuf[32];
         std::snprintf(rbuf, sizeof(rbuf), "%d:%02d", mins, secs);
-        renderer.ui_text(mmx + 8.f, mmy + mmh + 6.f, 1.2f, rbuf, 0.75f, 0.78f, 0.82f, 0.9f);
+        renderer.ui_text(mmx + 8.f, mmy + mmh + 22.f, 1.2f, rbuf, 0.75f, 0.78f, 0.82f, 0.9f);
 
         for (const auto& cp : conquest_points) {
           if (dalian::xz_distance_sq({player.position.x, player.position.y - player.eye_height,
@@ -4702,10 +4730,12 @@ int main(int argc, char** argv) {
             const int pct = static_cast<int>(cp.capture_progress * 100.f);
             char cap[48];
             std::snprintf(cap, sizeof(cap), "CAPTURING %s  %d%%", cp.name.c_str(), pct);
-            const float cw = renderer.ui_text_width(cap, 1.5f);
-            renderer.ui_rect(W * 0.5f - cw * 0.5f - 12.f, H * 0.72f - 8.f, cw + 24.f, 28.f, 0.05f,
-                             0.08f, 0.12f, 0.78f);
-            renderer.ui_text(W * 0.5f - cw * 0.5f, H * 0.72f, 1.5f, cap, 0.55f, 0.85f, 1.0f, 1.f);
+            const std::string cap_line = dalian::truncate_text(renderer, cap, 1.5f, W - 80.f);
+            const float cap_w = renderer.ui_text_width(cap_line.c_str(), 1.5f);
+            renderer.ui_rect(W * 0.5f - cap_w * 0.5f - 12.f, H * 0.72f - 8.f, cap_w + 24.f, 28.f,
+                             0.05f, 0.08f, 0.12f, 0.78f);
+            renderer.ui_text(W * 0.5f - cap_w * 0.5f, H * 0.72f, 1.5f, cap_line.c_str(), 0.55f,
+                             0.85f, 1.0f, 1.f);
             break;
           }
         }

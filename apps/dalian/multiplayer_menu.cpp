@@ -38,20 +38,22 @@ bool draw_button(bf2::Renderer& r, int mx, int my, float x, float y, float w, fl
 bool draw_checkbox(bf2::Renderer& r, int mx, int my, float x, float y, const char* label,
                    bool checked) {
   const float bs = 18.f;
-  const bool hov = rect_hit(r, mx, my, x, y, 320, bs + 4);
+  const float label_w = r.ui_text_width(label, 1.4f);
+  const float hit_w = std::min(560.f, bs + 14.f + label_w);
+  const bool hov = rect_hit(r, mx, my, x, y, hit_w, bs + 4);
   r.ui_rect(x, y, bs, bs, 0.08f, 0.09f, 0.10f, 1.f);
   if (checked) {
     r.ui_rect(x + 3, y + 3, bs - 6, bs - 6, UiTheme::kOrangeR, UiTheme::kOrangeG,
               UiTheme::kOrangeB, 1.f);
   }
-  r.ui_text(x + bs + 10, y + 2, 1.4f, label, hov ? 1.f : 0.85f, hov ? 0.88f : 0.82f,
-            hov ? 0.90f : 0.84f, 1.f);
+  draw_clipped_text(r, x + bs + 10, y + 2, 520.f, 1.4f, label, hov ? 1.f : 0.85f,
+                    hov ? 0.88f : 0.82f, hov ? 0.90f : 0.84f, 1.f);
   return hov;
 }
 
 bool draw_slider(bf2::Renderer& r, int mx, int my, bool clicked, float x, float y, float w,
                  const char* label, float& value, float vmin, float vmax) {
-  r.ui_text(x, y, 1.2f, label, 0.75f, 0.78f, 0.82f, 1.f);
+  draw_clipped_text(r, x, y, w + 80.f, 1.2f, label, 0.75f, 0.78f, 0.82f, 1.f);
   const float sy = y + 20;
   r.ui_rect(x, sy, w, 8, 0.10f, 0.11f, 0.12f, 1.f);
   const float t = (value - vmin) / (vmax - vmin);
@@ -59,7 +61,8 @@ bool draw_slider(bf2::Renderer& r, int mx, int my, bool clicked, float x, float 
             UiTheme::kOrangeB, 1.f);
   char buf[64];
   std::snprintf(buf, sizeof(buf), "%.0f", value);
-  r.ui_text(x + w + 10, sy - 4, 1.15f, buf, UiTheme::kOrangeR, UiTheme::kOrangeG,
+  const float vw = r.ui_text_width(buf, 1.15f);
+  r.ui_text(x + w - vw, sy - 4, 1.15f, buf, UiTheme::kOrangeR, UiTheme::kOrangeG,
             UiTheme::kOrangeB, 1.f);
   if (clicked && rect_hit(r, mx, my, x, sy - 6, w, 20)) {
     float dx = 0.f, dy = 0.f;
@@ -124,7 +127,7 @@ void draw_faction_picker(bf2::Renderer& r, int mx, int my, bool clicked, float x
   r.ui_rect(x, y, w, h, 0.04f, 0.05f, 0.06f, 0.95f);
   const float row_h = 28.f;
   const int visible = static_cast<int>(h / row_h);
-  scroll = std::clamp(scroll, 0.f, std::max(0.f, static_cast<float>(faction_count()) * row_h - h));
+  scroll = clamp_scroll(scroll, static_cast<float>(faction_count()) * row_h, h);
   const int start = static_cast<int>(scroll / row_h);
   for (std::size_t i = start; i < faction_count() && static_cast<int>(i) < start + visible + 2;
        ++i) {
@@ -137,7 +140,7 @@ void draw_faction_picker(bf2::Renderer& r, int mx, int my, bool clicked, float x
     const auto& f = faction_at(static_cast<int>(i));
     char line[128];
     std::snprintf(line, sizeof(line), "%s — %s", f.country, f.army);
-    r.ui_text(x + 8, ry + 6, 1.15f, line, 0.9f, 0.92f, 0.94f, 1.f);
+    draw_clipped_text(r, x + 8, ry + 6, w - 16.f, 1.15f, line, 0.9f, 0.92f, 0.94f, 1.f);
     if (clicked && hov) faction_id = static_cast<int>(i);
   }
 }
@@ -158,6 +161,8 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
   int selected_map = maps.empty() ? -1 : 0;
   float map_scroll = 0.f;
   float faction_scroll = 0.f;
+  float server_scroll = 0.f;
+  float lobby_scroll = 0.f;
   bool allow_late_join = settings.allow_late_join;
   bool use_tailscale = settings.use_tailscale;
   bool bots_enabled = settings.mp_bots_enabled;
@@ -184,6 +189,7 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
   bool name_was_focused = false;
   float browse_rescan_timer = 0.f;
   bool running = true;
+  constexpr float W = 1600.f, H = 900.f;
   while (running) {
     if (view == MpView::Browse) {
       browse_rescan_timer += 1.f / 60.f;
@@ -250,6 +256,7 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
     SDL_Event e;
     bool clicked = false;
     int mx = 0, my = 0;
+    SDL_GetMouseState(&mx, &my);
     while (SDL_PollEvent(&e)) {
       if (e.type == SDL_QUIT) {
         text_field_blur(name_field);
@@ -269,16 +276,22 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
       }
       if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) clicked = true;
       if (e.type == SDL_MOUSEWHEEL) {
-        if (view == MpView::HostSetup) map_scroll -= e.wheel.y * 28.f;
-        faction_scroll -= e.wheel.y * 24.f;
+        float dx = 0.f, dy = 0.f;
+        ui_mouse_design(renderer, mx, my, dx, dy);
+        if (view == MpView::Browse && dx >= 40 && dx <= 40 + W * 0.55f && dy >= 266 && dy <= H - 110)
+          server_scroll -= e.wheel.y * 40.f;
+        else if (view == MpView::Lobby && dx >= 40 && dx <= 580 && dy >= 234 && dy <= H - 240)
+          lobby_scroll -= e.wheel.y * 26.f;
+        else if (view == MpView::HostSetup)
+          map_scroll -= e.wheel.y * 28.f;
+        else
+          faction_scroll -= e.wheel.y * 24.f;
       }
     }
     SDL_GetMouseState(&mx, &my);
 
     int sw = 0, sh = 0;
     refresh_display(window, renderer, sw, sh);
-    constexpr float W = 1600.f, H = 900.f;
-    lobby_anim += 0.05f;
 
     renderer.begin_frame(0.04f, 0.05f, 0.06f);
     renderer.begin_ui(window);
@@ -286,18 +299,18 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
 
     if (view == MpView::Browse) {
       renderer.ui_text(40, 80, 2.0f, "MULTIPLAYER", 0.95f, 0.96f, 0.98f, 1.f);
-      renderer.ui_text(40, 112, 1.3f,
-                       "Tailscale: host starts advertising immediately; joiners auto-scan your "
-                       "100.x subnet.",
-                       0.6f, 0.63f, 0.68f, 1.f);
+      draw_clipped_text(renderer, 40, 112, W - 360.f, 1.3f,
+                        "Tailscale: host starts advertising immediately; joiners auto-scan your "
+                        "100.x subnet.",
+                        0.6f, 0.63f, 0.68f, 1.f);
       if (!tailscale_subnet.empty()) {
         char tsbuf[128];
         std::snprintf(tsbuf, sizeof(tsbuf), "Tailscale subnet: %s/24", tailscale_subnet.c_str());
-        renderer.ui_text(40, 132, 1.1f, tsbuf, 0.55f, 0.72f, 0.55f, 1.f);
+        draw_clipped_text(renderer, 40, 132, W - 360.f, 1.1f, tsbuf, 0.55f, 0.72f, 0.55f, 1.f);
       } else if (use_tailscale) {
-        renderer.ui_text(40, 132, 1.1f,
-                         "Tailscale not detected — install Tailscale or enter a manual IP below.",
-                         0.85f, 0.45f, 0.35f, 1.f);
+        draw_clipped_text(renderer, 40, 132, W - 360.f, 1.1f,
+                          "Tailscale not detected — install Tailscale or enter a manual IP below.",
+                          0.85f, 0.45f, 0.35f, 1.f);
       }
 
       if (draw_checkbox(renderer, mx, my, 40, 156, "Use Tailscale network scan", use_tailscale) &&
@@ -320,9 +333,13 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
       renderer.ui_rect(lx, ly, lw, lh, 0.04f, 0.05f, 0.06f, 0.95f);
       const float row_h = 40.f;
       const auto& servers = browser.servers();
-      for (std::size_t i = 0; i < servers.size(); ++i) {
-        const float ry = ly + static_cast<float>(i) * row_h;
-        if (ry > ly + lh - row_h) break;
+      const float content_h = static_cast<float>(servers.size()) * row_h;
+      server_scroll = clamp_scroll(server_scroll, content_h, lh);
+      const int start = static_cast<int>(server_scroll / row_h);
+      for (std::size_t i = start; i < servers.size() && static_cast<int>(i) < start + static_cast<int>(lh / row_h) + 2;
+           ++i) {
+        const float ry = ly + static_cast<float>(i) * row_h - server_scroll;
+        if (ry < ly || ry > ly + lh - row_h) continue;
         const bool sel = static_cast<int>(i) == selected_server;
         const bool hov = rect_hit(renderer, mx, my, lx, ry, lw, row_h);
         renderer.ui_rect(lx, ry, lw, row_h - 2, sel ? 0.16f : (hov ? 0.11f : 0.07f),
@@ -332,15 +349,17 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
         std::snprintf(line, sizeof(line), "%s:%u  %s  (%d players)%s", servers[i].address.c_str(),
                       servers[i].game_port, servers[i].map_name.c_str(), servers[i].players,
                       servers[i].in_game ? " [IN GAME]" : "");
-        renderer.ui_text(lx + 10, ry + 10, 1.25f, line, 0.9f, 0.92f, 0.94f, 1.f);
+        draw_clipped_text(renderer, lx + 10, ry + 10, lw - 20.f, 1.25f, line, 0.9f, 0.92f, 0.94f,
+                          1.f);
         if (clicked && hov) selected_server = static_cast<int>(i);
       }
 
       const float rx = lx + lw + 24;
-      renderer.ui_text(rx, ly - 24, 1.4f, "PLAYER NAME (click to type)", 0.75f, 0.78f, 0.82f, 1.f);
-      draw_text_field(renderer, mx, my, clicked, rx, ly, 280, 32, name_field, "Player", &ip_field);
+      const float ry0 = ly;
+      renderer.ui_text(rx, ry0 - 24, 1.4f, "PLAYER NAME (click to type)", 0.75f, 0.78f, 0.82f, 1.f);
+      draw_text_field(renderer, mx, my, clicked, rx, ry0, 280, 32, name_field, "Player", &ip_field);
 
-      draw_faction_picker(renderer, mx, my, clicked, rx, ly + 50, 280, 220, faction_id,
+      draw_faction_picker(renderer, mx, my, clicked, rx, ry0 + 44, 280, 226, faction_id,
                           faction_scroll);
 
       if (draw_button(renderer, mx, my, lx, H - 120, 140, 40, "REFRESH") && clicked) {
@@ -405,7 +424,7 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
         char sbuf[160];
         std::snprintf(sbuf, sizeof(sbuf), "Server LIVE on %s:%u — advertising on Tailscale/LAN",
                       lip.c_str(), settings.net_port);
-        renderer.ui_text(40, 112, 1.25f, sbuf, 0.45f, 0.85f, 0.45f, 1.f);
+        draw_clipped_text(renderer, 40, 112, W - 80.f, 1.25f, sbuf, 0.45f, 0.85f, 0.45f, 1.f);
       }
       const float lx = 40, ly = 120, lw = 380;
       renderer.ui_text(lx, ly, 1.4f, "SELECT MAP", UiTheme::kOrangeR, UiTheme::kOrangeG,
@@ -414,17 +433,19 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
       const float list_h = 220.f;
       renderer.ui_rect(lx, list_y, lw, list_h, 0.04f, 0.05f, 0.06f, 0.95f);
       const float row_h = 32.f;
-      map_scroll = std::max(0.f, map_scroll);
+      map_scroll = clamp_scroll(map_scroll, static_cast<float>(maps.size()) * row_h, list_h);
       const int start = static_cast<int>(map_scroll / row_h);
-      for (int i = start; i < static_cast<int>(maps.size()) && i < start + 10; ++i) {
+      for (int i = start; i < static_cast<int>(maps.size()) && i < start + static_cast<int>(list_h / row_h) + 2;
+           ++i) {
         const float ry = list_y + i * row_h - map_scroll;
+        if (ry < list_y || ry > list_y + list_h - row_h) continue;
         const bool sel = i == selected_map;
         const bool hov = rect_hit(renderer, mx, my, lx, ry, lw, row_h);
         renderer.ui_rect(lx, ry, lw, row_h - 2, sel ? 0.16f : (hov ? 0.11f : 0.07f),
                          sel ? 0.28f : (hov ? 0.14f : 0.09f), sel ? 0.42f : (hov ? 0.18f : 0.11f),
                          0.96f);
-        renderer.ui_text(lx + 10, ry + 8, 1.2f, maps[i].display_name.c_str(), 0.9f, 0.92f, 0.94f,
-                         1.f);
+        draw_clipped_text(renderer, lx + 10, ry + 8, lw - 20.f, 1.2f, maps[i].display_name.c_str(),
+                          0.9f, 0.92f, 0.94f, 1.f);
         if (clicked && hov) selected_map = i;
       }
 
@@ -448,9 +469,9 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
       if (draw_slider(renderer, mx, my, clicked, lx, list_y + list_h + 148, 260, "BOT DIFFICULTY",
                       bd, 1.f, 5.f))
         bot_difficulty_f = bd;
-      renderer.ui_text(lx, list_y + list_h + 178, 1.05f,
-                       "64+ bots is experimental (CPU). Difficulty 1=easy, 5=hard.", 0.55f, 0.58f,
-                       0.62f, 1.f);
+      draw_clipped_text(renderer, lx, list_y + list_h + 178, lw + 360.f, 1.05f,
+                        "64+ bots is experimental (CPU). Difficulty 1=easy, 5=hard.", 0.55f, 0.58f,
+                        0.62f, 1.f);
 
       draw_faction_picker(renderer, mx, my, clicked, lx + 420, ly + 28, 360, H - 300, faction_id,
                           faction_scroll);
@@ -496,38 +517,52 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
     } else if (view == MpView::Lobby && net) {
       renderer.ui_text(40, 80, 2.0f, "LOBBY", 0.95f, 0.96f, 0.98f, 1.f);
       if (!net->connected() && !net->is_server()) {
-        renderer.ui_text(40, 120, 1.4f, "Connecting...", 0.7f, 0.72f, 0.76f, 1.f);
+        draw_clipped_text(renderer, 40, 112, W - 440.f, 1.4f, "Connecting...", 0.7f, 0.72f, 0.76f,
+                          1.f);
       } else if (!net->lobby_joined()) {
         net->send_join_info(name_field.buf, static_cast<std::uint16_t>(faction_id));
       }
 
       const auto& lob = net->lobby();
       char buf[256];
-      std::snprintf(buf, sizeof(buf), "Map: %s", lob.map_name.empty() ? host_map.display_name.c_str()
-                                                                      : lob.map_name.c_str());
-      renderer.ui_text(40, 118, 1.4f, buf, 0.65f, 0.68f, 0.72f, 1.f);
-      std::snprintf(buf, sizeof(buf), "Late join: %s", lob.allow_late_join ? "ON" : "OFF");
-      renderer.ui_text(40, 142, 1.2f, buf, 0.55f, 0.58f, 0.62f, 1.f);
-      std::snprintf(buf, sizeof(buf), "Bots: %s (%d, diff %d)", bots_enabled ? "ON" : "OFF",
-                    static_cast<int>(bot_count_f + 0.5f),
-                    static_cast<int>(bot_difficulty_f + 0.5f));
-      renderer.ui_text(40, 166, 1.15f, buf, 0.55f, 0.58f, 0.62f, 1.f);
-
-      renderer.ui_text(40, 180, 1.5f, "PLAYERS", UiTheme::kOrangeR, UiTheme::kOrangeG,
-                       UiTheme::kOrangeB, 1.f);
-      renderer.ui_text(W - 400, 156, 1.2f, "PLAYER NAME (click to type):", 0.7f, 0.72f, 0.76f, 1.f);
-      draw_text_field(renderer, mx, my, clicked, W - 400, 178, 360, 32, name_field, "Player",
-                      nullptr);
-      float py = 210;
-      for (const auto& m : lob.members) {
-        const auto& f = faction_at(static_cast<int>(m.faction_id));
-        std::snprintf(buf, sizeof(buf), "%s%s — %s (%s)%s", m.is_host ? "[HOST] " : "", m.name.c_str(),
-                      f.country, f.army, m.ready ? "  READY" : "");
-        renderer.ui_text(48, py, 1.25f, buf, 0.9f, 0.92f, 0.94f, 1.f);
-        py += 26;
+      const float info_y = 112.f;
+      if (net->connected() || net->is_server()) {
+        std::snprintf(buf, sizeof(buf), "Map: %s", lob.map_name.empty() ? host_map.display_name.c_str()
+                                                                        : lob.map_name.c_str());
+        draw_clipped_text(renderer, 40, info_y, 520.f, 1.4f, buf, 0.65f, 0.68f, 0.72f, 1.f);
+        std::snprintf(buf, sizeof(buf), "Late join: %s", lob.allow_late_join ? "ON" : "OFF");
+        draw_clipped_text(renderer, 40, info_y + 24.f, 520.f, 1.2f, buf, 0.55f, 0.58f, 0.62f, 1.f);
+        std::snprintf(buf, sizeof(buf), "Bots: %s (%d, diff %d)", bots_enabled ? "ON" : "OFF",
+                      static_cast<int>(bot_count_f + 0.5f),
+                      static_cast<int>(bot_difficulty_f + 0.5f));
+        draw_clipped_text(renderer, 40, info_y + 48.f, 520.f, 1.15f, buf, 0.55f, 0.58f, 0.62f, 1.f);
       }
 
-      draw_faction_picker(renderer, mx, my, clicked, W - 400, 220, 360, H - 360, faction_id,
+      renderer.ui_text(40, 196, 1.5f, "PLAYERS", UiTheme::kOrangeR, UiTheme::kOrangeG,
+                       UiTheme::kOrangeB, 1.f);
+      renderer.ui_text(W - 400, 112, 1.2f, "PLAYER NAME (click to type):", 0.7f, 0.72f, 0.76f, 1.f);
+      draw_text_field(renderer, mx, my, clicked, W - 400, 134, 360, 32, name_field, "Player",
+                      nullptr);
+
+      const float pl_x = 40.f, pl_y = 234.f, pl_w = 520.f, pl_h = H - 434.f;
+      renderer.ui_rect(pl_x, pl_y, pl_w, pl_h, 0.04f, 0.05f, 0.06f, 0.95f);
+      const float prow_h = 26.f;
+      const float pcontent = static_cast<float>(lob.members.size()) * prow_h;
+      lobby_scroll = clamp_scroll(lobby_scroll, pcontent, pl_h);
+      const int pstart = static_cast<int>(lobby_scroll / prow_h);
+      for (std::size_t mi = pstart; mi < lob.members.size() &&
+                                    static_cast<int>(mi) < pstart + static_cast<int>(pl_h / prow_h) + 2;
+           ++mi) {
+        const auto& m = lob.members[mi];
+        const auto& f = faction_at(static_cast<int>(m.faction_id));
+        const float py = pl_y + static_cast<float>(mi) * prow_h - lobby_scroll + 4.f;
+        if (py < pl_y || py > pl_y + pl_h - prow_h) continue;
+        std::snprintf(buf, sizeof(buf), "%s%s — %s (%s)%s", m.is_host ? "[HOST] " : "", m.name.c_str(),
+                      f.country, f.army, m.ready ? "  READY" : "");
+        draw_clipped_text(renderer, pl_x + 8, py, pl_w - 16.f, 1.25f, buf, 0.9f, 0.92f, 0.94f, 1.f);
+      }
+
+      draw_faction_picker(renderer, mx, my, clicked, W - 400, 188, 360, H - 368, faction_id,
                           faction_scroll);
       if (clicked && faction_id >= 0) net->set_faction(static_cast<std::uint16_t>(faction_id));
 

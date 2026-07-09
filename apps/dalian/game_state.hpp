@@ -77,6 +77,12 @@ struct GameState {
   int team2_faction_id = 3;
 };
 
+struct KillFeedEvent {
+  std::string killer;
+  std::string victim;
+  std::string weapon;
+};
+
 // Side-effects the client handles (audio, net, UI transitions).
 struct SimEvents {
   bool fired_shot = false;
@@ -95,6 +101,7 @@ struct SimEvents {
   std::uint16_t captured_cp_id = 0;
   TeamId captured_cp_owner = TeamId::Neutral;
   std::string voice_cue;  // semantic cue → conquest_voice.hpp
+  std::vector<KillFeedEvent> kill_feed;
 };
 
 }  // namespace dalian

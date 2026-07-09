@@ -212,6 +212,7 @@ struct Vehicle {
 };
 
 struct Enemy {
+  std::string name;
   glm::vec3 pos{};
   glm::vec3 home{};
   TeamId team = TeamId::Team2;
