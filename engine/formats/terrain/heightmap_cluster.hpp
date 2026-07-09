@@ -35,7 +35,11 @@ public:
   bool valid() const { return !patches_.empty(); }
   const std::vector<HeightmapPatch>& patches() const { return patches_; }
 
-  // World-space bilinear height (metres). Falls back to 0 outside all patches.
+  // True when (world_x, world_z) lies inside any loaded patch footprint.
+  bool world_in_cluster(float world_x, float world_z) const;
+
+  // World-space bilinear height (metres). Outside all patches, clamps to the
+  // primary (0,0) patch edge instead of returning 0 (which would drop physics).
   float sample_height(float world_x, float world_z) const;
 
   // Merge the cluster into a single Terrain grid for mesh rendering / legacy paths.

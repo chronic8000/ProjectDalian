@@ -245,6 +245,7 @@ std::uint32_t create_textured_program() {
     uniform int uHasCrack;
     uniform int uAlphaMode;  // 0 opaque, 1 use base-texture alpha (rotor blur etc.)
     uniform vec4 uLmXform;  // xy = uv scale, zw = uv offset into the atlas
+    uniform vec2 uUvScroll;   // tread / animated-UV scroll (tanks)
     uniform vec3 uCamPos;
     uniform vec3 uSunDir;
     uniform vec3 uFogColor;
@@ -293,7 +294,8 @@ std::uint32_t create_textured_program() {
     }
 
     void main() {
-      vec4 baseTex = texture(uBase, vUv0);
+      vec2 uv0 = vUv0 + uUvScroll;
+      vec4 baseTex = texture(uBase, uv0);
       vec3 base = baseTex.rgb;
       vec3 albedo = base;
       if (uHasDetail == 1) {
@@ -306,12 +308,12 @@ std::uint32_t create_textured_program() {
       // Dirt overlay (_di): a low-frequency multiply that breaks up the tiling of
       // the detail texture. Neutral at 0.5, so decode *2.
       if (uHasDirt == 1) {
-        vec3 d = texture(uDirt, vUv0).rgb;
+        vec3 d = texture(uDirt, uv0).rgb;
         albedo *= mix(vec3(1.0), d * 2.0, 0.6);
       }
       // Crack decal (_cr): alpha-masked damage that darkens the surface.
       if (uHasCrack == 1) {
-        vec4 c = texture(uCrack, vUv0);
+        vec4 c = texture(uCrack, uv0);
         albedo = mix(albedo, albedo * c.rgb, c.a);
       }
 
@@ -1653,7 +1655,7 @@ GpuTexturedMesh Renderer::upload_textured(const TexturedMeshData& data) {
 
 void Renderer::draw_textured(const GpuTexturedMesh& mesh, const float* mvp, const float* model,
                              std::uint32_t obj_lightmap, const float* lm_xform, bool cull_backfaces,
-                             int alpha_mode) {
+                             int alpha_mode, float uv_scroll_v, bool scroll_all_uv) {
   if (!initialized_ || mesh.vao == 0) {
     return;
   }
@@ -1694,9 +1696,12 @@ void Renderer::draw_textured(const GpuTexturedMesh& mesh, const float* mvp, cons
   const GLint has_dirt_loc = glGetUniformLocation(textured_program_, "uHasDirt");
   const GLint has_normal_loc = glGetUniformLocation(textured_program_, "uHasNormal");
   const GLint has_crack_loc = glGetUniformLocation(textured_program_, "uHasCrack");
+  const GLint uv_scroll_loc = glGetUniformLocation(textured_program_, "uUvScroll");
   glBindVertexArray(mesh.vao);
   for (const auto& sub : mesh.submeshes) {
     if (sub.index_count == 0) continue;
+    const float scroll = (sub.track_uv || scroll_all_uv) ? uv_scroll_v : 0.f;
+    glUniform2f(uv_scroll_loc, 0.f, scroll);
     glActiveTexture(GL_TEXTURE0);
     // Missing textures fall back to neutral grey rather than skipping the
     // submesh, which would leave a hole you can see through.

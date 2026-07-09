@@ -29,6 +29,7 @@ struct GpuSubmesh {
   std::uint32_t dirt_tex = 0;
   std::uint32_t crack_tex = 0;
   bool cutout = false;  // base texture is an alpha cutout mask (foliage/fence)
+  bool track_uv = false;  // scroll base UVs when the vehicle moves (tank treads)
 };
 
 // A textured mesh with vertices pos(3)/normal(3)/uv0(2)/uv1(2) already in world
@@ -112,7 +113,8 @@ public:
   // (for rotor-blur discs and other cutout/translucent parts).
   void draw_textured(const GpuTexturedMesh& mesh, const float* mvp, const float* model = nullptr,
                      std::uint32_t obj_lightmap = 0, const float* lm_xform = nullptr,
-                     bool cull_backfaces = false, int alpha_mode = 0);
+                     bool cull_backfaces = false, int alpha_mode = 0, float uv_scroll_v = 0.f,
+                     bool scroll_all_uv = false);
   void destroy_textured(GpuTexturedMesh& mesh);
 
   // Terrain draw inputs: colormap (macro colour) + optional lightmap, plus an

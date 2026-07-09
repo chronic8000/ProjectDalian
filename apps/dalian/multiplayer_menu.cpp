@@ -49,6 +49,73 @@ bool draw_checkbox(bf2::Renderer& r, int mx, int my, float x, float y, const cha
   return hov;
 }
 
+bool draw_slider(bf2::Renderer& r, int mx, int my, bool clicked, float x, float y, float w,
+                 const char* label, float& value, float vmin, float vmax) {
+  r.ui_text(x, y, 1.2f, label, 0.75f, 0.78f, 0.82f, 1.f);
+  const float sy = y + 20;
+  r.ui_rect(x, sy, w, 8, 0.10f, 0.11f, 0.12f, 1.f);
+  const float t = (value - vmin) / (vmax - vmin);
+  r.ui_rect(x, sy, w * std::clamp(t, 0.f, 1.f), 8, UiTheme::kOrangeR, UiTheme::kOrangeG,
+            UiTheme::kOrangeB, 1.f);
+  char buf[64];
+  std::snprintf(buf, sizeof(buf), "%.0f", value);
+  r.ui_text(x + w + 10, sy - 4, 1.15f, buf, UiTheme::kOrangeR, UiTheme::kOrangeG,
+            UiTheme::kOrangeB, 1.f);
+  if (clicked && rect_hit(r, mx, my, x, sy - 6, w, 20)) {
+    float dx = 0.f, dy = 0.f;
+    ui_mouse_design(r, mx, my, dx, dy);
+    value = vmin + (vmax - vmin) * std::clamp((dx - x) / w, 0.f, 1.f);
+    return true;
+  }
+  return false;
+}
+
+bool start_listen_server(std::unique_ptr<bf2::Net>& net, std::uint16_t port, bool& is_host,
+                         DiscoveryHost& discovery, bool& discovery_active, bool use_tailscale,
+                         const std::string& tailscale_subnet) {
+  if (net) return true;
+  net = std::make_unique<bf2::Net>();
+  if (!net->host(port, false)) {
+    net.reset();
+    return false;
+  }
+  net->set_lobby_mode(true);
+  is_host = true;
+  if (!discovery_active) {
+    discovery.start(port);
+    discovery.set_broadcast_targets(true, use_tailscale, tailscale_subnet);
+    discovery_active = true;
+  }
+  return true;
+}
+
+void update_host_discovery(DiscoveryHost& discovery, bool& discovery_active, bf2::Net& net,
+                           bool is_host, bool use_tailscale, const std::string& tailscale_subnet,
+                           std::uint16_t port, const char* host_name, const std::string& map_name,
+                           bool allow_late_join, bool in_host_views) {
+  if (!is_host || !in_host_views) {
+    if (discovery_active) {
+      discovery.stop();
+      discovery_active = false;
+    }
+    return;
+  }
+  if (!discovery_active) {
+    discovery.start(port);
+    discovery.set_broadcast_targets(true, use_tailscale, tailscale_subnet);
+    discovery_active = true;
+  }
+  DiscoveryAdvert adv{};
+  adv.game_port = port;
+  adv.host_name = host_name;
+  adv.allow_late_join = allow_late_join;
+  adv.players = static_cast<int>(net.lobby().members.size());
+  adv.in_game = net.game_started();
+  adv.map_name = map_name;
+  discovery.set_advert(adv);
+  discovery.poll();
+}
+
 enum class MpView { Browse, HostSetup, Lobby };
 
 void draw_faction_picker(bf2::Renderer& r, int mx, int my, bool clicked, float x, float y,
@@ -93,6 +160,9 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
   float faction_scroll = 0.f;
   bool allow_late_join = settings.allow_late_join;
   bool use_tailscale = settings.use_tailscale;
+  bool bots_enabled = settings.mp_bots_enabled;
+  float bot_count_f = static_cast<float>(settings.mp_bot_count);
+  float bot_difficulty_f = static_cast<float>(settings.mp_bot_difficulty);
   TextField name_field{};
   TextField ip_field{};
   ip_field.numeric_ip = true;
@@ -112,11 +182,18 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
 
   bool discovery_active = false;
   bool name_was_focused = false;
+  float browse_rescan_timer = 0.f;
   bool running = true;
   while (running) {
-    if (view == MpView::Browse && !scan_started) {
-      browser.begin_scan(settings.net_port, true, use_tailscale, tailscale_subnet);
-      scan_started = true;
+    if (view == MpView::Browse) {
+      browse_rescan_timer += 1.f / 60.f;
+      if (!browser.scanning() && (!scan_started || browse_rescan_timer >= 3.5f)) {
+        if (browse_rescan_timer >= 3.5f) browse_rescan_timer = 0.f;
+        scan_started = true;
+        browser.begin_scan(settings.net_port, true, use_tailscale, tailscale_subnet);
+      }
+    } else {
+      browse_rescan_timer = 0.f;
     }
     browser.poll();
 
@@ -128,21 +205,13 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
     }
     name_was_focused = name_field.focused;
 
-    if (net && is_host && view == MpView::Lobby) {
-      if (!discovery_active) {
-        discovery.start(settings.net_port);
-        discovery_active = true;
-      }
-      DiscoveryAdvert adv{};
-      adv.game_port = settings.net_port;
-      adv.host_name = name_field.buf;
-      adv.allow_late_join = allow_late_join;
-      adv.players = static_cast<int>(net->lobby().members.size());
-      adv.in_game = net->game_started();
-      adv.map_name = net->lobby().map_name.empty() ? host_map.display_name : net->lobby().map_name;
-      discovery.set_advert(adv);
-      discovery.poll();
-    } else if (discovery_active) {
+    if (net && is_host && (view == MpView::HostSetup || view == MpView::Lobby)) {
+      const std::string map_label =
+          host_map.display_name.empty() ? std::string("Server setup") : host_map.display_name;
+      update_host_discovery(discovery, discovery_active, *net, is_host, use_tailscale,
+                            tailscale_subnet, settings.net_port, name_field.buf, map_label,
+                            allow_late_join, true);
+    } else if (discovery_active && !is_host) {
       discovery.stop();
       discovery_active = false;
     }
@@ -159,6 +228,9 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
       result.mp.player_name = name_field.buf;
       result.mp.faction_id = faction_id;
       result.mp.allow_late_join = allow_late_join;
+      result.mp.bots_enabled = bots_enabled;
+      result.mp.bot_count = static_cast<int>(bot_count_f + 0.5f);
+      result.mp.bot_difficulty = static_cast<int>(bot_difficulty_f + 0.5f);
       result.net = std::move(net);
       discovery.stop();
       text_field_blur(name_field);
@@ -166,6 +238,9 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
       settings.player_name = name_field.buf;
       settings.use_tailscale = use_tailscale;
       settings.allow_late_join = allow_late_join;
+      settings.mp_bots_enabled = bots_enabled;
+      settings.mp_bot_count = static_cast<int>(bot_count_f + 0.5f);
+      settings.mp_bot_difficulty = static_cast<int>(bot_difficulty_f + 0.5f);
       settings.default_faction = faction_id;
       settings.manual_server_ip = ip_field.buf;
       settings.save();
@@ -209,18 +284,29 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
 
     if (view == MpView::Browse) {
       renderer.ui_text(40, 80, 2.0f, "MULTIPLAYER", 0.95f, 0.96f, 0.98f, 1.f);
-      renderer.ui_text(40, 112, 1.3f, "Find games on LAN and Tailscale, or host a new lobby.",
+      renderer.ui_text(40, 112, 1.3f,
+                       "Tailscale: host starts advertising immediately; joiners auto-scan your "
+                       "100.x subnet.",
                        0.6f, 0.63f, 0.68f, 1.f);
+      if (!tailscale_subnet.empty()) {
+        char tsbuf[128];
+        std::snprintf(tsbuf, sizeof(tsbuf), "Tailscale subnet: %s/24", tailscale_subnet.c_str());
+        renderer.ui_text(40, 132, 1.1f, tsbuf, 0.55f, 0.72f, 0.55f, 1.f);
+      } else if (use_tailscale) {
+        renderer.ui_text(40, 132, 1.1f,
+                         "Tailscale not detected — install Tailscale or enter a manual IP below.",
+                         0.85f, 0.45f, 0.35f, 1.f);
+      }
 
-      if (draw_checkbox(renderer, mx, my, 40, 140, "Use Tailscale network scan", use_tailscale) &&
+      if (draw_checkbox(renderer, mx, my, 40, 156, "Use Tailscale network scan", use_tailscale) &&
           clicked)
         use_tailscale = !use_tailscale;
 
-      renderer.ui_text(40, 178, 1.2f, "Manual IP (click to type):", 0.7f, 0.72f, 0.76f, 1.f);
-      draw_text_field(renderer, mx, my, clicked, 40, 200, 220, 32, ip_field, "e.g. 100.x.x.x",
+      renderer.ui_text(40, 194, 1.2f, "Manual IP (click to type):", 0.7f, 0.72f, 0.76f, 1.f);
+      draw_text_field(renderer, mx, my, clicked, 40, 216, 220, 32, ip_field, "e.g. 100.x.x.x",
                       &name_field);
 
-      const float lx = 40, ly = 250, lw = W * 0.55f, lh = H - 360;
+      const float lx = 40, ly = 266, lw = W * 0.55f, lh = H - 376;
       renderer.ui_text(lx, ly - 24, 1.4f, browser.scanning() ? "Searching for games..." : "Servers",
                        UiTheme::kOrangeR, UiTheme::kOrangeG, UiTheme::kOrangeB, 1.f);
       if (browser.scanning()) {
@@ -256,11 +342,19 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
                           faction_scroll);
 
       if (draw_button(renderer, mx, my, lx, H - 120, 140, 40, "REFRESH") && clicked) {
+        browse_rescan_timer = 3.5f;
         scan_started = false;
-        browser.clear();
       }
-      if (draw_button(renderer, mx, my, lx + 150, H - 120, 140, 40, "HOST GAME") && clicked)
-        view = MpView::HostSetup;
+      if (draw_button(renderer, mx, my, lx + 150, H - 120, 240, 40, "CREATE TAILSCALE SERVER",
+                      true) &&
+          clicked) {
+        if (start_listen_server(net, settings.net_port, is_host, discovery, discovery_active,
+                                use_tailscale, tailscale_subnet)) {
+          net->set_lobby_config(allow_late_join, "Server setup");
+          net->send_join_info(name_field.buf, static_cast<std::uint16_t>(faction_id));
+          view = MpView::HostSetup;
+        }
+      }
       const bool can_join =
           ((selected_server >= 0 && selected_server < static_cast<int>(servers.size()) &&
             (!servers[selected_server].in_game || servers[selected_server].allow_late_join)) ||
@@ -304,6 +398,13 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
       }
     } else if (view == MpView::HostSetup) {
       renderer.ui_text(40, 80, 2.0f, "HOST NEW GAME", 0.95f, 0.96f, 0.98f, 1.f);
+      if (net && is_host) {
+        const std::string lip = detect_local_ip();
+        char sbuf[160];
+        std::snprintf(sbuf, sizeof(sbuf), "Server LIVE on %s:%u — advertising on Tailscale/LAN",
+                      lip.c_str(), settings.net_port);
+        renderer.ui_text(40, 112, 1.25f, sbuf, 0.45f, 0.85f, 0.45f, 1.f);
+      }
       const float lx = 40, ly = 120, lw = 380;
       renderer.ui_text(lx, ly, 1.4f, "SELECT MAP", UiTheme::kOrangeR, UiTheme::kOrangeG,
                        UiTheme::kOrangeB, 1.f);
@@ -334,31 +435,62 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
           clicked)
         allow_late_join = !allow_late_join;
 
-      draw_faction_picker(renderer, mx, my, clicked, lx + 420, ly, 360, H - 280, faction_id,
+      if (draw_checkbox(renderer, mx, my, lx, list_y + list_h + 72, "Enable AI bots", bots_enabled) &&
+          clicked)
+        bots_enabled = !bots_enabled;
+      float bc = bot_count_f;
+      if (draw_slider(renderer, mx, my, clicked, lx, list_y + list_h + 98, 260, "BOT COUNT", bc, 0.f,
+                      128.f))
+        bot_count_f = bc;
+      float bd = bot_difficulty_f;
+      if (draw_slider(renderer, mx, my, clicked, lx, list_y + list_h + 148, 260, "BOT DIFFICULTY",
+                      bd, 1.f, 5.f))
+        bot_difficulty_f = bd;
+      renderer.ui_text(lx, list_y + list_h + 178, 1.05f,
+                       "64+ bots is experimental (CPU). Difficulty 1=easy, 5=hard.", 0.55f, 0.58f,
+                       0.62f, 1.f);
+
+      draw_faction_picker(renderer, mx, my, clicked, lx + 420, ly + 28, 360, H - 300, faction_id,
                           faction_scroll);
 
-      renderer.ui_text(lx, list_y + list_h + 72, 1.2f, "PLAYER NAME (click to type):", 0.7f, 0.72f,
+      renderer.ui_text(lx, list_y + list_h + 200, 1.2f, "PLAYER NAME (click to type):", 0.7f, 0.72f,
                        0.76f, 1.f);
-      draw_text_field(renderer, mx, my, clicked, lx, list_y + list_h + 94, 280, 32, name_field,
+      draw_text_field(renderer, mx, my, clicked, lx, list_y + list_h + 222, 280, 32, name_field,
                       "Player", &ip_field);
 
-      if (selected_map >= 0 && draw_button(renderer, mx, my, W - 260, H - 120, 200, 48,
-                                           "CREATE LOBBY", true) &&
+      if (selected_map >= 0 &&
+          draw_button(renderer, mx, my, W - 260, H - 120, 200, 48,
+                      net ? "OPEN LOBBY" : "CREATE LOBBY", true) &&
           clicked) {
         host_map = maps[selected_map];
-        net = std::make_unique<bf2::Net>();
-        if (net->host(settings.net_port, false)) {
-          net->set_lobby_mode(true);
+        if (!net) {
+          net = std::make_unique<bf2::Net>();
+          if (net->host(settings.net_port, false)) {
+            net->set_lobby_mode(true);
+            is_host = true;
+            discovery.start(settings.net_port);
+            discovery.set_broadcast_targets(true, use_tailscale, tailscale_subnet);
+            discovery_active = true;
+          } else {
+            net.reset();
+          }
+        }
+        if (net) {
           net->set_lobby_config(allow_late_join, host_map.display_name);
           net->send_join_info(name_field.buf, static_cast<std::uint16_t>(faction_id));
-          is_host = true;
           view = MpView::Lobby;
-        } else {
-          net.reset();
         }
       }
-      if (draw_button(renderer, mx, my, 40, H - 120, 100, 40, "BACK") && clicked)
+      if (draw_button(renderer, mx, my, 40, H - 120, 100, 40, "BACK") && clicked) {
+        if (net && is_host) {
+          net.reset();
+          discovery.stop();
+          discovery_active = false;
+          is_host = false;
+        }
         view = MpView::Browse;
+        scan_started = false;
+      }
     } else if (view == MpView::Lobby && net) {
       renderer.ui_text(40, 80, 2.0f, "LOBBY", 0.95f, 0.96f, 0.98f, 1.f);
       if (!net->connected() && !net->is_server()) {
@@ -374,6 +506,10 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
       renderer.ui_text(40, 118, 1.4f, buf, 0.65f, 0.68f, 0.72f, 1.f);
       std::snprintf(buf, sizeof(buf), "Late join: %s", lob.allow_late_join ? "ON" : "OFF");
       renderer.ui_text(40, 142, 1.2f, buf, 0.55f, 0.58f, 0.62f, 1.f);
+      std::snprintf(buf, sizeof(buf), "Bots: %s (%d, diff %d)", bots_enabled ? "ON" : "OFF",
+                    static_cast<int>(bot_count_f + 0.5f),
+                    static_cast<int>(bot_difficulty_f + 0.5f));
+      renderer.ui_text(40, 166, 1.15f, buf, 0.55f, 0.58f, 0.62f, 1.f);
 
       renderer.ui_text(40, 180, 1.5f, "PLAYERS", UiTheme::kOrangeR, UiTheme::kOrangeG,
                        UiTheme::kOrangeB, 1.f);

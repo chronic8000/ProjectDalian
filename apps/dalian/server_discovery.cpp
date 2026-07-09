@@ -124,7 +124,34 @@ std::string detect_tailscale_subnet() {
   return subnet;
 }
 
-std::string detect_local_ip() { return "127.0.0.1"; }
+std::string detect_local_ip() {
+  const std::string ts = detect_tailscale_subnet();
+  if (!ts.empty()) {
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    if (std::sscanf(ts.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
+      char ip[32];
+      std::snprintf(ip, sizeof(ip), "%u.%u.%u.%u", a, b, c, d);
+      return ip;
+    }
+  }
+#ifdef _WIN32
+  char hostname[256] = {};
+  if (gethostname(hostname, sizeof(hostname)) == 0) {
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    addrinfo* res = nullptr;
+    if (getaddrinfo(hostname, nullptr, &hints, &res) == 0 && res) {
+      char ip[INET_ADDRSTRLEN] = {};
+      auto* in = reinterpret_cast<sockaddr_in*>(res->ai_addr);
+      inet_ntop(AF_INET, &in->sin_addr, ip, sizeof(ip));
+      freeaddrinfo(res);
+      if (ip[0] != '\0' && std::strcmp(ip, "127.0.0.1") != 0) return ip;
+    }
+  }
+#endif
+  return "127.0.0.1";
+}
 
 void ServerBrowser::clear() {
   scanning_ = false;
@@ -215,8 +242,63 @@ bool DiscoveryHost::start(std::uint16_t game_port) {
 
 void DiscoveryHost::set_advert(const DiscoveryAdvert& advert) { advert_ = advert; }
 
+void DiscoveryHost::set_broadcast_targets(bool lan, bool tailscale,
+                                          const std::string& tailscale_subnet) {
+  broadcast_lan_ = lan;
+  broadcast_tailscale_ = tailscale;
+  tailscale_subnet_ = tailscale_subnet;
+}
+
+void DiscoveryHost::send_broadcast_announce() {
+  if (!active_ || !socket_) return;
+  const SocketHandle s =
+      static_cast<SocketHandle>(reinterpret_cast<std::uintptr_t>(socket_));
+  std::string map = advert_.map_name.substr(0, 200);
+  std::string host = advert_.host_name.substr(0, 48);
+  std::array<char, 512> out{};
+  int o = 0;
+  std::memcpy(out.data() + o, kReply, 4);
+  o += 4;
+  out[o++] = static_cast<char>(advert_.game_port & 0xff);
+  out[o++] = static_cast<char>((advert_.game_port >> 8) & 0xff);
+  out[o++] = static_cast<char>(std::clamp(advert_.players, 0, 255));
+  out[o++] = advert_.in_game ? 1 : 0;
+  out[o++] = advert_.allow_late_join ? 1 : 0;
+  const int map_len = std::min(static_cast<int>(map.size()), 200);
+  out[o++] = static_cast<char>(map_len);
+  std::memcpy(out.data() + o, map.data(), static_cast<std::size_t>(map_len));
+  o += map_len;
+  const int host_len = std::min(static_cast<int>(host.size()), 48);
+  out[o++] = static_cast<char>(host_len);
+  std::memcpy(out.data() + o, host.data(), static_cast<std::size_t>(host_len));
+  o += host_len;
+
+  auto send_to = [&](std::uint32_t ip) {
+    sockaddr_in dst{};
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons(discovery_port(game_port_));
+    dst.sin_addr.s_addr = htonl(ip);
+    sendto(s, out.data(), o, 0, reinterpret_cast<sockaddr*>(&dst), sizeof(dst));
+  };
+  if (broadcast_lan_) send_to(0xFFFFFFFFu);
+  // Tailscale is point-to-point; browsers probe each /24 host with PDQ (we reply passively).
+  // Optional: nudge our own Tailscale IP so a concurrent scan picks us up immediately.
+  if (broadcast_tailscale_ && !tailscale_subnet_.empty()) {
+    const std::string self = detect_local_ip();
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    if (std::sscanf(self.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
+      send_to((a << 24) | (b << 16) | (c << 8) | d);
+    }
+  }
+}
+
 void DiscoveryHost::poll() {
   if (!active_ || !socket_) return;
+  broadcast_timer_ += 1.f / 60.f;
+  if (broadcast_timer_ >= 2.5f) {
+    broadcast_timer_ = 0.f;
+    send_broadcast_announce();
+  }
   const SocketHandle s =
       static_cast<SocketHandle>(reinterpret_cast<std::uintptr_t>(socket_));
   char buf[64];

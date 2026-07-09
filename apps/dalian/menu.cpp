@@ -1,5 +1,6 @@
 #include "menu.hpp"
 
+#include "controls_ui.hpp"
 #include "menu_background.hpp"
 #include "menu_music.hpp"
 #include "multiplayer_menu.hpp"
@@ -189,7 +190,8 @@ struct OptionPopupAnchors {
 void draw_options_content(bf2::Renderer& r, Settings& settings, OptTab tab, int mx, int my,
                           bool clicked, int& res_idx, bool& res_open, int& fs_idx, bool& fs_open,
                           int& msaa_idx, bool& msaa_open, int& shadow_idx, bool& shadow_open,
-                          const std::vector<DisplayModeEntry>& modes, OptionPopupAnchors& anchors) {
+                          const std::vector<DisplayModeEntry>& modes, OptionPopupAnchors& anchors,
+                          float& controls_scroll, int& rebind_action, bool& capture_key) {
   const float ox = 48, oy = 160;
   if (tab == OptTab::Video) {
     r.ui_text(ox, oy, 1.5f, "VIDEO SETTINGS", UiTheme::kOrangeR, UiTheme::kOrangeG,
@@ -267,32 +269,23 @@ void draw_options_content(bf2::Renderer& r, Settings& settings, OptTab tab, int 
     settings.anisotropic = static_cast<int>(aniso + 0.5f);
     r.ui_text(ox + 300, y + 24, 1.1f, "(next map load)", 0.55f, 0.58f, 0.62f, 1.f);
   } else if (tab == OptTab::Controls) {
-    r.ui_text(ox, oy, 1.5f, "CONTROLS", UiTheme::kOrangeR, UiTheme::kOrangeG, UiTheme::kOrangeB, 1.f);
-    float y = oy + 36;
-    draw_slider(r, mx, my, clicked, ox, y, 280, "MOUSE SENSITIVITY", settings.mouse_sensitivity,
-                0.02f, 0.4f);
-    y += 52;
-    if (draw_checkbox(r, mx, my, ox, y, "INVERT AIRCRAFT PITCH", settings.invert_air) && clicked)
-      settings.invert_air = !settings.invert_air;
-    y += 48;
-    r.ui_text(ox, y, 1.3f, "KEY REFERENCE", 0.75f, 0.78f, 0.82f, 1.f);
-    y += 24;
-    const char* keys[] = {"WASD - Move", "MOUSE - Look", "SHIFT - Sprint", "SPACE - Jump",
-                          "LMB - Fire", "R - Reload", "E - Enter vehicle", "ESC - Pause menu",
-                          "ALT+F4 - Quit"};
-    for (const char* k : keys) {
-      r.ui_text(ox, y, 1.2f, k, 0.7f, 0.73f, 0.76f, 1.f);
-      y += 20;
-    }
+    draw_controls_options(r, settings, mx, my, clicked, controls_scroll, rebind_action,
+                          capture_key);
   } else {
     r.ui_text(ox, oy, 1.5f, "AUDIO SETTINGS", UiTheme::kOrangeR, UiTheme::kOrangeG,
               UiTheme::kOrangeB, 1.f);
-    r.ui_text(ox, oy + 30, 1.2f, "Master volume affects menu music; SFX volume affects weapons and voice.",
+    r.ui_text(ox, oy + 30, 1.2f,
+              "Master affects menu music; Effects = weapons/explosions; Music = map score; Voice = "
+              "radio cues.",
               0.55f, 0.58f, 0.62f, 1.f);
     float y = oy + 60;
     draw_slider(r, mx, my, clicked, ox, y, 280, "MASTER VOLUME", settings.master_volume, 0.f, 1.f);
     y += 52;
-    draw_slider(r, mx, my, clicked, ox, y, 280, "SFX VOLUME", settings.sfx_volume, 0.f, 1.f);
+    draw_slider(r, mx, my, clicked, ox, y, 280, "EFFECTS VOLUME", settings.sfx_volume, 0.f, 1.f);
+    y += 52;
+    draw_slider(r, mx, my, clicked, ox, y, 280, "MUSIC VOLUME", settings.music_volume, 0.f, 1.f);
+    y += 52;
+    draw_slider(r, mx, my, clicked, ox, y, 280, "VOICE VOLUME", settings.voice_volume, 0.f, 1.f);
   }
 }
 
@@ -459,6 +452,9 @@ bool run_options_panel(SDL_Window* window, bf2::Renderer& renderer, Settings& se
   }
   bool res_open = false, fs_open = false, msaa_open = false, shadow_open = false;
   OptionPopupAnchors anchors{};
+  float controls_scroll = 0.f;
+  int rebind_action = -1;
+  bool capture_key = false;
   bool running = true;
   bool done = false;
   bool result = false;
@@ -473,8 +469,12 @@ bool run_options_panel(SDL_Window* window, bf2::Renderer& renderer, Settings& se
         done = true;
         result = false;
       } else if (handle_display_hotkey(window, settings, e)) {
-      } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) {
+      } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE && !capture_key) {
         done = true;
+      } else if (opt_tab == OptTab::Controls &&
+                 handle_controls_key_capture(e, settings, rebind_action, capture_key)) {
+      } else if (e.type == SDL_MOUSEWHEEL && opt_tab == OptTab::Controls) {
+        controls_scroll -= e.wheel.y * 24.f;
       } else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
         clicked = true;
       } else if (e.type == SDL_WINDOWEVENT &&
@@ -508,7 +508,7 @@ bool run_options_panel(SDL_Window* window, bf2::Renderer& renderer, Settings& se
     }
     draw_options_content(renderer, settings, opt_tab, mx, my, clicked, res_idx, res_open, fs_idx,
                          fs_open, msaa_idx, msaa_open, shadow_idx, shadow_open, display_modes,
-                         anchors);
+                         anchors, controls_scroll, rebind_action, capture_key);
     draw_options_popups(renderer, settings, opt_tab, mx, my, clicked, res_idx, res_open, fs_idx,
                         fs_open, msaa_idx, msaa_open, shadow_idx, shadow_open, display_modes,
                         anchors);
@@ -560,6 +560,9 @@ MenuResult run_main_menu(SDL_Window* window, bf2::Renderer& renderer, Settings& 
   bool res_open = false, fs_open = false, msaa_open = false, shadow_open = false;
   OptTab opt_tab = OptTab::Video;
   OptionPopupAnchors anchors{};
+  float controls_scroll = 0.f;
+  int rebind_action = -1;
+  bool capture_key = false;
 
   MenuMusic bgm;
   if (settings.menu_music_enabled && bgm.init()) {
@@ -581,6 +584,10 @@ MenuResult run_main_menu(SDL_Window* window, bf2::Renderer& renderer, Settings& 
         result.action = MenuAction::Quit;
         running = false;
       } else if (handle_display_hotkey(window, settings, e)) {
+      } else if (tab == TopTab::Options && opt_tab == OptTab::Controls &&
+                 handle_controls_key_capture(e, settings, rebind_action, capture_key)) {
+      } else if (e.type == SDL_MOUSEWHEEL && tab == TopTab::Options && opt_tab == OptTab::Controls) {
+        controls_scroll -= e.wheel.y * 24.f;
       } else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
         clicked = true;
       } else if (e.type == SDL_MOUSEWHEEL && tab == TopTab::Play) {
@@ -712,7 +719,7 @@ MenuResult run_main_menu(SDL_Window* window, bf2::Renderer& renderer, Settings& 
       }
       draw_options_content(renderer, settings, opt_tab, mx, my, clicked, res_idx, res_open, fs_idx,
                            fs_open, msaa_idx, msaa_open, shadow_idx, shadow_open, display_modes,
-                           anchors);
+                           anchors, controls_scroll, rebind_action, capture_key);
       draw_options_popups(renderer, settings, opt_tab, mx, my, clicked, res_idx, res_open, fs_idx,
                           fs_open, msaa_idx, msaa_open, shadow_idx, shadow_open, display_modes,
                           anchors);

@@ -24,6 +24,8 @@ struct PlayerInput {
   float pitch_delta = 0.f;
   bool sprint = false;
   bool jump = false;
+  bool crouch = false;
+  bool prone_toggle = false;
   bool fire = false;
   bool fire_secondary = false;
   bool boost = false;
@@ -118,6 +120,8 @@ struct VehicleWheelSlot {
   std::string mesh_key;
   glm::mat4 rest{1.f};
   bool steers = false;
+  // Tanks/APCs animate treads via scrolling UVs, not by spinning the mesh.
+  bool spin_geometry = true;
   float gear_tuck_angle = 65.f;  // degrees when landing gear stows (jets)
   int gear_tuck_axis = 1;        // 0=Y 1=X 2=Z in render euler order
 };
@@ -147,6 +151,7 @@ struct Vehicle {
   bool has_gunner_seat = false;
   bool is_heli = false;
   bool is_boat = false;
+  bool is_tracked = false;  // tank/APC treads use UV scroll, not wheel spin
   float throttle = 0.f;
   bool wheels_on_ground = true;
   float jet_rpm = 0.f;       // engine spool 0..1 (lags throttle on jets)

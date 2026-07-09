@@ -154,34 +154,60 @@ void HeightmapCluster::patch_world_bounds(const HeightmapPatch& p, float& min_x,
   max_z = min_z + kPatchSpan;
 }
 
+bool HeightmapCluster::world_in_cluster(float world_x, float world_z) const {
+  for (const auto& p : patches_) {
+    float min_x, min_z, max_x, max_z;
+    patch_world_bounds(p, min_x, min_z, max_x, max_z);
+    if (world_x >= min_x && world_x <= max_x && world_z >= min_z && world_z <= max_z) {
+      return true;
+    }
+  }
+  return false;
+}
+
 float HeightmapCluster::sample_height(float world_x, float world_z) const {
+  const HeightmapPatch* patch = nullptr;
+  float sample_x = world_x;
+  float sample_z = world_z;
   for (const auto& p : patches_) {
     float min_x, min_z, max_x, max_z;
     patch_world_bounds(p, min_x, min_z, max_x, max_z);
     if (world_x < min_x || world_x > max_x || world_z < min_z || world_z > max_z) continue;
-
-    const float gx = (world_x - min_x) / p.xz_scale;
-    const float gz = (world_z - min_z) / p.xz_scale;
-    const float w = static_cast<float>(p.width);
-    const float h = static_cast<float>(p.height);
-    const float cx = std::clamp(gx, 0.f, w - 1.001f);
-    const float cz = std::clamp(gz, 0.f, h - 1.001f);
-
-    const int x0 = static_cast<int>(cx);
-    const int z0 = static_cast<int>(cz);
-    const int x1 = std::min(x0 + 1, static_cast<int>(p.width) - 1);
-    const int z1 = std::min(z0 + 1, static_cast<int>(p.height) - 1);
-    const float fx = cx - x0;
-    const float fz = cz - z0;
-
-    auto at = [&](int ix, int iz) {
-      return p.terrain.samples[static_cast<std::size_t>(iz) * p.width + ix].height;
-    };
-    const float top = at(x0, z0) + (at(x1, z0) - at(x0, z0)) * fx;
-    const float bot = at(x0, z1) + (at(x1, z1) - at(x0, z1)) * fx;
-    return top + (bot - top) * fz;
+    patch = &p;
+    break;
   }
-  return 0.f;
+  if (patch == nullptr) {
+    patch = patch_at(0, 0);
+    if (patch == nullptr && !patches_.empty()) patch = &patches_.front();
+    if (patch == nullptr) return 0.f;
+    float min_x, min_z, max_x, max_z;
+    patch_world_bounds(*patch, min_x, min_z, max_x, max_z);
+    sample_x = std::clamp(world_x, min_x, max_x);
+    sample_z = std::clamp(world_z, min_z, max_z);
+  }
+
+  float min_x, min_z, max_x, max_z;
+  patch_world_bounds(*patch, min_x, min_z, max_x, max_z);
+  const float gx = (sample_x - min_x) / patch->xz_scale;
+  const float gz = (sample_z - min_z) / patch->xz_scale;
+  const float w = static_cast<float>(patch->width);
+  const float h = static_cast<float>(patch->height);
+  const float cx = std::clamp(gx, 0.f, w - 1.001f);
+  const float cz = std::clamp(gz, 0.f, h - 1.001f);
+
+  const int x0 = static_cast<int>(cx);
+  const int z0 = static_cast<int>(cz);
+  const int x1 = std::min(x0 + 1, static_cast<int>(patch->width) - 1);
+  const int z1 = std::min(z0 + 1, static_cast<int>(patch->height) - 1);
+  const float fx = cx - x0;
+  const float fz = cz - z0;
+
+  auto at = [&](int ix, int iz) {
+    return patch->terrain.samples[static_cast<std::size_t>(iz) * patch->width + ix].height;
+  };
+  const float top = at(x0, z0) + (at(x1, z0) - at(x0, z0)) * fx;
+  const float bot = at(x0, z1) + (at(x1, z1) - at(x0, z1)) * fx;
+  return top + (bot - top) * fz;
 }
 
 Terrain HeightmapCluster::build_merged_terrain(float step) const {
@@ -253,6 +279,12 @@ heightmap.loadHeightData test_secondary.raw
   // East patch centre is at world x ~ 1536m.
   const float east = cluster.sample_height(1600.f, 0.f);
   if (std::abs(east - 30.f) > 1.f) return false;
+
+  // Far outside all patches: clamp to primary edge instead of returning 0.
+  const float far_west = cluster.sample_height(-5000.f, 0.f);
+  const float edge_west = cluster.sample_height(-1024.f, 0.f);
+  if (std::abs(far_west - edge_west) > 1.f) return false;
+  if (std::abs(far_west) < 0.01f) return false;
 
   const Terrain merged = cluster.build_merged_terrain(16.f);
   return merged.width > 10 && merged.height > 10;

@@ -66,6 +66,9 @@ public:
   // Advance a character controller one step, clamping it to the terrain.
   void step_character(CharacterController& character, float delta_seconds) const;
 
+  // Pin the controller onto the highest walkable surface under (x,z).
+  void snap_character_to_ground(CharacterController& character, float step_up = 0.7f) const;
+
 private:
   struct Tri {
     Float3 a{};

@@ -40,6 +40,9 @@ struct SimInitParams {
   MapConquestLayout map_layout{};
   int team1_faction_id = 0;
   int team2_faction_id = 3;
+  bool bots_enabled = true;
+  int bot_count = 28;
+  int bot_difficulty = 3;  // 1..5
 };
 
 struct EnemyHit {

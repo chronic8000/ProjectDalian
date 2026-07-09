@@ -2,6 +2,7 @@
 
 #include "conquest_types.hpp"
 #include "game_sim_types.hpp"
+#include "soldier_anim.hpp"
 
 #include "engine/physics/physics_world.hpp"
 
@@ -48,6 +49,7 @@ struct GameState {
   float player_health = 100.f;
   float player_regen_delay = 0.f;
   float player_stamina = 100.f;
+  SoldierPose infantry_pose = SoldierPose::Stand;
 
   int mag_ammo = 30;
   int reserve_ammo = 90;

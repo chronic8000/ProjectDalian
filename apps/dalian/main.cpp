@@ -7,15 +7,14 @@
 //
 //   project_dalian <level_server.zip> [objects_client.zip]
 //
-// Controls: WASD move, mouse look, Shift sprint, Space jump, V 1st/3rd,
-// LMB fire, wheel/Q swap weapon, F ballistic/hitscan, R launch missile
-// (from nearest vehicle), B launch/recall FPV recon drone, N launch FPV
-// kamikaze loitering munition (one-way), ESC pause menu (Alt+F4 to quit).
+// Controls: retail BF2 defaults (rebindable in Options). Dalian extras on F9/F10/H.
+// ESC pause menu (Alt+F4 to quit).
 #include <GL/glew.h>
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
 
 #include "app_settings.hpp"
+#include "key_bindings.hpp"
 #include "ui_layout.hpp"
 #include "factions.hpp"
 #include "game_audio.hpp"
@@ -170,6 +169,26 @@ std::string mesh_texture_folder(const std::string& vpath) {
   return bf2::mesh_texture_folder_hint(vpath);
 }
 
+bool is_track_texture_path(const std::string& map_path) {
+  std::string l = map_path;
+  for (char& c : l) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return l.find("track") != std::string::npos;
+}
+
+bool vehicle_path_is_tracked(const std::string& vpath) {
+  std::string l = vpath;
+  for (char& c : l) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  // Path fallback when tweak is unavailable — tanks/SPG only, not wheeled APCs.
+  return l.find("/tnk_") != std::string::npos || l.find("/ustnk_") != std::string::npos ||
+         l.find("/plz") != std::string::npos;
+}
+
+bool vehicle_tweak_is_tracked(const std::string& tweak_text) {
+  std::string l = tweak_text;
+  for (char& c : l) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return l.find("setenginetype c_ettank") != std::string::npos;
+}
+
 // Load (or fetch from cache) a textured GPU mesh and wire up its material textures.
 bf2::GpuTexturedMesh& ensure_textured_mesh(
     const std::string& vpath, std::unordered_map<std::string, bf2::GpuTexturedMesh>& cache,
@@ -190,6 +209,7 @@ bf2::GpuTexturedMesh& ensure_textured_mesh(
           gpu.submeshes[i].dirt_tex = textures.get(data.submeshes[i].dirt_map, tex_folder);
           gpu.submeshes[i].crack_tex = textures.get(data.submeshes[i].crack_map, tex_folder);
           gpu.submeshes[i].cutout = textures.is_cutout(gpu.submeshes[i].base_tex);
+          gpu.submeshes[i].track_uv = is_track_texture_path(data.submeshes[i].base_map);
         }
       }
     } catch (const std::exception&) {
@@ -1228,6 +1248,7 @@ int main(int argc, char** argv) {
           gpu.submeshes[i].dirt_tex = textures.get(data.submeshes[i].dirt_map);
           gpu.submeshes[i].crack_tex = textures.get(data.submeshes[i].crack_map);
           if (gpu.submeshes[i].base_tex == 0) ++missing;
+          gpu.submeshes[i].track_uv = is_track_texture_path(data.submeshes[i].base_map);
         }
         if (missing > 0 && std::getenv("BF2_VEHLIST"))
           std::cerr << "  TEXMISS " << bf2::detail::basename_no_ext(log_vpath) << ": " << missing
@@ -1479,8 +1500,8 @@ int main(int argc, char** argv) {
       const auto is_wheel_name = [&](const std::string& n) {
         const std::string s = lc(n);
         return s.find("wheel") != std::string::npos || s.find("tire") != std::string::npos ||
-               s.find("tyre") != std::string::npos || s.find("track") != std::string::npos ||
-               s.find("sprocket") != std::string::npos;
+               s.find("tyre") != std::string::npos || s.find("sprocket") != std::string::npos ||
+               s.find("drivewheel") != std::string::npos || s.find("driwewheel") != std::string::npos;
       };
       const auto is_steer_name = [&](const std::string& n) {
         const std::string s = lc(n);
@@ -1768,25 +1789,29 @@ int main(int argc, char** argv) {
       }
       {
         const auto meshes_pos = vpath.rfind("/meshes/");
+        bool tracked = vehicle_path_is_tracked(vpath);
+        std::string tweak_text;
         if (meshes_pos != std::string::npos) {
           const std::string folder = vpath.substr(0, meshes_pos);
           const std::string name = bf2::detail::basename_no_ext(vpath);
-          std::string tweak_text;
           for (const char* ext : {".tweak", ".con"}) {
             if (const auto tb = resources.read_bytes(folder + "/" + name + ext)) {
               tweak_text.append(reinterpret_cast<const char*>(tb->data()), tb->size());
               tweak_text.push_back('\n');
             }
           }
-          if (!tweak_text.empty()) {
-            if (v.is_air) {
-              const dalian::VehicleAirProfile air = dalian::parse_vehicle_air_profile(tweak_text);
-              dalian::apply_vehicle_air_profile(v, air);
-              v.jet_sprint = v.sprint_limit;
-            }
-            v.weapons = dalian::parse_vehicle_weapons(tweak_text);
-            dalian::resolve_vehicle_weapon_projectiles(resources, tweak_text, v.weapons);
+          if (!tweak_text.empty()) tracked = vehicle_tweak_is_tracked(tweak_text);
+        }
+        v.is_tracked = tracked;
+        for (auto& w : v.wheels) w.spin_geometry = !tracked;
+        if (!tweak_text.empty()) {
+          if (v.is_air) {
+            const dalian::VehicleAirProfile air = dalian::parse_vehicle_air_profile(tweak_text);
+            dalian::apply_vehicle_air_profile(v, air);
+            v.jet_sprint = v.sprint_limit;
           }
+          v.weapons = dalian::parse_vehicle_weapons(tweak_text);
+          dalian::resolve_vehicle_weapon_projectiles(resources, tweak_text, v.weapons);
         }
       }
       // A rotor part means this is a helicopter (not a jet): it flies the cyclic
@@ -2227,6 +2252,15 @@ int main(int argc, char** argv) {
     sim_init.map_layout = map_layout;
     sim_init.team1_faction_id = map_layout.team1_faction_id;
     sim_init.team2_faction_id = map_layout.team2_faction_id;
+    if (session_mp.enabled) {
+      sim_init.bots_enabled = session_mp.bots_enabled;
+      sim_init.bot_count = session_mp.bot_count;
+      sim_init.bot_difficulty = session_mp.bot_difficulty;
+    } else {
+      sim_init.bots_enabled = settings.mp_bots_enabled;
+      sim_init.bot_count = settings.mp_bot_count;
+      sim_init.bot_difficulty = settings.mp_bot_difficulty;
+    }
     game_sim.init(sim_init);
     if (weapon_profile.valid) game_sim.set_weapon_profile(weapon_profile, true);
     game_sim.state().vehicles = std::move(loaded_vehicles);
@@ -2375,8 +2409,10 @@ int main(int argc, char** argv) {
   SDL_SetRelativeMouseMode(SDL_TRUE);
 
   bool running = true;
-  bool mouse_look = true;
   bool pause_open = false;
+  bool scoreboard_open = false;
+  dalian::InputRouter input;
+  bool rmb_was_down = false;
 
   // ---- Multiplayer session (milestone 1: players walking/shooting in sync) ---
   std::unique_ptr<bf2::Net> owned_net = std::move(session_net);
@@ -2407,6 +2443,10 @@ int main(int argc, char** argv) {
     const std::uint16_t adv_port =
         session_mp.enabled ? session_mp.port : net_port;
     session_discovery.start(adv_port);
+    const std::string ts_subnet =
+        settings.tailscale_subnet.empty() ? dalian::detect_tailscale_subnet()
+                                        : settings.tailscale_subnet;
+    session_discovery.set_broadcast_targets(true, settings.use_tailscale, ts_subnet);
   }
 
   Uint64 prev = SDL_GetPerformanceCounter();
@@ -2752,7 +2792,8 @@ int main(int argc, char** argv) {
       if (!spawn_point_owned(static_cast<std::size_t>(selected_spawn))) pick_spawnable();
       if (spawn_point_owned(static_cast<std::size_t>(selected_spawn))) {
         const glm::vec3 safe = find_safe_spawn(deploy_markers[selected_spawn].deploy_pos);
-        player.position = {safe.x, safe.y + player.eye_height + 0.5f, safe.z};
+        player.position = {safe.x, safe.y + player.eye_height, safe.z};
+        world.snap_character_to_ground(player);
         player.vertical_velocity = 0.f;
       }
     }
@@ -2772,6 +2813,20 @@ int main(int argc, char** argv) {
     }
   };
   apply_loadout();  // sensible defaults so the weapon/ammo exist behind the menu
+  {
+    const float feet = player.position.y - player.eye_height;
+    const float terr = world.terrain_height(player.position.x, player.position.z);
+    const float support =
+        world.support_height(player.position.x, player.position.z, feet + 0.7f, 0.7f);
+    std::cout << "Spawn ground: feet=" << feet << " terrain=" << terr << " support=" << support
+              << " patches="
+              << (level.has_heightmap_cluster ? level.heightmap_cluster.patches().size() : 0)
+              << " collision_tris=" << world.collision_triangle_count() << '\n';
+    if (std::fabs(feet - support) > 2.f) {
+      std::cerr << "WARNING: spawn is not on walkable ground — set Options -> BF2 install path "
+                   "and verify HeightmapCluster loaded in the console log\n";
+    }
+  }
   if (!deploy_open) game_sim.begin_match();
 
   std::string map_label = std::filesystem::path(archive_path).parent_path().filename().string();
@@ -2988,8 +3043,10 @@ int main(int argc, char** argv) {
     deploy_click = false;
     air_stick_moved = false;
     jet_gear_toggle = false;
-    // Free the cursor for menu interaction; capture it for mouse-look otherwise.
-    const SDL_bool want_rel = (mouse_look && !deploy_open) ? SDL_TRUE : SDL_FALSE;
+    input.begin_frame();
+    // Capture the cursor in-game; free it for deploy/pause menus.
+    const bool mouse_look = !deploy_open && !pause_open;
+    const SDL_bool want_rel = mouse_look ? SDL_TRUE : SDL_FALSE;
     if (SDL_GetRelativeMouseMode() != want_rel) SDL_SetRelativeMouseMode(want_rel);
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
@@ -3001,11 +3058,11 @@ int main(int argc, char** argv) {
         renderer.set_viewport(cur_w, cur_h);
       } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) {
         if (deploy_open) {
-          deploy_open = false;  // close deploy screen without quitting
+          deploy_open = false;
         } else if (headless_shot) {
-          running = false;  // headless capture may still abort on ESC
+          running = false;
         } else {
-          pause_open = true;  // in-game pause menu (Alt+F4 / window X to quit)
+          pause_open = true;
         }
       } else if (deploy_open && e.type == SDL_MOUSEWHEEL) {
         deploy_side1_scroll -= e.wheel.y * 24.f;
@@ -3013,62 +3070,95 @@ int main(int argc, char** argv) {
       } else if (deploy_open && e.type == SDL_MOUSEBUTTONDOWN &&
                  e.button.button == SDL_BUTTON_LEFT) {
         deploy_click = true;
-      } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_RETURN && !drone_mode &&
-                 in_vehicle < 0) {
-        deploy_open = !deploy_open;  // open/close the deploy (spawn) screen
-      } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_TAB) {
-        // Mouse flight is mandatory while piloting — TAB only toggles look on foot.
-        const bool piloting =
-            in_vehicle >= 0 && vehicles[in_vehicle].is_air && player_seat == 0;
-        if (!piloting) {
-          mouse_look = !mouse_look;
-          SDL_SetRelativeMouseMode(mouse_look ? SDL_TRUE : SDL_FALSE);
+      } else if (!pause_open && !deploy_open &&
+                 (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP || e.type == SDL_MOUSEBUTTONDOWN ||
+                  e.type == SDL_MOUSEBUTTONUP || e.type == SDL_MOUSEWHEEL)) {
+        input.handle_event(e, settings.bindings, false);
+      } else if (e.type == SDL_MOUSEMOTION && mouse_look && drone_mode && !deploy_open) {
+        drone_stick_roll += e.motion.xrel * 0.020f;
+        drone_stick_pitch += e.motion.yrel * 0.020f;
+      } else if (e.type == SDL_MOUSEMOTION && mouse_look && !deploy_open && !pause_open &&
+                 air_input_grace <= 0.f && in_vehicle >= 0 && vehicles[in_vehicle].is_air &&
+                 player_seat == 0) {
+        air_stick_moved = true;
+        const Vehicle& av = vehicles[in_vehicle];
+        const float inv = air_invert_fn() ? -1.f : 1.f;
+        const float sens_scale = sensitivity / 0.12f;
+        const float pitch_sens = (av.is_heli ? 0.020f : 0.032f) * sens_scale;
+        const float roll_sens = (av.is_heli ? 0.016f : 0.018f) * sens_scale;
+        const float ground_pitch_scale =
+            (!av.is_heli && av.wheels_on_ground && !av.jet_airborne) ? 0.28f : 1.f;
+        air_pitch_stick = std::clamp(
+            air_pitch_stick + e.motion.yrel * pitch_sens * inv * ground_pitch_scale, -1.f, 1.f);
+        if (av.is_heli) {
+          air_roll_stick = std::clamp(air_roll_stick + e.motion.xrel * roll_sens, -1.f, 1.f);
+        } else if (!av.wheels_on_ground) {
+          air_roll_stick =
+              std::clamp(air_roll_stick - e.motion.xrel * roll_sens, -1.f, 1.f);
         }
-      } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_v && have_soldier) {
-        third_person = !third_person;
-      } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_e && !drone_mode) {
-        pending_enter_exit = true;
-      } else if (e.type == SDL_KEYDOWN && in_vehicle >= 0 && e.key.keysym.sym >= SDLK_F1 &&
-                 e.key.keysym.sym <= SDLK_F8) {
-        pending_seat_switch = static_cast<int>(e.key.keysym.sym - SDLK_F1);
-      } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_f) {
-        ballistic = !ballistic;
-      } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_r && !drone_mode &&
-                 in_vehicle < 0 && !deploy_open) {
-        // Reload: pull rounds from the reserve into the magazine.
-        if (!reloading && reserve_ammo > 0 && mag_ammo < kMagSize) {
-          reloading = true;
-          reload_timer = 2.0f;
-          if (have_game_audio) {
-            game_audio.play_weapon_reload(resources, !third_person);
-            game_audio.play_voice(resources, voice_bank, "AUTO_MOODGP_reloading");
+      } else if (e.type == SDL_MOUSEMOTION && mouse_look && !deploy_open && !pause_open) {
+        const float inv_y = settings.invert_mouse_y ? -1.f : 1.f;
+        yaw += e.motion.xrel * sensitivity;
+        pitch -= e.motion.yrel * sensitivity * inv_y;
+        pitch = std::clamp(pitch, -89.f, 89.f);
+      } else if (e.type == SDL_WINDOWEVENT &&
+                 (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
+                  e.window.event == SDL_WINDOWEVENT_RESIZED ||
+                  e.window.event == SDL_WINDOWEVENT_RESTORED ||
+                  e.window.event == SDL_WINDOWEVENT_MAXIMIZED)) {
+        dalian::sync_drawable_size(window, cur_w, cur_h);
+      }
+    }
+
+    if (!pause_open && !deploy_open) {
+      const Uint8* kb = SDL_GetKeyboardState(nullptr);
+      input.poll_keyboard(kb, settings.bindings);
+      scoreboard_open = input.down(dalian::GameAction::Scoreboard);
+
+      if (!drone_mode) {
+        if (input.consume(dalian::GameAction::DeployScreen) && in_vehicle < 0) {
+          deploy_open = !deploy_open;
+        }
+        if (input.consume(dalian::GameAction::CycleCamera) && have_soldier) {
+          third_person = !third_person;
+        }
+        if (input.consume(dalian::GameAction::EnterExit)) pending_enter_exit = true;
+        for (int s = 0; s < 6; ++s) {
+          if (input.consume(static_cast<dalian::GameAction>(
+                  static_cast<int>(dalian::GameAction::Seat1) + s))) {
+            pending_seat_switch = s;
           }
         }
-      } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_t && !drone_mode) {
-        launch_requested = true;  // fire an AT missile (from a launcher/vehicle)
-      } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_g && !drone_mode &&
-                 in_vehicle >= 0 && in_vehicle < static_cast<int>(vehicles.size()) &&
-                 vehicles[in_vehicle].is_air && !vehicles[in_vehicle].is_heli && player_seat == 0) {
-        jet_gear_toggle = true;
-      } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_g && !drone_mode &&
-                 in_vehicle < 0 && !deploy_open) {
-        // Throw a frag grenade in an arc along the aim direction.
-        if (grenades_left > 0) {
-          const glm::vec3 eye0(player.position.x, player.position.y, player.position.z);
-          glm::vec3 fr;
-          fr.x = std::cos(glm::radians(yaw)) * std::cos(glm::radians(pitch));
-          fr.y = std::sin(glm::radians(pitch));
-          fr.z = std::sin(glm::radians(yaw)) * std::cos(glm::radians(pitch));
-          fr = glm::normalize(fr);
-          live_grenades.push_back({eye0 + fr * 0.6f, fr * 22.f + glm::vec3(0, 3.f, 0), 3.0f});
-          --grenades_left;
-          if (have_game_audio)
-            game_audio.play_voice(resources, voice_bank, "AUTO_MOODGP_throwingfraggrenade");
+        if (input.consume(dalian::GameAction::Reload) && in_vehicle < 0) {
+          if (!reloading && reserve_ammo > 0 && mag_ammo < kMagSize) {
+            reloading = true;
+            reload_timer = 2.0f;
+            if (have_game_audio) {
+              game_audio.play_weapon_reload(resources, !third_person);
+              game_audio.play_voice(resources, voice_bank, "AUTO_MOODGP_reloading");
+            }
+          }
         }
-      } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_c && !drone_mode &&
-                 in_vehicle < 0 && !deploy_open) {
-        // Place a C4 charge on the surface ahead (Spec Ops / Sniper claymore).
-        if (c4_left > 0) {
+        if (in_vehicle >= 0 && in_vehicle < static_cast<int>(vehicles.size()) &&
+            vehicles[in_vehicle].is_air && !vehicles[in_vehicle].is_heli && player_seat == 0 &&
+            input.consume(dalian::GameAction::PickupKit)) {
+          jet_gear_toggle = true;
+        }
+        if (in_vehicle < 0 && input.consume(dalian::GameAction::WeaponSlot4)) {
+          if (grenades_left > 0) {
+            const glm::vec3 eye0(player.position.x, player.position.y, player.position.z);
+            glm::vec3 fr;
+            fr.x = std::cos(glm::radians(yaw)) * std::cos(glm::radians(pitch));
+            fr.y = std::sin(glm::radians(pitch));
+            fr.z = std::sin(glm::radians(yaw)) * std::cos(glm::radians(pitch));
+            fr = glm::normalize(fr);
+            live_grenades.push_back({eye0 + fr * 0.6f, fr * 22.f + glm::vec3(0, 3.f, 0), 3.0f});
+            --grenades_left;
+            if (have_game_audio)
+              game_audio.play_voice(resources, voice_bank, "AUTO_MOODGP_throwingfraggrenade");
+          }
+        }
+        if (in_vehicle < 0 && input.consume(dalian::GameAction::WeaponSlot5) && c4_left > 0) {
           const glm::vec3 eye0(player.position.x, player.position.y, player.position.z);
           glm::vec3 fr;
           fr.x = std::cos(glm::radians(yaw)) * std::cos(glm::radians(pitch));
@@ -3081,49 +3171,40 @@ int main(int argc, char** argv) {
           placed_c4.push_back(pt);
           --c4_left;
         }
-      } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_x && !drone_mode &&
-                 in_vehicle >= 0 && vehicles[in_vehicle].is_air) {
-        heli_flare_requested = true;  // punch out a countermeasure burst
-      } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_x && !drone_mode &&
-                 in_vehicle < 0 && !deploy_open) {
-        // Detonate all placed C4.
-        for (const auto& pt : placed_c4) {
-          explode_at(pt, 7.f, 160.f);
-        }
-        placed_c4.clear();
-      } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_h && !drone_mode &&
-                 in_vehicle < 0 && !deploy_open) {
-        // Medic self-heal.
-        if (has_medkit && medkit_cd <= 0.f && player_health < 100.f) {
-          player_health = std::min(100.f, player_health + 45.f);
-          medkit_cd = 6.f;
-        }
-      } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_n && !drone_mode) {
-        kamikaze_launch_requested = true;
-      } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_b) {
-        // Launch or recall the FPV recon drone (not available during kamikaze).
-        if (kamikaze_mode) {
-          // No recall on a loitering munition.
-        } else {
-          drone_mode = !drone_mode;
-          if (drone_mode) {
-            drone = bf2::DroneController{};
-            const glm::vec3 launch(player.position.x, player.position.y + 0.6f,
-                                   player.position.z);
-            drone.position = launch;
-            drone_prev_pos = launch;
-            drone_throttle = 0.30f;  // near hover
-            signal = 1.f;
+        if (input.consume(dalian::GameAction::SmokeFlares)) {
+          if (in_vehicle >= 0 && vehicles[in_vehicle].is_air) {
+            heli_flare_requested = true;
+          } else if (in_vehicle < 0) {
+            for (const auto& pt : placed_c4) explode_at(pt, 7.f, 160.f);
+            placed_c4.clear();
           }
         }
-      } else if (e.type == SDL_MOUSEMOTION && mouse_look && drone_mode && !deploy_open) {
-        drone_stick_roll += e.motion.xrel * 0.020f;
-        drone_stick_pitch += e.motion.yrel * 0.020f;
-      } else if (!drone_mode && !deploy_open &&
-                 ((e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_q) ||
-                  e.type == SDL_MOUSEWHEEL)) {
-        // Cycle to the next weapon that loads successfully (Q or mouse wheel).
-        const int dir = (e.type == SDL_MOUSEWHEEL && e.wheel.y < 0) ? -1 : 1;
+        if (in_vehicle < 0 && input.consume(dalian::GameAction::MedkitHeal)) {
+          if (has_medkit && medkit_cd <= 0.f && player_health < 100.f) {
+            player_health = std::min(100.f, player_health + 45.f);
+            medkit_cd = 6.f;
+          }
+        }
+        if (input.consume(dalian::GameAction::KamikazeDrone)) kamikaze_launch_requested = true;
+        if (input.consume(dalian::GameAction::ReconDrone)) {
+          if (!kamikaze_mode) {
+            drone_mode = !drone_mode;
+            if (drone_mode) {
+              drone = bf2::DroneController{};
+              const glm::vec3 launch(player.position.x, player.position.y + 0.6f,
+                                     player.position.z);
+              drone.position = launch;
+              drone_prev_pos = launch;
+              drone_throttle = 0.30f;
+              signal = 1.f;
+            }
+          }
+        }
+      }
+
+      const int wheel = input.weapon_wheel_delta();
+      if (!drone_mode && !deploy_open && wheel != 0) {
+        const int dir = wheel > 0 ? 1 : -1;
         for (std::size_t step = 0; step < weapon_defs.size(); ++step) {
           weapon_index = (weapon_index + weapon_defs.size() + dir) % weapon_defs.size();
           if (load_weapon(weapon_index)) {
@@ -3133,40 +3214,7 @@ int main(int argc, char** argv) {
           }
         }
         bind_weapon_audio();
-      } else if (e.type == SDL_MOUSEMOTION && mouse_look && !deploy_open && !pause_open &&
-                 air_input_grace <= 0.f && in_vehicle >= 0 &&
-                 vehicles[in_vehicle].is_air && player_seat == 0) {
-        // BF2 aircraft mouse:
-        //   Jet:  pull BACK (mouse down) = nose UP / pitch; mouse left/right = bank (air only).
-        //   Heli: mouse = cyclic tilt (pitch + roll).
-        air_stick_moved = true;
-        const Vehicle& av = vehicles[in_vehicle];
-        const float inv = air_invert_fn() ? -1.f : 1.f;
-        const float sens_scale = sensitivity / 0.12f;
-        const float pitch_sens = (av.is_heli ? 0.020f : 0.032f) * sens_scale;
-        const float roll_sens = (av.is_heli ? 0.016f : 0.018f) * sens_scale;
-        const float ground_pitch_scale =
-            (!av.is_heli && av.wheels_on_ground && !av.jet_airborne) ? 0.28f : 1.f;
-        // Pull back on stick (mouse toward you / cursor down) = positive pitch input.
-        air_pitch_stick = std::clamp(
-            air_pitch_stick + e.motion.yrel * pitch_sens * inv * ground_pitch_scale, -1.f, 1.f);
-        if (av.is_heli) {
-          air_roll_stick = std::clamp(air_roll_stick + e.motion.xrel * roll_sens, -1.f, 1.f);
-        } else if (!av.wheels_on_ground) {
-          // Bank: mouse left = bank left (negative roll rate).
-          air_roll_stick =
-              std::clamp(air_roll_stick - e.motion.xrel * roll_sens, -1.f, 1.f);
-        }
-      } else if (e.type == SDL_MOUSEMOTION && mouse_look && !deploy_open && !pause_open) {
-        yaw += e.motion.xrel * sensitivity;
-        pitch -= e.motion.yrel * sensitivity;
-        pitch = std::clamp(pitch, -89.f, 89.f);
-      } else if (e.type == SDL_WINDOWEVENT &&
-                 (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
-                  e.window.event == SDL_WINDOWEVENT_RESIZED ||
-                  e.window.event == SDL_WINDOWEVENT_RESTORED ||
-                  e.window.event == SDL_WINDOWEVENT_MAXIMIZED)) {
-        dalian::sync_drawable_size(window, cur_w, cur_h);
+        input.clear_wheel_delta();
       }
     }
 
@@ -3257,30 +3305,31 @@ int main(int argc, char** argv) {
           in_vehicle >= 0 && in_vehicle < static_cast<int>(vehicles.size()) &&
           vehicles[in_vehicle].is_air && player_seat == 0;
       const bool in_jet_pilot = in_air_pilot && !vehicles[in_vehicle].is_heli;
-      if (keys != nullptr && !deploy_open) {
+      if (!deploy_open) {
         glm::vec3 move(0.f);
-        if (keys[SDL_SCANCODE_W]) move += flat_front;
-        if (keys[SDL_SCANCODE_S]) move -= flat_front;
-        if (keys[SDL_SCANCODE_D]) move += right;
-        if (keys[SDL_SCANCODE_A]) move -= right;
+        if (input.down(dalian::GameAction::MoveForward)) move += flat_front;
+        if (input.down(dalian::GameAction::MoveBack)) move -= flat_front;
+        if (input.down(dalian::GameAction::StrafeRight)) move += right;
+        if (input.down(dalian::GameAction::StrafeLeft)) move -= right;
         inp.move_wish = move;
         if (in_air_pilot) {
-          // BF2: Shift = afterburner (jets) / extra rotor (helis).
-          inp.boost = keys[SDL_SCANCODE_LSHIFT];
-          inp.pitch_up = keys[SDL_SCANCODE_SPACE];
+          inp.boost = input.down(dalian::GameAction::Sprint);
+          inp.pitch_up = input.down(dalian::GameAction::Jump);
           inp.jump = false;
         } else {
-          inp.sprint = keys[SDL_SCANCODE_LSHIFT];
-          inp.jump = keys[SDL_SCANCODE_SPACE];
+          inp.sprint = input.down(dalian::GameAction::Sprint);
+          inp.jump = input.down(dalian::GameAction::Jump);
+          inp.crouch = input.down(dalian::GameAction::Crouch);
+          if (input.consume(dalian::GameAction::Prone)) inp.prone_toggle = true;
         }
-        const bool w_down = keys[SDL_SCANCODE_W];
+        const bool w_down = input.down(dalian::GameAction::MoveForward);
         if (in_jet_pilot) {
           if (w_down && !jet_w_was_down) {
             const float t = game_sim.state().round_time;
             if (t - last_jet_w_tap < 0.38f) jet_afterburner = !jet_afterburner;
             last_jet_w_tap = t;
           }
-          if (keys[SDL_SCANCODE_LCTRL]) jet_afterburner = true;
+          if (input.down(dalian::GameAction::Crouch)) jet_afterburner = true;
           const float sprint =
               in_vehicle >= 0 ? vehicles[in_vehicle].jet_sprint : 0.f;
           if (jet_afterburner && sprint <= 0.01f) jet_afterburner = false;
@@ -3288,11 +3337,16 @@ int main(int argc, char** argv) {
         }
         jet_w_was_down = w_down;
         inp.gear_toggle = jet_gear_toggle;
-        inp.throttle_up = keys[SDL_SCANCODE_W];
-        inp.throttle_down = keys[SDL_SCANCODE_S];
-        inp.yaw_left = keys[SDL_SCANCODE_A];
-        inp.yaw_right = keys[SDL_SCANCODE_D];
+        inp.throttle_up = input.down(dalian::GameAction::MoveForward);
+        inp.throttle_down = input.down(dalian::GameAction::MoveBack);
+        inp.yaw_left = input.down(dalian::GameAction::StrafeLeft);
+        inp.yaw_right = input.down(dalian::GameAction::StrafeRight);
       }
+      const bool rmb = (mouse & SDL_BUTTON(SDL_BUTTON_RIGHT)) != 0;
+      if (!deploy_open && in_vehicle < 0 && has_at && rmb && !rmb_was_down) {
+        launch_requested = true;
+      }
+      rmb_was_down = rmb;
       inp.look_forward = front;
       inp.look_right = right;
       inp.eye = glm::vec3(player.position.x, player.position.y, player.position.z);
@@ -3357,8 +3411,7 @@ int main(int argc, char** argv) {
         air_pitch_stick = air_roll_stick = 0.f;
         jet_afterburner = false;
       }
-      if (ev.capture_mouse) {
-        mouse_look = true;
+      if (ev.capture_mouse && !deploy_open && !pause_open) {
         SDL_SetRelativeMouseMode(SDL_TRUE);
       }
       if (ev.discard_mouse_delta) {
@@ -3727,10 +3780,12 @@ int main(int argc, char** argv) {
       const auto vit = vehicle_cache.find(v.mesh_key);
       if (vit != vehicle_cache.end() && vit->second.vao != 0) {
         const glm::mat4 mvp = view_proj * v.model;
+        const float track_scroll =
+            v.is_tracked && !v.wheel_spin.empty() ? v.wheel_spin[0] * 0.08f : 0.f;
         // Cull back faces on the hull so you don't see the interior back-faces
         // through hatches/viewports (the "see inside the vehicle" artifact).
         renderer.draw_textured(vit->second, glm::value_ptr(mvp), glm::value_ptr(v.model), 0, nullptr,
-                               true);
+                               true, 0, track_scroll);
         ++drawn;
       }
       const float gear_anim = (v.is_air && !v.is_heli) ? v.jet_gear_anim : 0.f;
@@ -3742,9 +3797,11 @@ int main(int argc, char** argv) {
                                                  wslot.gear_tuck_axis);
         if (wslot.steers) pm = glm::rotate(pm, v.visual_steer, glm::vec3(0, 1, 0));
         const float spin = wi < v.wheel_spin.size() ? v.wheel_spin[wi] : 0.f;
-        pm = glm::rotate(pm, spin, glm::vec3(1, 0, 0));
+        if (wslot.spin_geometry) pm = glm::rotate(pm, spin, glm::vec3(1, 0, 0));
+        const float uv_scroll = wslot.spin_geometry ? 0.f : spin * 0.08f;
         const glm::mat4 mvp = view_proj * pm;
-        renderer.draw_textured(wit->second, glm::value_ptr(mvp), glm::value_ptr(pm));
+        renderer.draw_textured(wit->second, glm::value_ptr(mvp), glm::value_ptr(pm), 0, nullptr,
+                               false, 0, uv_scroll, !wslot.spin_geometry);
         ++drawn;
       }
       for (const auto& gslot : v.gear_parts) {
@@ -3796,8 +3853,13 @@ int main(int argc, char** argv) {
                                   player.desired_velocity.z * player.desired_velocity.z);
       const bool moving = spd > 0.3f;
       const bool running = spd > 8.0f;
+      const dalian::SoldierPose pose = game_sim.state().infantry_pose;
       const bf2::AnimationClip* clip = nullptr;
-      if (running && soldier_anims.run) {
+      if (pose == dalian::SoldierPose::Prone && soldier_anims.prone) {
+        clip = soldier_anims.prone;
+      } else if (pose == dalian::SoldierPose::Crouch && soldier_anims.crouch) {
+        clip = soldier_anims.crouch;
+      } else if (running && soldier_anims.run) {
         clip = soldier_anims.run;
       } else if (moving && soldier_anims.walk) {
         clip = soldier_anims.walk;
@@ -4470,6 +4532,24 @@ int main(int argc, char** argv) {
           std::snprintf(line, sizeof(line), "F%d  %-9s %s", i + 1, v.seats[i].name, who);
           renderer.ui_text(px + 12.f, py + 26.f + i * lh, 1.25f, line, r, g, b, 1.f);
         }
+      }
+
+      // ---- Scoreboard (hold Tab — BF2 default) ------------------------------
+      if (scoreboard_open && !deploy_open && !drone_mode) {
+        const float sx = W * 0.5f - 280.f;
+        const float sy = 80.f;
+        renderer.ui_rect(sx, sy, 560.f, 220.f, 0.04f, 0.05f, 0.07f, 0.88f);
+        renderer.ui_text(sx + 16.f, sy + 10.f, 1.8f, "SCOREBOARD", 0.95f, 0.96f, 0.98f, 1.f);
+        char line[128];
+        std::snprintf(line, sizeof(line), "You   K %d   D %d   HP %.0f", player_kills, player_deaths,
+                      player_health);
+        renderer.ui_text(sx + 16.f, sy + 44.f, 1.35f, line, 0.75f, 0.82f, 0.95f, 1.f);
+        std::snprintf(line, sizeof(line), "Tickets   %d  —  %d", tickets.team1_tickets,
+                      tickets.team2_tickets);
+        renderer.ui_text(sx + 16.f, sy + 72.f, 1.25f, line, 0.7f, 0.73f, 0.76f, 1.f);
+        renderer.ui_text(sx + 16.f, sy + 100.f, 1.1f,
+                         "Commo rose, chat, squad screen — coming soon (BF2 keys reserved).", 0.55f,
+                         0.58f, 0.62f, 1.f);
       }
 
       // ---- Conquest HUD: ticket bleed + tactical minimap --------------------

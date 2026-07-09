@@ -27,6 +27,9 @@ struct MultiplayerConfig {
   std::uint16_t port = 27015;
   std::string player_name;
   int faction_id = 0;
+  bool bots_enabled = true;
+  int bot_count = 28;
+  int bot_difficulty = 3;  // 1 easy .. 5 hard
 };
 
 enum class MenuAction { None, StartMap, StartMultiplayer, Quit, LeaveToMenu };

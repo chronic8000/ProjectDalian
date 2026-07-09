@@ -1,5 +1,7 @@
 #pragma once
 
+#include "key_bindings.hpp"
+
 #include <SDL.h>
 
 #include <algorithm>
@@ -34,6 +36,10 @@ struct Settings {
   int anisotropic = 8;
   float master_volume = 1.f;
   float sfx_volume = 1.f;
+  float music_volume = 0.85f;
+  float voice_volume = 1.f;
+  bool invert_mouse_y = false;
+  KeyBindings bindings;
   std::string bf2_root;
   std::string player_name = "Player";
   std::uint16_t net_port = 27015;
@@ -42,6 +48,9 @@ struct Settings {
   std::string manual_server_ip;
   bool allow_late_join = true;
   int default_faction = 0;
+  bool mp_bots_enabled = true;
+  int mp_bot_count = 28;
+  int mp_bot_difficulty = 3;
   bool menu_music_enabled = true;
   std::string menu_music;
 
@@ -74,6 +83,11 @@ struct Settings {
       else if (key == "anisotropic") s.anisotropic = std::atoi(val.c_str());
       else if (key == "master_volume") s.master_volume = static_cast<float>(std::atof(val.c_str()));
       else if (key == "sfx_volume") s.sfx_volume = static_cast<float>(std::atof(val.c_str()));
+      else if (key == "music_volume") s.music_volume = static_cast<float>(std::atof(val.c_str()));
+      else if (key == "voice_volume") s.voice_volume = static_cast<float>(std::atof(val.c_str()));
+      else if (key == "invert_mouse_y") s.invert_mouse_y = val == "1" || val == "true";
+      else if (s.bindings.load_kv(key, val)) {
+      }
       else if (key == "bf2_root") s.bf2_root = val;
       else if (key == "player_name") s.player_name = val;
       else if (key == "net_port") s.net_port = static_cast<std::uint16_t>(std::atoi(val.c_str()));
@@ -82,6 +96,9 @@ struct Settings {
       else if (key == "manual_server_ip") s.manual_server_ip = val;
       else if (key == "allow_late_join") s.allow_late_join = val == "1" || val == "true";
       else if (key == "default_faction") s.default_faction = std::atoi(val.c_str());
+      else if (key == "mp_bots_enabled") s.mp_bots_enabled = val == "1" || val == "true";
+      else if (key == "mp_bot_count") s.mp_bot_count = std::atoi(val.c_str());
+      else if (key == "mp_bot_difficulty") s.mp_bot_difficulty = std::atoi(val.c_str());
       else if (key == "menu_music_enabled") s.menu_music_enabled = val == "1" || val == "true";
       else if (key == "menu_music") s.menu_music = val;
     }
@@ -120,6 +137,10 @@ struct Settings {
     out << "anisotropic=" << anisotropic << '\n';
     out << "master_volume=" << master_volume << '\n';
     out << "sfx_volume=" << sfx_volume << '\n';
+    out << "music_volume=" << music_volume << '\n';
+    out << "voice_volume=" << voice_volume << '\n';
+    out << "invert_mouse_y=" << (invert_mouse_y ? 1 : 0) << '\n';
+    bindings.save_all(out);
     out << "bf2_root=" << bf2_root << '\n';
     out << "player_name=" << player_name << '\n';
     out << "net_port=" << net_port << '\n';
@@ -128,6 +149,9 @@ struct Settings {
     out << "manual_server_ip=" << manual_server_ip << '\n';
     out << "allow_late_join=" << (allow_late_join ? 1 : 0) << '\n';
     out << "default_faction=" << default_faction << '\n';
+    out << "mp_bots_enabled=" << (mp_bots_enabled ? 1 : 0) << '\n';
+    out << "mp_bot_count=" << mp_bot_count << '\n';
+    out << "mp_bot_difficulty=" << mp_bot_difficulty << '\n';
     out << "menu_music_enabled=" << (menu_music_enabled ? 1 : 0) << '\n';
     out << "menu_music=" << menu_music << '\n';
   }

@@ -1,3 +1,4 @@
+#include "key_bindings.hpp"
 #include "conquest_sim.hpp"
 #include "game_snapshot.hpp"
 #include "hitbox_zones.hpp"
@@ -24,6 +25,7 @@ int main() {
   };
 
   check("tweak_parser", dalian::tweak_parser_self_test());
+  check("key_bindings", dalian::key_bindings_self_test());
   check("minimap_projector", dalian::minimap_projector_self_test());
   check("radial_menu", dalian::radial_menu_self_test());
   check("hitbox_zones", dalian::hitbox_zones_self_test());
@@ -41,9 +43,9 @@ int main() {
     e.pos = {1.f, 2.f, 3.f};
     const auto lights = dalian::collect_scene_lights({e});
     check("scene_lights", lights.size() == 1 && lights[0].pos.y == 2.f);
+  }
   check("collision_resolver", bf2::collision_resolver_self_test());
   check("archive_path_resolve", bf2::archive_path_resolve_self_test());
-  }
 
   return failed == 0 ? 0 : 1;
 }

@@ -198,6 +198,7 @@ void GameSim::clear_events() { events_ = SimEvents{}; }
 
 void GameSim::spawn_defenders() {
   if (!params_.have_soldier || !params_.world) return;
+  if (!params_.bots_enabled || params_.bot_count <= 0) return;
   state_.enemies.clear();
 
   const TeamId player = state_.player_team;
@@ -205,8 +206,9 @@ void GameSim::spawn_defenders() {
   constexpr float kMinFromPlayer = 70.f;
   constexpr float kMinFromFriendlyBase = 50.f;
   constexpr float kMinPostSpacing = 90.f;
-  constexpr std::size_t kMaxPosts = 10;
-  constexpr std::size_t kMaxEnemies = 28;
+  const std::size_t kMaxEnemies =
+      static_cast<std::size_t>(std::clamp(params_.bot_count, 1, 128));
+  const std::size_t kMaxPosts = std::max<std::size_t>(2, kMaxEnemies / 3);
 
   const glm::vec3 player_feet(state_.player.position.x,
                               state_.player.position.y - state_.player.eye_height,
@@ -741,19 +743,51 @@ void GameSim::step_vehicles(float dt, const PlayerInput& input) {
 
 void GameSim::step_player_on_foot(float dt, const PlayerInput& input) {
   if (!params_.world || state_.in_vehicle >= 0 || input.drone_mode) return;
+  if (input.deploy_open) {
+    state_.player.desired_velocity = {0.f, 0.f, 0.f};
+    params_.world->snap_character_to_ground(state_.player);
+    return;
+  }
+  if (input.prone_toggle) {
+    state_.infantry_pose =
+        state_.infantry_pose == SoldierPose::Prone ? SoldierPose::Stand : SoldierPose::Prone;
+  } else if (input.crouch && state_.infantry_pose != SoldierPose::Prone) {
+    state_.infantry_pose = SoldierPose::Crouch;
+  } else if (state_.infantry_pose != SoldierPose::Prone) {
+    state_.infantry_pose = SoldierPose::Stand;
+  }
+
+  if (state_.infantry_pose == SoldierPose::Prone) {
+    state_.player.eye_height = 0.55f;
+  } else if (state_.infantry_pose == SoldierPose::Crouch) {
+    state_.player.eye_height = 1.25f;
+  } else {
+    state_.player.eye_height = 1.8f;
+  }
+
   glm::vec3 move = input.move_wish;
   const bool wants_move = glm::length(move) > 0.001f;
-  const bool can_sprint = input.sprint && wants_move && state_.player_stamina > 5.f;
+  const bool can_sprint = input.sprint && wants_move && state_.player_stamina > 5.f &&
+                          state_.infantry_pose == SoldierPose::Stand;
   if (can_sprint) {
     state_.player_stamina = std::max(0.f, state_.player_stamina - 22.f * dt);
   } else {
     state_.player_stamina =
         std::min(100.f, state_.player_stamina + (wants_move ? 8.f : 16.f) * dt);
   }
-  const float speed = can_sprint ? 12.f : 6.5f;
+  float speed = 6.5f;
+  if (state_.infantry_pose == SoldierPose::Crouch) {
+    speed = 4.f;
+  } else if (state_.infantry_pose == SoldierPose::Prone) {
+    speed = 1.8f;
+  } else if (can_sprint) {
+    speed = 12.f;
+  }
   if (wants_move) move = glm::normalize(move) * speed;
   state_.player.desired_velocity = {move.x, 0.f, move.z};
-  if (input.jump && state_.player.on_ground) state_.player.vertical_velocity = 6.5f;
+  if (input.jump && state_.player.on_ground && state_.infantry_pose == SoldierPose::Stand) {
+    state_.player.vertical_velocity = 6.5f;
+  }
   params_.world->step_character(state_.player, dt > 0.f ? dt : 1.f / 60.f);
 }
 
@@ -921,14 +955,19 @@ void GameSim::step_projectiles(float dt) {
 
 void GameSim::step_enemies(float dt, const PlayerInput& input) {
   if (!params_.world || state_.match_over) return;
+  if (!params_.bots_enabled || params_.bot_count <= 0) return;
   const glm::vec3 eye(state_.player.position.x, state_.player.position.y, state_.player.position.z);
   state_.player_regen_delay = std::max(0.f, state_.player_regen_delay - dt);
   if (state_.player_regen_delay <= 0.f && state_.player_health < 100.f) {
     state_.player_health = std::min(100.f, state_.player_health + 12.f * dt);
   }
-  constexpr float kSightRange = 65.f;
-  constexpr float kEngageRange = 40.f;
-  constexpr int kMaxShooters = 2;
+  const int diff = std::clamp(params_.bot_difficulty, 1, 5);
+  const float diff_t = static_cast<float>(diff - 1) / 4.f;
+  const float kSightRange = 45.f + diff_t * 35.f;
+  const float kEngageRange = 32.f + diff_t * 18.f;
+  const int kMaxShooters = 1 + static_cast<int>(diff_t * 3.f);
+  const float alert_gain = 0.35f + diff_t * 0.85f;
+  const float spread_scale = 1.8f - diff_t * 1.2f;
   struct Contact {
     int idx;
     float dist;
@@ -988,7 +1027,8 @@ void GameSim::step_enemies(float dt, const PlayerInput& input) {
       const auto hit = params_.world->raycast({chest.x, chest.y, chest.z}, {dir.x, dir.y, dir.z}, dist);
       los = !hit.hit || hit.distance >= dist - 1.5f;
     }
-    en.alert = std::clamp(en.alert + (hostile_to_player && los ? dt / 1.6f : -dt / 2.5f), 0.f, 1.f);
+    en.alert = std::clamp(en.alert + (hostile_to_player && los ? dt * alert_gain / 1.6f : -dt / 2.5f),
+                          0.f, 1.f);
     en.moving = false;
     if (hostile_to_player && los && dist < kEngageRange) {
       en.yaw = std::atan2(to_player.x, to_player.z);
@@ -1082,7 +1122,7 @@ void GameSim::step_enemies(float dt, const PlayerInput& input) {
     const glm::vec3 chest = en.pos + glm::vec3(0.f, 1.35f, 0.f);
     const glm::vec3 dir = glm::normalize(eye - chest);
     const glm::vec3 muz = chest + dir * 0.3f;
-    const float sp = en.spread + dist * 0.0015f;
+    const float sp = (en.spread + dist * 0.0015f) * spread_scale;
     const glm::vec3 aim =
         eye + glm::vec3((frand() - 0.5f), (frand() - 0.5f), (frand() - 0.5f)) * sp;
     const glm::vec3 shot_dir = glm::normalize(aim - muz);

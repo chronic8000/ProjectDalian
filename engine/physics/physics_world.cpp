@@ -250,7 +250,10 @@ void PhysicsWorld::add_body(const PhysicsBody& body) { bodies_.push_back(body); 
 
 float PhysicsWorld::terrain_height(float x, float z) const {
   if (heightmap_cluster_ != nullptr && heightmap_cluster_->valid()) {
-    return heightmap_cluster_->sample_height(x, z);
+    if (heightmap_cluster_->world_in_cluster(x, z)) {
+      return heightmap_cluster_->sample_height(x, z);
+    }
+    // Outside the loaded cluster footprint — fall back to the centred primary grid.
   }
   if (terrain_.width == 0 || terrain_.height == 0) {
     return 0.f;
@@ -300,6 +303,15 @@ void PhysicsWorld::step(float delta_seconds) {
       body.on_ground = false;
     }
   }
+}
+
+void PhysicsWorld::snap_character_to_ground(CharacterController& c, float step_up) const {
+  const float feet = c.position.y - c.eye_height;
+  const float ground_feet = support_height(c.position.x, c.position.z, feet + step_up, step_up);
+  c.position.y = ground_feet + c.eye_height;
+  c.vertical_velocity = 0.f;
+  c.desired_velocity = {0.f, 0.f, 0.f};
+  c.on_ground = true;
 }
 
 void PhysicsWorld::step_character(CharacterController& c, float delta_seconds) const {
