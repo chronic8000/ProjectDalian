@@ -2358,6 +2358,9 @@ int main(int argc, char** argv) {
 
   bool third_person = false;
   float anim_time = 0.f;
+  std::uint32_t net_input_seq = 0;
+  double net_last_send_at = -1.0;
+  dalian::PlayerInput last_net_inp{};
   bool air_stick_moved = false; // set when mouse moves the flight stick this frame
   auto air_invert_fn = [&]() { return settings.invert_air; };
 
@@ -3452,6 +3455,7 @@ int main(int argc, char** argv) {
       pending_seat_switch = -1;
       launch_requested = false;
       heli_flare_requested = false;
+      last_net_inp = inp;
       int humans = 1;
       if (net.active() && !deploy_open) humans = 1 + net.peer_count();
       game_sim.set_connected_humans(humans);
@@ -3650,9 +3654,14 @@ int main(int argc, char** argv) {
       bf2::NetPlayer me;
       me.id = net.local_id();
       me.active = true;
+      const float send_dt =
+          net_last_send_at >= 0.0 ? static_cast<float>(net.net_time() - net_last_send_at) : dt;
+      const bf2::NetInput net_in =
+          dalian::fill_net_input(last_net_inp, yaw, pitch, net_input_seq);
       dalian::fill_net_player(me, player, yaw, pitch, anim_time, game_sim.state().infantry_pose,
                               in_vehicle, vehicles, player_health,
-                              static_cast<std::uint16_t>(player_faction_id), net_fired);
+                              static_cast<std::uint16_t>(player_faction_id), net_fired, send_dt,
+                              net_in.seq);
       bf2::NetShot sh;
       if (net_fired) {
         sh.shooter = net.local_id();
@@ -3660,6 +3669,9 @@ int main(int argc, char** argv) {
         sh.dx = net_fire_d.x; sh.dy = net_fire_d.y; sh.dz = net_fire_d.z;
       }
       net.send_local(me, net_fired ? &sh : nullptr);
+      net.send_input(net_in);
+      net_last_send_at = net.net_time();
+      net.update_remotes();
       dalian::apply_mp_vehicle_sync(vehicles, net, in_vehicle, game_sim);
       // Remote shots: draw the tracer + impact locally so gunfire is visible.
       for (const auto& s : net.take_shots()) {
@@ -4044,7 +4056,7 @@ int main(int argc, char** argv) {
         ast.pose = static_cast<dalian::SoldierPose>(rp.pose);
         ast.moving = rspd > 0.3f || rp.anim > 0;
         ast.move_speed = rspd;
-        ast.time = rp.anim_time;
+        ast.time = rp.ranim_time;
         float anim_rate = 1.f;
         const bf2::AnimationClip* clip =
             dalian::select_soldier_clip(soldier_anims, ast, anim_rate);
@@ -4057,22 +4069,17 @@ int main(int argc, char** argv) {
 
         int frame = 0;
         if (clip && clip->frame_count > 0) {
-          frame = static_cast<int>(rp.anim_time * 30.f * anim_rate) % clip->frame_count;
+          frame = static_cast<int>(rp.ranim_time * 30.f * anim_rate) % clip->frame_count;
         }
         const auto palette = bf2::compute_skin_palette(soldier_src, soldier_ske, clip, frame, 1, 0);
         if (palette.empty()) continue;
 
-        float facing = glm::radians(rp.ryaw);
-        if (rspd > 0.35f) facing = std::atan2(rp.vx, rp.vz);
+        const float facing = glm::radians(rp.ryaw);
 
         glm::mat4 body = glm::translate(glm::mat4(1.0f), rpos);
         body = glm::rotate(body, facing, glm::vec3(0, 1, 0));
         const glm::mat4 body_mvp = view_proj * body;
-        const std::uint16_t rfid =
-            rp.faction_id ? rp.faction_id : net.lobby_player_faction(rp.id);
-        const int rside = dalian::faction_kit_side(static_cast<int>(rfid));
-        const glm::vec3 tint = rside == 0 ? glm::vec3(0.62f, 0.78f, 1.25f)
-                                          : glm::vec3(1.25f, 0.72f, 0.55f);
+        const glm::vec3 tint(1.f);
         renderer.draw_skinned(soldier_mesh, glm::value_ptr(body_mvp), glm::value_ptr(palette[0]),
                               static_cast<int>(palette.size()), soldier_tex, glm::value_ptr(body),
                               glm::value_ptr(tint));
