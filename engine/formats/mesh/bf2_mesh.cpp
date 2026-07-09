@@ -342,10 +342,12 @@ TexturedMeshData MeshLoader::extract_textured(const Mesh& mesh, std::size_t geom
   std::uint16_t uv0_offset = 0;
   std::uint16_t uv1_offset = 0;
   std::uint16_t lm_offset = 0;  // lightmap UV = highest texcoord channel
+  std::uint16_t part_offset = 0;  // BLENDINDICES: bundledmesh geometry-part index
   bool have_tangent = false;
   bool have_uv0 = false;
   bool have_uv1 = false;
   bool have_lm = false;
+  bool have_part = false;
   int max_uv_channel = -1;
   for (const auto& attr : mesh.vertex_attributes) {
     if (attr.flag != 0) {
@@ -355,6 +357,9 @@ TexturedMeshData MeshLoader::extract_textured(const Mesh& mesh, std::size_t geom
       position_offset = attr.offset;
     } else if (attr.usage == 3) {
       normal_offset = attr.offset;
+    } else if (attr.usage == 2) {  // BLENDINDICES (rigid part id for bundledmesh)
+      part_offset = attr.offset;
+      have_part = true;
     } else if (attr.usage == 6) {  // TANGENT
       tangent_offset = attr.offset;
       have_tangent = true;
@@ -416,6 +421,18 @@ TexturedMeshData MeshLoader::extract_textured(const Mesh& mesh, std::size_t geom
     out.vertices[i] = v;
   }
 
+  // BundledMesh: pull each vertex's rigid part index (first byte of the UBYTE4
+  // BLENDINDICES) so vehicles can be reassembled from their .con hierarchy.
+  if (have_part && mesh.kind == MeshKind::Bundled) {
+    const auto* bytes = reinterpret_cast<const std::uint8_t*>(mesh.vertex_data.data());
+    const std::size_t byte_size = mesh.vertex_data.size() * sizeof(float);
+    out.vertex_part.resize(max_vertex, 0);
+    for (std::uint32_t i = 0; i < max_vertex; ++i) {
+      const std::size_t b = static_cast<std::size_t>(i) * mesh.vertex_stride + part_offset;
+      if (b < byte_size) out.vertex_part[i] = bytes[b];
+    }
+  }
+
   auto is_detail = [](const std::string& p) {
     std::string l = p;
     std::transform(l.begin(), l.end(), l.begin(), [](unsigned char c) { return std::tolower(c); });
@@ -435,12 +452,7 @@ TexturedMeshData MeshLoader::extract_textured(const Mesh& mesh, std::size_t geom
       }
     }
     sub.index_count = static_cast<std::uint32_t>(out.indices.size()) - sub.index_offset;
-    // Classify the material's texture layers by BF2 suffix so we don't depend on
-    // slot order (which varies by technique): _c base, _de detail, _deb normal,
-    // _di dirt, _cr crack. SpecularLUT and anything else is ignored.
-    if (!material.maps.empty()) {
-      sub.base_map = material.maps[0];
-    }
+
     auto stem_lower = [](std::string p) {
       const auto dot = p.find_last_of('.');
       if (dot != std::string::npos) p = p.substr(0, dot);
@@ -452,18 +464,58 @@ TexturedMeshData MeshLoader::extract_textured(const Mesh& mesh, std::size_t geom
       const std::size_t n = std::strlen(suf);
       return s.size() >= n && s.compare(s.size() - n, n, suf) == 0;
     };
+
+    // Skip SpecularLUT (a shared lookup table, never a surface map) so the real
+    // texture layers line up with their slot positions.
+    std::vector<std::string> layers;
+    layers.reserve(material.maps.size());
     for (const auto& m : material.maps) {
-      const std::string s = stem_lower(m);
-      if (ends_with(s, "_deb") || ends_with(s, "_b")) {
-        sub.normal_map = m;
-      } else if (ends_with(s, "_de")) {
-        sub.detail_map = m;
-      } else if (ends_with(s, "_di")) {
-        sub.dirt_map = m;
-      } else if (ends_with(s, "_cr")) {
-        sub.crack_map = m;
-      } else if (ends_with(s, "_c")) {
-        sub.base_map = m;
+      if (stem_lower(m).find("specularlut") != std::string::npos) continue;
+      layers.push_back(m);
+    }
+
+    // Primary path: assign slots by the shader *technique*. BF2 techniques encode
+    // exactly which layers a material carries and in what order, e.g.
+    // "BaseDetailNDetail" -> [base, detail, detail-normal]. This is reliable even
+    // when texture filenames don't use the _de/_deb suffix (vegetation bark uses
+    // bare "de"/"deb", which the suffix heuristic below would miss).
+    std::string tech = material.technique;
+    std::transform(tech.begin(), tech.end(), tech.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    bool classified = false;
+    if (!layers.empty() && tech.find("base") != std::string::npos) {
+      std::size_t cur = 0;
+      sub.base_map = layers[cur++];
+      auto take = [&](std::string& dst) {
+        if (cur < layers.size()) dst = layers[cur++];
+      };
+      if (tech.find("detail") != std::string::npos) take(sub.detail_map);
+      if (tech.find("ndetail") != std::string::npos) take(sub.normal_map);
+      if (tech.find("dirt") != std::string::npos) take(sub.dirt_map);
+      if (tech.find("crack") != std::string::npos) take(sub.crack_map);
+      // NBase = a normal map paired with the base color (no detail normal).
+      if (tech.find("nbase") != std::string::npos && sub.normal_map.empty()) take(sub.normal_map);
+      classified = true;
+    }
+
+    // Fallback: classify by filename suffix. Accept both the underscore form
+    // (_de/_deb/_di/_cr/_c) and BF2's bare form (…de/…deb/…di/…cr) used by some
+    // assets. base defaults to the first layer.
+    if (!classified) {
+      if (!layers.empty()) sub.base_map = layers[0];
+      for (const auto& m : layers) {
+        const std::string s = stem_lower(m);
+        if (ends_with(s, "_deb") || ends_with(s, "deb") || ends_with(s, "_b")) {
+          sub.normal_map = m;
+        } else if (ends_with(s, "_de") || ends_with(s, "de")) {
+          sub.detail_map = m;
+        } else if (ends_with(s, "_di") || ends_with(s, "di")) {
+          sub.dirt_map = m;
+        } else if (ends_with(s, "_cr") || ends_with(s, "cr")) {
+          sub.crack_map = m;
+        } else if (ends_with(s, "_c")) {
+          sub.base_map = m;
+        }
       }
     }
     (void)is_detail;

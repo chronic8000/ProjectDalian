@@ -406,7 +406,13 @@ int render_textured_to_png(bf2::ResourceManager& resources, const bf2::TexturedM
   const glm::vec3 center = (lo + hi) * 0.5f;
   const float radius = std::max(0.001f, glm::length(hi - lo) * 0.5f);
   const float dist = radius * 2.4f;
-  const glm::vec3 eye = center + glm::normalize(glm::vec3(0.7f, 0.55f, 0.9f)) * dist;
+  glm::vec3 eye_dir(0.7f, 0.55f, 0.9f);
+  if (const char* ed = std::getenv("BF2_SNAP_EYE")) {
+    float a = 0.7f, b = 0.55f, c = 0.9f;
+    std::sscanf(ed, "%f,%f,%f", &a, &b, &c);
+    eye_dir = glm::vec3(a, b, c);
+  }
+  const glm::vec3 eye = center + glm::normalize(eye_dir) * dist;
   const glm::mat4 proj = glm::perspective(glm::radians(45.0f), 1.0f, radius * 0.02f, dist * 8.0f);
   const glm::mat4 view = glm::lookAt(eye, center, glm::vec3(0, 1, 0));
   const glm::mat4 mvp = proj * view;

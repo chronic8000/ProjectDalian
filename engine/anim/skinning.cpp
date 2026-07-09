@@ -1,6 +1,7 @@
 #include "skinning.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -46,7 +47,7 @@ glm::quat safe_normalize(const glm::quat& q) {
 // makes glm::quat_cast return a garbage/NaN quaternion and flings every vertex
 // weighted to that bone off to infinity. We Gram-Schmidt orthonormalize the
 // upper 3x3 into a proper (right-handed) rotation first, then guard the result.
-glm::quat safe_quat(const glm::mat4& m) {
+[[maybe_unused]] glm::quat safe_quat(const glm::mat4& m) {
   glm::vec3 x(m[0]);
   glm::vec3 y(m[1]);
   const float lx = glm::length(x);
@@ -99,7 +100,7 @@ std::vector<glm::mat4> build_palette(const Skeleton& skeleton, const Lod& lod,
 
   // --- Authoritative mesh bind (bone-local -> model) per skeleton node. ---
   const PosedSkeleton ske_bind = pose_skeleton(skeleton, nullptr, 0);
-  const PosedSkeleton ske_anim = pose_skeleton(skeleton, clip, frame);
+  PosedSkeleton ske_anim = pose_skeleton(skeleton, clip, frame);
   std::vector<glm::mat4> mesh_bind(node_count, glm::mat4(1.0f));
   std::vector<bool> has_bind(node_count, false);
   for (const auto& rig : lod.rigs) {
@@ -132,82 +133,55 @@ std::vector<glm::mat4> build_palette(const Skeleton& skeleton, const Lod& lod,
       for (int r = 0; r < 4; ++r) bind_mismatch += d[c][r] * d[c][r];
   }
 
-  const bool is_character = node_count >= 50;
+  // BF2 locomotion clips only animate the legs, spine and root (~16 bones); the
+  // arms come from a separate per-weapon overlay we don't load, so left untouched
+  // they render in the skeleton's A-pose (arms splayed out sideways). Layer a
+  // static rifle-hold onto the arm subtrees: rotate the shoulders down/forward and
+  // bend the elbows in, so the soldier grips his weapon. Applied only when a clip
+  // is playing and the rig looks like a character (has the named arm bones).
+  if (clip && node_count >= 48) {
+    // Apply an extra rotation in a bone's local frame to that bone and every
+    // descendant (nodes are stored parent-before-child).
+    auto apply_hold = [&](int bone, float ax, float ay, float az) {
+      if (bone < 0 || bone >= static_cast<int>(node_count)) return;
+      const glm::quat r = glm::quat(glm::vec3(glm::radians(ax), glm::radians(ay), glm::radians(az)));
+      const glm::mat4 w = ske_anim.world_transforms[bone];
+      const glm::mat4 M = w * glm::mat4_cast(r) * glm::inverse(w);
+      for (int d = bone; d < static_cast<int>(node_count); ++d) {
+        int p = d;
+        bool desc = false;
+        while (p >= 0) {
+          if (p == bone) { desc = true; break; }
+          p = skeleton.nodes[p].parent;
+        }
+        if (desc) ske_anim.world_transforms[d] = M * ske_anim.world_transforms[d];
+      }
+    };
+    auto ang = [](const char* env, float d0, float d1, float d2, float* out) {
+      out[0] = d0; out[1] = d1; out[2] = d2;
+      if (const char* s = std::getenv(env)) std::sscanf(s, "%f %f %f", &out[0], &out[1], &out[2]);
+    };
+    float s[3], e[3];
+    ang("BF2_ARM_S", -66.f, 8.f, 20.f, s);  // shoulder: arm down + forward + inward
+    ang("BF2_ARM_E", 0.f, 78.f, 8.f, e);    // elbow: bend forearm across the chest
+    // Left arm, then right arm mirrored (flip the Y/Z components).
+    apply_hold(15, s[0], s[1], s[2]);
+    apply_hold(16, e[0], e[1], e[2]);
+    apply_hold(31, s[0], -s[1], -s[2]);
+    apply_hold(32, e[0], -e[1], -e[2]);
+  }
 
-  if (!clip) {
-    // Exact authored bind pose via mesh hierarchy.
-    std::vector<glm::mat4> world(node_count, glm::mat4(1.0f));
-    for (std::size_t i = 0; i < node_count; ++i) {
-      const int p = skeleton.nodes[i].parent;
-      if (p >= 0 && p < static_cast<int>(i)) {
-        const glm::mat4 bind_local = glm::inverse(mesh_bind[p]) * mesh_bind[i];
-        const glm::vec3 offset = glm::vec3(bind_local[3]);
-        const glm::quat mesh_local_q = safe_quat(bind_local);
-        world[i] = world[p] * glm::translate(glm::mat4(1.0f), offset) * glm::mat4_cast(mesh_local_q);
-      } else {
-        const glm::vec3 t = glm::vec3(mesh_bind[i][3]);
-        const glm::quat mesh_root_q = safe_quat(mesh_bind[i]);
-        world[i] = glm::translate(glm::mat4(1.0f), t) * glm::mat4_cast(mesh_root_q);
-      }
-    }
-    for (std::size_t i = 0; i < node_count; ++i) {
-      skin[i] = world[i] * glm::inverse(mesh_bind[i]);
-    }
-  } else if (is_character) {
-    // The authored mesh bind differs from the skeleton rest pose (bind_mismatch
-    // is large), so we build the animated hierarchy on the *mesh* bind (exactly
-    // like the bind-pose branch) and layer on only the clip's per-bone *local
-    // rotation delta* (rest-local^-1 * anim-local). With a still clip the delta
-    // is identity, reproducing the correct bind; motion rotates joints in place
-    // rather than splaying limbs out. Translation deltas are ignored so the feet
-    // stay planted under the body we position in world space.
-    auto ske_local_rot = [&](const PosedSkeleton& p, std::size_t i, int parent) {
-      glm::mat4 local = (parent >= 0 && parent < static_cast<int>(i))
-                            ? glm::inverse(p.world_transforms[parent]) * p.world_transforms[i]
-                            : p.world_transforms[i];
-      return safe_quat(local);
-    };
-    std::vector<glm::mat4> world(node_count, glm::mat4(1.0f));
-    for (std::size_t i = 0; i < node_count; ++i) {
-      const int p = skeleton.nodes[i].parent;
-      const glm::quat qb = ske_local_rot(ske_bind, i, p);
-      const glm::quat qa = ske_local_rot(ske_anim, i, p);
-      const glm::quat delta = safe_normalize(glm::inverse(qb) * qa);
-      if (p >= 0 && p < static_cast<int>(i)) {
-        const glm::mat4 bind_local = glm::inverse(mesh_bind[p]) * mesh_bind[i];
-        const glm::vec3 offset = glm::vec3(bind_local[3]);
-        const glm::quat qmesh = safe_quat(bind_local);
-        world[i] =
-            world[p] * glm::translate(glm::mat4(1.0f), offset) * glm::mat4_cast(safe_normalize(qmesh * delta));
-      } else {
-        const glm::vec3 t = glm::vec3(mesh_bind[i][3]);
-        const glm::quat qmesh = safe_quat(mesh_bind[i]);
-        world[i] = glm::translate(glm::mat4(1.0f), t) * glm::mat4_cast(safe_normalize(qmesh * delta));
-      }
-    }
-    for (std::size_t i = 0; i < node_count; ++i) {
-      skin[i] = world[i] * glm::inverse(mesh_bind[i]);
-    }
-  } else {
-    auto world_rot = [&](std::size_t i) {
-      return safe_quat(ske_anim.world_transforms[i]);
-    };
-    std::vector<glm::mat4> world(node_count, glm::mat4(1.0f));
-    for (std::size_t i = 0; i < node_count; ++i) {
-      const int p = skeleton.nodes[i].parent;
-      if (p >= 0 && p < static_cast<int>(i)) {
-        const glm::mat4 bind_local = glm::inverse(mesh_bind[p]) * mesh_bind[i];
-        const glm::vec3 offset = glm::vec3(bind_local[3]);
-        const glm::quat anim_local = safe_normalize(glm::inverse(world_rot(p)) * world_rot(i));
-        world[i] = world[p] * glm::translate(glm::mat4(1.0f), offset) * glm::mat4_cast(anim_local);
-      } else {
-        const glm::vec3 t = glm::vec3(mesh_bind[i][3]);
-        world[i] = glm::translate(glm::mat4(1.0f), t) * glm::mat4_cast(world_rot(i));
-      }
-    }
-    for (std::size_t i = 0; i < node_count; ++i) {
-      skin[i] = world[i] * glm::inverse(mesh_bind[i]);
-    }
+  // Linear blend skinning. In the BF2 skinnedmesh format each rig bone matrix is
+  // the *inverse bind* (model-space -> bone-local at the authored bind pose), so
+  // the deform matrix is simply the bone's animated world transform composed with
+  // that inverse bind. Bones the rig doesn't list fall back to the skeleton's own
+  // rest pose. With a null/still clip the animated world equals the bind, so this
+  // reproduces the exact bind; motion then rotates each joint about its true
+  // parent, so arms and legs articulate correctly instead of splaying out.
+  for (std::size_t i = 0; i < node_count; ++i) {
+    const glm::mat4 inv_bind =
+        has_bind[i] ? mesh_bind[i] : glm::inverse(ske_bind.world_transforms[i]);
+    skin[i] = ske_anim.world_transforms[i] * inv_bind;
   }
 
   if (debug) {
@@ -407,12 +381,36 @@ SkinnedGeometry extract_skinned(const Mesh& mesh, const Skeleton& skeleton,
     }
   }
 
+  // Pick the colour map from a material's map list: the first map that isn't a
+  // bump/normal/specular. Soldiers carry separate body and head colour maps, so
+  // each material becomes its own textured submesh.
+  auto pick_diffuse_map = [](const Material& m) -> std::string {
+    std::string first;
+    for (const auto& mp : m.maps) {
+      if (mp.empty()) continue;
+      if (first.empty()) first = mp;
+      std::string s = mp;
+      for (auto& c : s) c = static_cast<char>(std::tolower((unsigned char)c));
+      if (s.find("_b.") == std::string::npos && s.find("bump") == std::string::npos &&
+          s.find("normal") == std::string::npos && s.find("_s.") == std::string::npos &&
+          s.find("spec") == std::string::npos) {
+        return mp;
+      }
+    }
+    return first;
+  };
+
   for (const auto& material : lod.materials) {
     if (material.index_start + material.index_count > mesh.indices.size()) continue;
+    SkinnedSubmesh sub;
+    sub.index_offset = static_cast<std::uint32_t>(out.indices.size());
+    sub.diffuse_map = pick_diffuse_map(material);
     for (std::uint32_t i = 0; i < material.index_count; ++i) {
       const std::uint32_t index = material.vertex_start + mesh.indices[material.index_start + i];
       if (index < out.vertices.size()) out.indices.push_back(index);
     }
+    sub.index_count = static_cast<std::uint32_t>(out.indices.size()) - sub.index_offset;
+    if (sub.index_count > 0) out.submeshes.push_back(sub);
   }
   return out;
 }

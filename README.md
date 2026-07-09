@@ -55,6 +55,24 @@ its respective owner.
 
 ## What works today
 
+**Launcher & UI:**
+- **Main menu** with map browser (scans your BF2 install), options, multiplayer tab,
+  and quit — no command-line args required to start
+- **Resolution-agnostic UI** — all menus/HUD layout in a fixed 1600×900 design
+  space with uniform scaling and letterboxing (windowed, borderless, exclusive)
+- **Dynamic resolution list** from SDL (includes desktop ultrawide modes)
+- **Settings persistence** (`%APPDATA%\ProjectDalian\ProjectDalian\settings.cfg`):
+  video, graphics, audio, BF2 install path, player name
+- **Display recovery hotkeys:** `Alt+Enter` toggle windowed/borderless, `F11` cycle
+  modes, `Ctrl+Shift+W` safe windowed 1920×1080; launch with `--windowed` or
+  `BF2_WINDOWED=1` if stuck in bad fullscreen
+
+**Multiplayer (alpha):**
+- Host/join flow with faction picker, ready states, and lobby start
+- LAN server browser + optional Tailscale subnet scan
+- Late-join support (configurable)
+- Session discovery/advertising over UDP
+
 **Asset pipeline (verified byte-for-byte against retail BF2 assets):**
 - `.staticmesh`, `.bundledmesh`, `.skinnedmesh` loaders (multi-geometry / multi-LOD)
 - `.ske` skeleton + `.baf` animation loaders and hierarchy evaluation
@@ -78,7 +96,29 @@ its respective owner.
   sampled with PCF in the surface shader)
 - Offscreen-FBO post-process pass (used for the FPV drone feed)
 
+- **Vehicle geometry assembly** from `.con` hierarchy (hull + child parts such as
+  rotors); internal geometry parts (wheels, turrets) positioned via `geometryPart`
+  indices baked from bundledmesh `BLENDINDICES`
+- **Helicopter rotor blur** (static blades at low RPM → blur disc at speed)
+
+**Audio (SDL_mixer, reads retail BF2 archives):**
+- Weapon fire / reload / deploy sounds parsed from weapon `.tweak` files
+- Voice lines from `VoiceMessages*.con` (reload, grenade, out-of-ammo, etc.)
+- Level ambient loop from `AmbientObjects.con`
+- Menu music (bundled OGG assets under `apps/dalian/assets/music/`)
+- **Vehicle engine / tire sounds** parsed from vehicle `.tweak` (loops on enter,
+  volume follows throttle/speed) — coverage depends on per-vehicle tweak data
+
 **Simulation / gameplay:**
+- **Deploy screen** (Enter): kit picker, faction selection, spawn point map
+- **Vehicle entry/exit** (`E`), multi-seat crew switching (`F1`–`F8`)
+- **Ground vehicles:** throttle, steering, terrain-following chassis tilt, wheel
+  spin/steer on separated geometry parts where `.con` defines wheel geometry
+- **Helicopters:** BF2-style collective (W/S), yaw (A/D), mouse cyclic
+  pitch/roll, rotor spool RPM, AI gunner seat
+- **Fixed-wing jets (work in progress):** runway throttle, rudder taxi, mouse
+  pitch for rotation/lift — **still rough/unstable; needs more tuning**
+- **In-game pause menu** (Esc): resume, options, leave to main menu
 - Character controller with bilinear terrain following and object collision
 - First- and third-person camera, animated player soldier + held weapon
 - Weapon switching (Q or mouse wheel), automatic fire, muzzle flash, recoil
@@ -90,9 +130,18 @@ its respective owner.
 - **Enemy AI** spread across map objectives: idle patrol, advance-to-contact
   when spotted, reaction delay, burst fire, limited simultaneous attackers,
   player health regen (tuned to be survivable, not an instant-death swarm)
-- **6-DoF FPV drone** (`B` to toggle): true rigid-body quad with independent
+- **6-DoF FPV recon drone** (`B` to toggle): true rigid-body quad with independent
   per-rotor thrust, gravity, and simulated battery voltage sag, plus a
   render-to-texture FPV feed with signal degradation
+- **FPV kamikaze loitering munition** (`N`): a one-way, player-steered terminal
+  munition using a lighter/faster airframe. FPV link with faster signal decay;
+  detonates on impact (terrain, buildings, enemies), manual trigger (LMB/Space),
+  or dead battery. No recall.
+- **Vehicle-launched missiles** (`R`): a guided/ballistic missile flight model
+  (rocket-motor boost, gravity, drag, limited-turn-rate homing) fired from the
+  nearest vehicle's turret. Locks onto an enemy under the crosshair, or arcs
+  ballistically at open ground, with an exhaust smoke trail and an
+  area-of-effect explosion. Loads the real BF2 SAM `.bundledmesh` when present
 
 ---
 
@@ -110,13 +159,32 @@ cmake --build build
 ctest --test-dir build      # optional: run parser unit tests
 ```
 
-Third-party libraries used: SDL2, GLM, Dear ImGui, GLEW, miniz, stb. Small
-vendored copies (GLEW / miniz / stb) live under `third_party/` and are
-permissively licensed.
+Third-party libraries used: SDL2, SDL_mixer, GLM, Dear ImGui, GLEW, miniz, stb.
+Small vendored copies (GLEW / miniz / stb) live under `third_party/` and are
+permissively licensed. On Windows, `SDL2.dll` and `SDL2_mixer.dll` are copied
+next to `project_dalian.exe` at build time.
 
 ---
 
 ## Run
+
+### Quick start (main menu)
+
+Build, then launch with no arguments. The main menu scans maps under your BF2
+install (set the path in Options if auto-detect fails):
+
+```powershell
+.\build\apps\dalian\project_dalian.exe
+```
+
+Recovery if display settings break the UI:
+
+```powershell
+.\build\apps\dalian\project_dalian.exe --windowed
+# or delete/edit %APPDATA%\ProjectDalian\ProjectDalian\settings.cfg
+```
+
+### Direct map load (legacy / headless)
 
 Point the app at a BF2 level archive plus your `Objects_client.zip`:
 
@@ -128,10 +196,18 @@ $bf2 = "C:\Program Files (x86)\Battlefield2\mods\bf2"
     "$bf2\Objects_client.zip"
 ```
 
+Settings and the BF2 root path from the main menu are stored under
+`%APPDATA%\ProjectDalian\ProjectDalian\settings.cfg`.
+
 ### Controls
 
 | Input | Action |
 |---|---|
+| **Menu** | |
+| `Alt+Enter` | Toggle windowed / borderless |
+| `F11` | Cycle windowed → borderless → exclusive |
+| `Ctrl+Shift+W` | Safe windowed 1920×1080 (display recovery) |
+| **On foot** | |
 | `W` `A` `S` `D` | Move |
 | `Shift` | Sprint |
 | `Space` | Jump |
@@ -140,10 +216,26 @@ $bf2 = "C:\Program Files (x86)\Battlefield2\mods\bf2"
 | `LMB` | Fire (hold for automatic) |
 | `F` | Toggle ballistic ⇄ hitscan |
 | `Q` / Mouse wheel | Cycle weapon |
+| `R` | Launch missile from the nearest vehicle |
+| `N` | Launch FPV kamikaze loitering munition (one-way) |
+| `B` | Launch / recall FPV recon drone |
 | `V` | Toggle 1st / 3rd person |
-| `B` | Toggle FPV drone mode |
-| Drone: `W`/`S` throttle, `A`/`D` yaw, mouse pitch/roll | Fly the quad |
-| `Esc` | Quit |
+| `E` | Enter / exit vehicle |
+| `Enter` | Deploy screen (kit, faction, spawn) |
+| `Esc` | Pause menu (in-game) / back (deploy) |
+| **Helicopter (pilot)** | |
+| `W` / `S` | Collective up / down |
+| `A` / `D` | Yaw |
+| Mouse | Cyclic pitch / roll |
+| `X` | Flares |
+| `F1`–`F8` | Switch crew seat |
+| **Jet (pilot, WIP)** | |
+| `W` / `S` | Throttle / brake |
+| `A` / `D` | Rudder |
+| Mouse pull back | Pitch up (rotate on runway / climb in air) |
+| Mouse left/right | Bank (in air only) |
+| **Drone** | |
+| `W`/`S` throttle, `A`/`D` yaw, mouse pitch/roll | Fly the quad |
 
 ---
 
@@ -181,11 +273,13 @@ engine/
   anim/      skeleton posing + CPU/GPU skinning (bone-matrix palette)
   render/    OpenGL renderer, PBR + shadow shaders, cascaded shadow maps,
              texture cache
-  physics/   physics world, character controller, 6-DoF drone
+  physics/   physics world, character controller, 6-DoF drone, missile flight,
+             kamikaze loitering munition
   script/    .con/.tweak interpreter + gameplay script sandbox
-  net/       networking stubs
+  net/       UDP lobby protocol, player sync, server discovery hooks
 apps/
-  dalian/    the war-sim game client
+  dalian/    war-sim client: main menu, deploy UI, multiplayer lobby, game audio,
+             settings, factions — see apps/dalian/*.cpp
   viewer/    SDL2 + ImGui mesh/skeleton/animation viewer
   sandbox/   physics/gameplay/network smoke test
 tools/       meshinfo, assetprobe, snapshot (headless renderer)
@@ -206,9 +300,31 @@ docs/        file-format reverse-engineering notes
 - **Phase 6** — physics world + `.collisionmesh` + character controller ✔
 - **Phase 7** — gameplay script sandbox ✔
 - **War-sim layer** — skeletal capsule hitboxes, physical ballistics,
-  6-DoF FPV drones, PBR + cascaded shadow maps, enemy AI ✔ (rough / alpha)
-- **Next** — vehicle entry/driving, missiles/munitions, better animation
-  retargeting, networking, audio, in-engine editor
+  6-DoF FPV drones, vehicle-launched guided/ballistic missiles, PBR + cascaded
+  shadow maps, enemy AI ✔ (rough / alpha)
+- **War-sim layer (2026 sprint)** — main menu + map browser, settings/options,
+  resolution-agnostic UI, deploy screen + factions, vehicle entry/driving,
+  helicopter flight, wheel animation split, BF2 weapon/voice/ambient audio,
+  vehicle engine sounds (partial), multiplayer lobby + LAN/Tailscale browser ✔
+  (alpha / incomplete)
+- **In progress** — fixed-wing jet flight model (unstable), animation
+  retargeting, full vehicle audio coverage, networking hardening, in-engine editor
+- **Next** — jet tuning, more munitions, radio comms, live volume sliders,
+  dedicated server polish
+
+### Recent implementation notes (Jul 2026)
+
+| Area | Status |
+|------|--------|
+| Main menu / options / pause | Working; UI scales to any resolution |
+| Display / fullscreen | Dynamic mode list; recovery hotkeys + `--windowed` |
+| Multiplayer lobby | Host/join/ready/start; LAN + Tailscale discovery |
+| Deploy UI | Faction, kit, spawn map |
+| Ground vehicles | Drive, terrain tilt, animated wheels (where meshed) |
+| Helicopters | Collective/yaw/cyclic, rotor RPM blur, AI gunner |
+| Jets | Runway + basic pitch/roll — **not flyable yet; needs work** |
+| Game audio | Weapons, voice, ambient; vehicle loops on enter |
+| Crash fix | SDL2 + SDL2_mixer DLLs copied next to exe on build |
 
 ---
 

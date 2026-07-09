@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -32,9 +33,19 @@ struct SkinnedVertex {
     float weight = 1.0f;
 };
 
+// A contiguous run of indices sharing one material/texture (e.g. a soldier's
+// body vs. head use different colour maps). `diffuse_map` is the texture path to
+// resolve; the caller binds the GL id per submesh at draw time.
+struct SkinnedSubmesh {
+    std::uint32_t index_offset = 0;
+    std::uint32_t index_count = 0;
+    std::string diffuse_map;
+};
+
 struct SkinnedGeometry {
     std::vector<SkinnedVertex> vertices;
     std::vector<std::uint32_t> indices;
+    std::vector<SkinnedSubmesh> submeshes;
     int node_count = 0;
 };
 

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "engine/core/resource_manager.hpp"
 #include "engine/render/renderer.hpp"
@@ -27,10 +28,16 @@ public:
   std::size_t loaded_count() const { return loaded_; }
   std::size_t missing_count() const { return missing_; }
 
+  // True if the texture is an alpha *cutout* mask (leaves, fences, grates) rather
+  // than an opaque or specular-in-alpha map. Detected at load from the fraction
+  // of fully-transparent texels, so it works for any map's assets.
+  bool is_cutout(std::uint32_t id) const { return id != 0 && cutout_.count(id) != 0; }
+
 private:
   ResourceManager& resources_;
   Renderer& renderer_;
   std::unordered_map<std::string, std::uint32_t> cache_;
+  std::unordered_set<std::uint32_t> cutout_;
   std::size_t loaded_ = 0;
   std::size_t missing_ = 0;
 };

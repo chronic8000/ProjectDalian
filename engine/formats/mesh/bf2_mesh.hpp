@@ -127,6 +127,11 @@ struct TexturedMeshData {
     std::vector<ExtractedVertex> vertices;  // uses uv (channel 0) and uv1 (channel 1)
     std::vector<std::uint32_t> indices;
     std::vector<TexturedSubmesh> submeshes;
+    // BundledMesh only: per-vertex geometry-part index (from the BLENDINDICES
+    // attribute). A vehicle's turret/barrel/wheels are separate parts stored in
+    // part-local space; the caller assembles them using the .con geometryPart
+    // hierarchy. Empty for static/skinned meshes.
+    std::vector<std::uint8_t> vertex_part;
 };
 
 class MeshLoader {

@@ -3,8 +3,13 @@
 #include <GL/glew.h>
 #include <SDL.h>
 
+#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
+#include <vector>
+
+#include "stb_easy_font.h"
 
 namespace bf2 {
 namespace {
@@ -115,12 +120,24 @@ std::uint32_t create_skin_program() {
     uniform vec3 uSunDir;
     uniform vec3 uFogColor;
     uniform vec2 uFogRange;
-    uniform sampler2DArray uShadowMap;
+    uniform sampler2DArrayShadow uShadowMap;
     uniform mat4 uShadowVP[4];
     uniform vec4 uShadowSplits;
     uniform int uShadowOn;
     uniform float uShadowTexel;
     out vec4 FragColor;
+
+    float sampleCascade(int c, vec3 wp, float bias) {
+      vec4 lp = uShadowVP[c] * vec4(wp, 1.0);
+      vec3 pc = lp.xyz / lp.w * 0.5 + 0.5;
+      if (pc.z > 1.0 || pc.x < 0.0 || pc.x > 1.0 || pc.y < 0.0 || pc.y > 1.0) return -1.0;
+      float s = 0.0;
+      for (int x = -2; x <= 2; ++x)
+        for (int y = -2; y <= 2; ++y)
+          s += texture(uShadowMap,
+                       vec4(pc.xy + vec2(x, y) * uShadowTexel, float(c), pc.z - bias));
+      return s / 25.0;
+    }
 
     float shadowFactor(vec3 wp, float ndl) {
       if (uShadowOn == 0) return 1.0;
@@ -130,17 +147,19 @@ std::uint32_t create_skin_program() {
               (dist < uShadowSplits.z) ? 2 :
               (dist < uShadowSplits.w) ? 3 : -1;
       if (c < 0) return 1.0;
-      vec4 lp = uShadowVP[c] * vec4(wp, 1.0);
-      vec3 pc = lp.xyz / lp.w * 0.5 + 0.5;
-      if (pc.z > 1.0 || pc.x < 0.0 || pc.x > 1.0 || pc.y < 0.0 || pc.y > 1.0) return 1.0;
-      float bias = max(0.0015, 0.004 * (1.0 - ndl));
-      float s = 0.0;
-      for (int x = -1; x <= 1; ++x)
-        for (int y = -1; y <= 1; ++y) {
-          float d = texture(uShadowMap, vec3(pc.xy + vec2(x, y) * uShadowTexel, float(c))).r;
-          s += (pc.z - bias > d) ? 0.0 : 1.0;
-        }
-      return s / 9.0;
+      float bias = max(0.0012, 0.0035 * (1.0 - ndl));
+      float sh = sampleCascade(c, wp, bias);
+      if (sh < 0.0) return 1.0;
+      // Cross-fade into the next cascade over the last slice of this one so the
+      // split boundary doesn't show up as a hard seam on big surfaces.
+      float sf = (c == 0) ? uShadowSplits.x : (c == 1) ? uShadowSplits.y
+               : (c == 2) ? uShadowSplits.z : uShadowSplits.w;
+      float band = sf * 0.85;
+      if (c < 3 && dist > band) {
+        float sh2 = sampleCascade(c + 1, wp, bias);
+        if (sh2 >= 0.0) sh = mix(sh, sh2, clamp((dist - band) / (sf - band), 0.0, 1.0));
+      }
+      return sh;
     }
 
     void main() {
@@ -222,20 +241,34 @@ std::uint32_t create_textured_program() {
     uniform int uHasDirt;
     uniform int uHasNormal;
     uniform int uHasCrack;
+    uniform int uAlphaMode;  // 0 opaque, 1 use base-texture alpha (rotor blur etc.)
     uniform vec4 uLmXform;  // xy = uv scale, zw = uv offset into the atlas
     uniform vec3 uCamPos;
     uniform vec3 uSunDir;
     uniform vec3 uFogColor;
     uniform vec2 uFogRange;
-    uniform sampler2DArray uShadowMap;
+    uniform sampler2DArrayShadow uShadowMap;
     uniform mat4 uShadowVP[4];
     uniform vec4 uShadowSplits;   // per-cascade far distance (world units)
     uniform int uShadowOn;
     uniform float uShadowTexel;
     out vec4 FragColor;
 
-    // Real-time sun shadow from the cascaded shadow maps (3x3 PCF). Returns 1 in
-    // full light, 0 in full shadow. Picks the tightest cascade covering the frag.
+    // Real-time sun shadow from the cascaded shadow maps. Hardware PCF (each tap
+    // bilinearly compared) over a 5x5 kernel, with a cross-fade between cascades.
+    // Returns 1 in full light, 0 in full shadow.
+    float sampleCascade(int c, vec3 wp, float bias) {
+      vec4 lp = uShadowVP[c] * vec4(wp, 1.0);
+      vec3 pc = lp.xyz / lp.w * 0.5 + 0.5;
+      if (pc.z > 1.0 || pc.x < 0.0 || pc.x > 1.0 || pc.y < 0.0 || pc.y > 1.0) return -1.0;
+      float s = 0.0;
+      for (int x = -2; x <= 2; ++x)
+        for (int y = -2; y <= 2; ++y)
+          s += texture(uShadowMap,
+                       vec4(pc.xy + vec2(x, y) * uShadowTexel, float(c), pc.z - bias));
+      return s / 25.0;
+    }
+
     float shadowFactor(vec3 wp, float ndl) {
       if (uShadowOn == 0) return 1.0;
       float dist = distance(uCamPos, wp);
@@ -244,21 +277,22 @@ std::uint32_t create_textured_program() {
               (dist < uShadowSplits.z) ? 2 :
               (dist < uShadowSplits.w) ? 3 : -1;
       if (c < 0) return 1.0;
-      vec4 lp = uShadowVP[c] * vec4(wp, 1.0);
-      vec3 pc = lp.xyz / lp.w * 0.5 + 0.5;
-      if (pc.z > 1.0 || pc.x < 0.0 || pc.x > 1.0 || pc.y < 0.0 || pc.y > 1.0) return 1.0;
-      float bias = max(0.0015, 0.004 * (1.0 - ndl));
-      float s = 0.0;
-      for (int x = -1; x <= 1; ++x)
-        for (int y = -1; y <= 1; ++y) {
-          float d = texture(uShadowMap, vec3(pc.xy + vec2(x, y) * uShadowTexel, float(c))).r;
-          s += (pc.z - bias > d) ? 0.0 : 1.0;
-        }
-      return s / 9.0;
+      float bias = max(0.0012, 0.0035 * (1.0 - ndl));
+      float sh = sampleCascade(c, wp, bias);
+      if (sh < 0.0) return 1.0;
+      float sf = (c == 0) ? uShadowSplits.x : (c == 1) ? uShadowSplits.y
+               : (c == 2) ? uShadowSplits.z : uShadowSplits.w;
+      float band = sf * 0.85;
+      if (c < 3 && dist > band) {
+        float sh2 = sampleCascade(c + 1, wp, bias);
+        if (sh2 >= 0.0) sh = mix(sh, sh2, clamp((dist - band) / (sf - band), 0.0, 1.0));
+      }
+      return sh;
     }
 
     void main() {
-      vec3 base = texture(uBase, vUv0).rgb;
+      vec4 baseTex = texture(uBase, vUv0);
+      vec3 base = baseTex.rgb;
       vec3 albedo = base;
       if (uHasDetail == 1) {
         // BF2 detail maps are neutral at 0.5 (base*detail*2). Applying the full
@@ -329,7 +363,17 @@ std::uint32_t create_textured_program() {
                         0.0, 1.0);
         lit = mix(lit, uFogColor, f);
       }
-      FragColor = vec4(lit, 1.0);
+      float outAlpha = 1.0;
+      if (uAlphaMode == 1) {
+        // Rotor-blur discs: the blade sweep is stored in the texture's alpha.
+        outAlpha = baseTex.a;
+        if (outAlpha < 0.02) discard;
+      } else if (uAlphaMode == 2) {
+        // Alpha-tested cutout (foliage leaves, fences, grates): keep only the
+        // opaque texels so crossed leaf cards don't render as solid white quads.
+        if (baseTex.a < 0.5) discard;
+      }
+      FragColor = vec4(lit, outAlpha);
     }
   )";
 
@@ -383,7 +427,7 @@ std::uint32_t create_terrain_program() {
     uniform int uHasLightmap;
     uniform int uSplat;
     uniform float uDetailTiling;
-    uniform sampler2DArray uShadowMap;
+    uniform sampler2DArrayShadow uShadowMap;
     uniform mat4 uShadowVP[4];
     uniform vec4 uShadowSplits;
     uniform int uShadowOn;
@@ -397,7 +441,19 @@ std::uint32_t create_terrain_program() {
       return clamp(c.g - max(c.r, c.b), 0.0, 1.0);
     }
 
-    // Cascaded shadow lookup (3x3 PCF); 1 = lit, 0 = shadowed.
+    // Cascaded shadow lookup: hardware PCF (5x5) with a cascade cross-fade.
+    float sampleCascade(int c, vec3 wp, float bias) {
+      vec4 lp = uShadowVP[c] * vec4(wp, 1.0);
+      vec3 pc = lp.xyz / lp.w * 0.5 + 0.5;
+      if (pc.z > 1.0 || pc.x < 0.0 || pc.x > 1.0 || pc.y < 0.0 || pc.y > 1.0) return -1.0;
+      float s = 0.0;
+      for (int x = -2; x <= 2; ++x)
+        for (int y = -2; y <= 2; ++y)
+          s += texture(uShadowMap,
+                       vec4(pc.xy + vec2(x, y) * uShadowTexel, float(c), pc.z - bias));
+      return s / 25.0;
+    }
+
     float shadowFactor(vec3 wp, float ndl) {
       if (uShadowOn == 0) return 1.0;
       float dist = distance(uCamPos, wp);
@@ -406,17 +462,17 @@ std::uint32_t create_terrain_program() {
               (dist < uShadowSplits.z) ? 2 :
               (dist < uShadowSplits.w) ? 3 : -1;
       if (c < 0) return 1.0;
-      vec4 lp = uShadowVP[c] * vec4(wp, 1.0);
-      vec3 pc = lp.xyz / lp.w * 0.5 + 0.5;
-      if (pc.z > 1.0 || pc.x < 0.0 || pc.x > 1.0 || pc.y < 0.0 || pc.y > 1.0) return 1.0;
-      float bias = max(0.0018, 0.005 * (1.0 - ndl));
-      float s = 0.0;
-      for (int x = -1; x <= 1; ++x)
-        for (int y = -1; y <= 1; ++y) {
-          float d = texture(uShadowMap, vec3(pc.xy + vec2(x, y) * uShadowTexel, float(c))).r;
-          s += (pc.z - bias > d) ? 0.0 : 1.0;
-        }
-      return s / 9.0;
+      float bias = max(0.0016, 0.0045 * (1.0 - ndl));
+      float sh = sampleCascade(c, wp, bias);
+      if (sh < 0.0) return 1.0;
+      float sf = (c == 0) ? uShadowSplits.x : (c == 1) ? uShadowSplits.y
+               : (c == 2) ? uShadowSplits.z : uShadowSplits.w;
+      float band = sf * 0.85;
+      if (c < 3 && dist > band) {
+        float sh2 = sampleCascade(c + 1, wp, bias);
+        if (sh2 >= 0.0) sh = mix(sh, sh2, clamp((dist - band) / (sf - band), 0.0, 1.0));
+      }
+      return sh;
     }
 
     void main() {
@@ -516,6 +572,31 @@ std::uint32_t create_color_program() {
   return program;
 }
 
+std::uint32_t create_ui_program() {
+  const char* vertex_src = R"(
+    #version 330 core
+    layout(location = 0) in vec2 aPos;
+    uniform mat4 uProj;
+    void main() { gl_Position = uProj * vec4(aPos, 0.0, 1.0); }
+  )";
+  const char* fragment_src = R"(
+    #version 330 core
+    uniform vec4 uColor;
+    out vec4 FragColor;
+    void main() { FragColor = uColor; }
+  )";
+  const auto vs = compile_shader(GL_VERTEX_SHADER, vertex_src);
+  const auto fs = compile_shader(GL_FRAGMENT_SHADER, fragment_src);
+  const auto program = glCreateProgram();
+  glAttachShader(program, vs);
+  glAttachShader(program, fs);
+  glLinkProgram(program);
+  check_program_link(program, "ui");
+  glDeleteShader(vs);
+  glDeleteShader(fs);
+  return program;
+}
+
 std::uint32_t create_sky_program() {
   // Full-screen triangle; the fragment reconstructs a world-space view ray and
   // shades a vertical gradient with a soft sun disc.
@@ -594,32 +675,51 @@ std::uint32_t create_water_program() {
     uniform float uTime;
     out vec4 FragColor;
 
-    // Cheap value-noise ripple normal so the surface catches highlights.
-    float hash(vec2 p) { return fract(sin(dot(p, vec2(41.3, 289.1))) * 43758.5); }
-    float noise(vec2 p) {
-      vec2 i = floor(p); vec2 f = fract(p);
-      float a = hash(i), b = hash(i + vec2(1, 0));
-      float c = hash(i + vec2(0, 1)), d = hash(i + vec2(1, 1));
-      vec2 u = f * f * (3.0 - 2.0 * f);
-      return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+    // Sea surface built from summed DIRECTIONAL waves (Gerstner-style slopes).
+    // Value noise was producing an axis-aligned criss-cross weave; travelling
+    // sine waves aimed at off-axis, non-parallel headings roll naturally like a
+    // real swell. Each wave contributes an analytic slope so the normal (and its
+    // moving highlights) come for free without any tessellated geometry.
+    //   height h  = A * sin(dot(dir, p) * freq + t * speed)
+    //   dh/dp     = A * freq * cos(...) * dir     (used to build the normal)
+    vec3 seaNormal(vec2 p, out float crest) {
+      vec2 dirs[6] = vec2[](
+        normalize(vec2( 0.80,  0.32)),
+        normalize(vec2(-0.52,  0.74)),
+        normalize(vec2( 0.28, -0.86)),
+        normalize(vec2(-0.88, -0.24)),
+        normalize(vec2( 0.16,  0.99)),
+        normalize(vec2( 0.95, -0.45)));
+      float freq[6] = float[](0.028, 0.049, 0.083, 0.13, 0.20, 0.31);
+      float amp[6]  = float[](1.00, 0.62, 0.38, 0.22, 0.13, 0.08);
+      float spd[6]  = float[](0.42, 0.63, 0.85, 1.15, 1.55, 2.0);
+      float sx = 0.0, sz = 0.0, h = 0.0;
+      for (int i = 0; i < 6; ++i) {
+        float ph = dot(dirs[i], p) * freq[i] + uTime * spd[i];
+        h += sin(ph) * amp[i];
+        float c = cos(ph) * amp[i] * freq[i];
+        sx += c * dirs[i].x;
+        sz += c * dirs[i].y;
+      }
+      crest = h;
+      // The slope scale controls choppiness; keep it moderate so the sea reads
+      // as gentle swell rather than sharp chop.
+      return normalize(vec3(-sx * 9.0, 1.0, -sz * 9.0));
     }
     void main() {
       vec3 viewDir = normalize(uCamPos - vWorldPos);
-      // Perturb the flat up-normal with two scrolling noise gradients.
-      vec2 uv = vWorldPos.xz * 0.08;
-      float e = 0.15;
-      float n1 = noise(uv + vec2(uTime * 0.05, uTime * 0.03));
-      float nx = noise(uv + vec2(e, 0.0) + vec2(uTime * 0.05, uTime * 0.03)) - n1;
-      float nz = noise(uv + vec2(0.0, e) + vec2(uTime * 0.05, uTime * 0.03)) - n1;
-      vec3 normal = normalize(vec3(-nx, 1.0, -nz) * vec3(2.5, 1.0, 2.5));
-      float fres = pow(1.0 - max(dot(normal, viewDir), 0.0), 3.0);
-      vec3 col = mix(uWaterColor, uSkyColor, clamp(fres, 0.0, 0.8));
-      // Specular glint toward the sun.
+      vec2 p = vWorldPos.xz;
+      float crest;
+      vec3 normal = seaNormal(p, crest);
+      float fres = pow(1.0 - max(dot(normal, viewDir), 0.0), 4.0);
+      vec3 col = mix(uWaterColor, uSkyColor, clamp(fres, 0.0, 0.85));
+      col *= 0.92 + 0.08 * crest;  // subtle crest/trough tint variation
+      // Sharp sun glint that skitters over the moving normals.
       if (length(uSunDir) > 0.001) {
-        vec3 h = normalize(normalize(-uSunDir) + viewDir);
-        col += uSunColor * pow(max(dot(normal, h), 0.0), 120.0) * 0.9;
+        vec3 hlf = normalize(normalize(-uSunDir) + viewDir);
+        col += uSunColor * pow(max(dot(normal, hlf), 0.0), 200.0) * 1.2;
       }
-      float alpha = mix(0.75, 0.95, fres);
+      float alpha = mix(0.72, 0.96, fres);
       if (uFogRange.y > 0.0) {
         float f = clamp((distance(uCamPos, vWorldPos) - uFogRange.x) /
                             max(uFogRange.y - uFogRange.x, 0.001),
@@ -676,7 +776,7 @@ std::uint32_t create_grass_program() {
     out vec4 FragColor;
     void main() {
       vec4 tex = texture(uAtlas, vUv);
-      if (tex.a < 0.35) discard;  // alpha-tested blades
+      if (tex.a < 0.5) discard;  // alpha-tested blades
       vec3 col = tex.rgb;
       if (uFogRange.y > 0.0) {
         float f = clamp((distance(uCamPos, vWorldPos) - uFogRange.x) /
@@ -743,6 +843,8 @@ std::uint32_t create_post_program() {
     #version 330 core
     in vec2 vUv;
     uniform sampler2D uScene;
+    uniform sampler2D uBloom;   // half-res blurred highlights
+    uniform float uBloomI;      // bloom intensity (0 disables)
     uniform float uDegrade;   // 0 = clean passthrough, 1 = heavy signal loss
     uniform float uTime;
     uniform vec2 uResolution;
@@ -757,7 +859,9 @@ std::uint32_t create_post_program() {
     void main() {
       vec2 uv = vUv;
       if (uDegrade < 0.001) {  // clean feed
-        FragColor = vec4(texture(uScene, uv).rgb, 1.0);
+        vec3 c = texture(uScene, uv).rgb;
+        c += texture(uBloom, uv).rgb * uBloomI;  // additive glow
+        FragColor = vec4(c, 1.0);
         return;
       }
       float d = clamp(uDegrade, 0.0, 1.0);
@@ -792,6 +896,7 @@ std::uint32_t create_post_program() {
       float vig = smoothstep(0.9, 0.35, dot(q, q) * 2.4);
       col *= mix(1.0, vig, 0.6 * d);
 
+      col += texture(uBloom, uv).rgb * uBloomI;  // glow survives the FPV feed too
       FragColor = vec4(col, 1.0);
     }
   )";
@@ -807,6 +912,70 @@ std::uint32_t create_post_program() {
   return program;
 }
 
+// Shared full-screen-triangle vertex shader for the bloom passes.
+const char* kFullscreenVs = R"(
+  #version 330 core
+  out vec2 vUv;
+  void main() {
+    vec2 p = vec2((gl_VertexID == 2) ? 3.0 : -1.0, (gl_VertexID == 1) ? 3.0 : -1.0);
+    vUv = p * 0.5 + 0.5;
+    gl_Position = vec4(p, 0.0, 1.0);
+  }
+)";
+
+std::uint32_t make_fs_program(const char* fragment_src, const char* label) {
+  const auto vs = compile_shader(GL_VERTEX_SHADER, kFullscreenVs);
+  const auto fs = compile_shader(GL_FRAGMENT_SHADER, fragment_src);
+  const auto program = glCreateProgram();
+  glAttachShader(program, vs);
+  glAttachShader(program, fs);
+  glLinkProgram(program);
+  check_program_link(program, label);
+  glDeleteShader(vs);
+  glDeleteShader(fs);
+  return program;
+}
+
+// Bright-pass: keep only the portion of each pixel above the threshold, so only
+// highlights feed the bloom (a soft knee avoids a hard cut-off).
+std::uint32_t create_bright_program() {
+  const char* fragment_src = R"(
+    #version 330 core
+    in vec2 vUv;
+    uniform sampler2D uScene;
+    uniform float uThreshold;
+    out vec4 FragColor;
+    void main() {
+      vec3 c = texture(uScene, vUv).rgb;
+      float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+      float knee = smoothstep(uThreshold, uThreshold + 0.35, l);
+      FragColor = vec4(c * knee, 1.0);
+    }
+  )";
+  return make_fs_program(fragment_src, "bloom_bright");
+}
+
+// Separable 9-tap Gaussian blur. uDir is the per-tap UV offset (texel * axis).
+std::uint32_t create_blur_program() {
+  const char* fragment_src = R"(
+    #version 330 core
+    in vec2 vUv;
+    uniform sampler2D uTex;
+    uniform vec2 uDir;
+    out vec4 FragColor;
+    void main() {
+      float w[5] = float[](0.227027, 0.194595, 0.121622, 0.054054, 0.016216);
+      vec3 c = texture(uTex, vUv).rgb * w[0];
+      for (int i = 1; i < 5; ++i) {
+        c += texture(uTex, vUv + uDir * float(i)).rgb * w[i];
+        c += texture(uTex, vUv - uDir * float(i)).rgb * w[i];
+      }
+      FragColor = vec4(c, 1.0);
+    }
+  )";
+  return make_fs_program(fragment_src, "bloom_blur");
+}
+
 }  // namespace
 
 bool Renderer::initialize(void* sdl_window) {
@@ -815,19 +984,36 @@ bool Renderer::initialize(void* sdl_window) {
   textured_program_ = create_textured_program();
   terrain_program_ = create_terrain_program();
   color_program_ = create_color_program();
+  ui_program_ = create_ui_program();
+  glGenVertexArrays(1, &ui_vao_);
+  glGenBuffers(1, &ui_vbo_);
   sky_program_ = create_sky_program();
   water_program_ = create_water_program();
   grass_program_ = create_grass_program();
   shadow_depth_program_ = create_depth_program();
   post_program_ = create_post_program();
+  bright_program_ = create_bright_program();
+  blur_program_ = create_blur_program();
+  // Bloom tuning / toggle via env (BF2_BLOOM=0 disables; BF2_BLOOMI scales it).
+  if (const char* b = std::getenv("BF2_BLOOM")) {
+    bloom_enabled_ = !(b[0] == '0' || b[0] == 'n' || b[0] == 'N' || b[0] == 'f' || b[0] == 'F');
+  }
+  if (const char* bi = std::getenv("BF2_BLOOMI")) {
+    bloom_intensity_ = std::max(0.f, static_cast<float>(std::atof(bi)));
+  }
 
   // Shadow depth texture array + framebuffer (one layer per cascade).
   glGenTextures(1, &shadow_array_);
   glBindTexture(GL_TEXTURE_2D_ARRAY, shadow_array_);
   glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_DEPTH_COMPONENT24, shadow_res_, shadow_res_,
                kShadowCascades, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
-  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  // LINEAR + comparison mode = hardware PCF: each tap is bilinearly filtered
+  // against the fragment's depth, so shadow edges come back smooth instead of
+  // the blocky stair-stepping you get from raw NEAREST depth reads.
+  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
+  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
   glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
   glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
   const float border[4] = {1.f, 1.f, 1.f, 1.f};  // outside cascade = fully lit
@@ -869,8 +1055,22 @@ bool Renderer::initialize(void* sdl_window) {
 
   glEnable(GL_DEPTH_TEST);
   glEnable(GL_MULTISAMPLE);
+
+  // Neutral grey fallback texture. Submeshes whose material texture failed to
+  // load are drawn with this instead of being skipped, so vehicles/objects keep
+  // solid surfaces (no holes you can "see inside") even with missing textures.
+  {
+    const unsigned char grey[4] = {160, 160, 160, 255};
+    glGenTextures(1, &fallback_tex_);
+    glBindTexture(GL_TEXTURE_2D, fallback_tex_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, grey);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindTexture(GL_TEXTURE_2D, 0);
+  }
+
   initialized_ = true;
-  (void)sdl_window;
+  sdl_window_ = static_cast<SDL_Window*>(sdl_window);
   return true;
 }
 
@@ -914,6 +1114,24 @@ void Renderer::shutdown() {
   if (post_program_ != 0) {
     glDeleteProgram(post_program_);
     post_program_ = 0;
+  }
+  if (bright_program_ != 0) {
+    glDeleteProgram(bright_program_);
+    bright_program_ = 0;
+  }
+  if (blur_program_ != 0) {
+    glDeleteProgram(blur_program_);
+    blur_program_ = 0;
+  }
+  for (int i = 0; i < 2; ++i) {
+    if (bloom_fbo_[i] != 0) {
+      glDeleteFramebuffers(1, &bloom_fbo_[i]);
+      bloom_fbo_[i] = 0;
+    }
+    if (bloom_tex_[i] != 0) {
+      glDeleteTextures(1, &bloom_tex_[i]);
+      bloom_tex_[i] = 0;
+    }
   }
   if (shadow_fbo_ != 0) {
     glDeleteFramebuffers(1, &shadow_fbo_);
@@ -1113,6 +1331,12 @@ GpuSkinnedMesh Renderer::upload_skinned(const SkinnedGeometry& geometry) {
                         reinterpret_cast<void*>(8 * sizeof(float) + 2 * sizeof(std::int32_t)));
 
   gpu.index_count = static_cast<std::uint32_t>(geometry.indices.size());
+  for (const auto& sub : geometry.submeshes) {
+    GpuSkinnedSubmesh gs;
+    gs.index_offset = sub.index_offset;
+    gs.index_count = sub.index_count;
+    gpu.submeshes.push_back(gs);  // tex resolved by the caller
+  }
   glBindVertexArray(0);
   return gpu;
 }
@@ -1133,15 +1357,28 @@ void Renderer::draw_skinned(const GpuSkinnedMesh& mesh, const float* view_projec
                      model ? model : kIdentity);
   glUniform3fv(glGetUniformLocation(skin_program_, "uTint"), 1, tint3 ? tint3 : kWhite);
   glUniform1i(glGetUniformLocation(skin_program_, "uDiffuse"), 0);
-  glUniform1i(glGetUniformLocation(skin_program_, "uHasTex"), diffuse_tex != 0 ? 1 : 0);
-  if (diffuse_tex != 0) {
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, diffuse_tex);
-  }
   const int count = bone_count < kMaxSkinBones ? bone_count : kMaxSkinBones;
   glUniformMatrix4fv(glGetUniformLocation(skin_program_, "uBones"), count, GL_FALSE, palette);
+  glActiveTexture(GL_TEXTURE0);
   glBindVertexArray(mesh.vao);
-  glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh.index_count), GL_UNSIGNED_INT, nullptr);
+  const GLint has_tex_loc = glGetUniformLocation(skin_program_, "uHasTex");
+  if (!mesh.submeshes.empty()) {
+    // Per-submesh textures (body/head/gear each bind their own colour map). Any
+    // submesh that failed to resolve falls back to the shared diffuse_tex.
+    for (const auto& sub : mesh.submeshes) {
+      if (sub.index_count == 0) continue;
+      const std::uint32_t tex = sub.tex != 0 ? sub.tex : diffuse_tex;
+      glUniform1i(has_tex_loc, tex != 0 ? 1 : 0);
+      if (tex != 0) glBindTexture(GL_TEXTURE_2D, tex);
+      glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(sub.index_count), GL_UNSIGNED_INT,
+                     reinterpret_cast<void*>(static_cast<std::uintptr_t>(sub.index_offset) *
+                                             sizeof(std::uint32_t)));
+    }
+  } else {
+    glUniform1i(has_tex_loc, diffuse_tex != 0 ? 1 : 0);
+    if (diffuse_tex != 0) glBindTexture(GL_TEXTURE_2D, diffuse_tex);
+    glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh.index_count), GL_UNSIGNED_INT, nullptr);
+  }
   glBindVertexArray(0);
 }
 
@@ -1158,7 +1395,7 @@ void Renderer::destroy_skinned(GpuSkinnedMesh& mesh) {
   mesh = {};
 }
 
-std::uint32_t Renderer::upload_texture(const DdsTexture& texture) {
+std::uint32_t Renderer::upload_texture(const DdsTexture& texture, bool mipmaps) {
   if (!initialized_ || texture.width == 0 || texture.height == 0 || texture.pixels.empty()) {
     return 0;
   }
@@ -1199,7 +1436,8 @@ std::uint32_t Renderer::upload_texture(const DdsTexture& texture) {
     // Upload the DXT data compressed (keeps VRAM low) with every mip level stored
     // in the file, so distant surfaces get proper trilinear + anisotropic
     // filtering without an ~8x memory blow-up.
-    const GLint mip_count = static_cast<GLint>(texture.mip_count > 0 ? texture.mip_count : 1);
+    const GLint mip_count = mipmaps ? static_cast<GLint>(texture.mip_count > 0 ? texture.mip_count : 1)
+                                    : 1;  // alpha-test atlases: base level only
     std::size_t offset = 0;
     GLsizei level_w = w;
     GLsizei level_h = h;
@@ -1234,7 +1472,7 @@ std::uint32_t Renderer::upload_texture(const DdsTexture& texture) {
   if (GLEW_EXT_texture_filter_anisotropic) {
     GLfloat max_aniso = 1.f;
     glGetFloatv(0x84FF /*GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT*/, &max_aniso);
-    const GLfloat aniso = max_aniso < 8.f ? max_aniso : 8.f;
+    const GLfloat aniso = std::min(static_cast<GLfloat>(anisotropic_), max_aniso);
     glTexParameterf(GL_TEXTURE_2D, 0x84FE /*GL_TEXTURE_MAX_ANISOTROPY_EXT*/, aniso);
   }
 
@@ -1312,13 +1550,26 @@ GpuTexturedMesh Renderer::upload_textured(const TexturedMeshData& data) {
 }
 
 void Renderer::draw_textured(const GpuTexturedMesh& mesh, const float* mvp, const float* model,
-                             std::uint32_t obj_lightmap, const float* lm_xform) {
+                             std::uint32_t obj_lightmap, const float* lm_xform, bool cull_backfaces,
+                             int alpha_mode) {
   if (!initialized_ || mesh.vao == 0) {
     return;
   }
   static const float kIdentity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
   static const float kLmIdentity[4] = {1, 1, 0, 0};
+  if (cull_backfaces) {
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glFrontFace(GL_CCW);
+  }
+  if (alpha_mode == 1) {
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);  // translucent: don't occlude via depth writes
+  }
   glUseProgram(textured_program_);
+  const GLint alpha_mode_loc = glGetUniformLocation(textured_program_, "uAlphaMode");
+  glUniform1i(alpha_mode_loc, alpha_mode);
   apply_environment(textured_program_);
   apply_shadows(textured_program_, 6);
   glUniformMatrix4fv(glGetUniformLocation(textured_program_, "uMVP"), 1, GL_FALSE, mvp);
@@ -1343,9 +1594,11 @@ void Renderer::draw_textured(const GpuTexturedMesh& mesh, const float* mvp, cons
   const GLint has_crack_loc = glGetUniformLocation(textured_program_, "uHasCrack");
   glBindVertexArray(mesh.vao);
   for (const auto& sub : mesh.submeshes) {
-    if (sub.index_count == 0 || sub.base_tex == 0) continue;
+    if (sub.index_count == 0) continue;
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, sub.base_tex);
+    // Missing textures fall back to neutral grey rather than skipping the
+    // submesh, which would leave a hole you can see through.
+    glBindTexture(GL_TEXTURE_2D, sub.base_tex != 0 ? sub.base_tex : fallback_tex_);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, sub.detail_tex);
     glActiveTexture(GL_TEXTURE3);
@@ -1358,11 +1611,19 @@ void Renderer::draw_textured(const GpuTexturedMesh& mesh, const float* mvp, cons
     glUniform1i(has_dirt_loc, sub.dirt_tex != 0 ? 1 : 0);
     glUniform1i(has_normal_loc, sub.normal_tex != 0 ? 1 : 0);
     glUniform1i(has_crack_loc, sub.crack_tex != 0 ? 1 : 0);
+    // Cutout submeshes (foliage/fences) alpha-test regardless of the mesh-wide
+    // mode; everything else uses the caller's mode.
+    glUniform1i(alpha_mode_loc, sub.cutout ? 2 : alpha_mode);
     glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(sub.index_count), GL_UNSIGNED_INT,
                    reinterpret_cast<void*>(static_cast<std::uintptr_t>(sub.index_offset) *
                                            sizeof(std::uint32_t)));
   }
   glBindVertexArray(0);
+  if (cull_backfaces) glDisable(GL_CULL_FACE);
+  if (alpha_mode == 1) {
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+  }
 }
 
 void Renderer::destroy_textured(GpuTexturedMesh& mesh) {
@@ -1412,6 +1673,11 @@ void Renderer::draw_terrain_colormap(const GpuTexturedMesh& mesh, const float* m
   glActiveTexture(GL_TEXTURE6);
   glBindTexture(GL_TEXTURE_2D, d2);
 
+  // Push terrain fragments slightly back in depth so flat ground decals that sit
+  // exactly on the terrain surface (runways, helipads, roads) reliably win the
+  // depth test instead of z-fighting. Map-agnostic: applies to all terrain.
+  glEnable(GL_POLYGON_OFFSET_FILL);
+  glPolygonOffset(1.0f, 2.0f);
   glBindVertexArray(mesh.vao);
   for (const auto& sub : mesh.submeshes) {
     if (sub.index_count == 0) continue;
@@ -1420,6 +1686,8 @@ void Renderer::draw_terrain_colormap(const GpuTexturedMesh& mesh, const float* m
                                            sizeof(std::uint32_t)));
   }
   glBindVertexArray(0);
+  glPolygonOffset(0.0f, 0.0f);
+  glDisable(GL_POLYGON_OFFSET_FILL);
 }
 
 GpuColorMesh Renderer::upload_color(const std::vector<float>& pos_normal,
@@ -1510,6 +1778,134 @@ void Renderer::draw_lines(const float* mvp, const float* xyz, int vertex_count, 
   if (!depth_test) {
     glEnable(GL_DEPTH_TEST);
   }
+}
+
+// ---- 2D UI ----------------------------------------------------------------
+
+namespace {
+// Draw a triangle list of 2D positions with a solid RGBA colour.
+void ui_draw_tris(std::uint32_t program, std::uint32_t vao, std::uint32_t vbo, const float* proj,
+                  const std::vector<float>& xy, float r, float g, float b, float a) {
+  if (xy.size() < 6) return;
+  glBindVertexArray(vao);
+  glBindBuffer(GL_ARRAY_BUFFER, vbo);
+  glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(xy.size() * sizeof(float)), xy.data(),
+               GL_DYNAMIC_DRAW);
+  glEnableVertexAttribArray(0);
+  glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), reinterpret_cast<void*>(0));
+  glUseProgram(program);
+  glUniformMatrix4fv(glGetUniformLocation(program, "uProj"), 1, GL_FALSE, proj);
+  glUniform4f(glGetUniformLocation(program, "uColor"), r, g, b, a);
+  glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(xy.size() / 2));
+  glBindVertexArray(0);
+}
+}  // namespace
+
+void Renderer::begin_ui(SDL_Window* window) {
+  if (!initialized_) return;
+  SDL_Window* win = window ? window : sdl_window_;
+  int w = 0, h = 0;
+  if (win) {
+    SDL_GL_GetDrawableSize(win, &w, &h);
+    if (w <= 0 || h <= 0) SDL_GetWindowSize(win, &w, &h);
+  }
+  if (w <= 0) w = 1600;
+  if (h <= 0) h = 900;
+  begin_ui(w, h);
+}
+
+void Renderer::begin_ui(int width, int height) {
+  if (!initialized_) return;
+  if (width <= 0) width = 1600;
+  if (height <= 0) height = 900;
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  glViewport(0, 0, width, height);
+  // Layout in a fixed 1600x900 design space, scaled uniformly with letterboxing so
+  // menus look correct at any resolution / aspect (windowed, borderless, exclusive).
+  constexpr float kDesignW = 1600.f;
+  constexpr float kDesignH = 900.f;
+  ui_fb_w_ = width;
+  ui_fb_h_ = height;
+  ui_scale_ = std::min(static_cast<float>(width) / kDesignW, static_cast<float>(height) / kDesignH);
+  const float content_w = kDesignW * ui_scale_;
+  const float content_h = kDesignH * ui_scale_;
+  ui_off_x_ = (static_cast<float>(width) - content_w) * 0.5f;
+  ui_off_y_ = (static_cast<float>(height) - content_h) * 0.5f;
+  const float w = static_cast<float>(width);
+  const float h = static_cast<float>(height);
+  float* m = ui_proj_;
+  for (int i = 0; i < 16; ++i) m[i] = 0.f;
+  m[0] = 2.f / w;
+  m[5] = -2.f / h;
+  m[10] = -1.f;
+  m[12] = -1.f;
+  m[13] = 1.f;
+  m[15] = 1.f;
+  glDisable(GL_DEPTH_TEST);
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+}
+
+void Renderer::ui_unproject(int screen_x, int screen_y, float& design_x, float& design_y) const {
+  if (ui_scale_ <= 1e-6f) {
+    design_x = static_cast<float>(screen_x);
+    design_y = static_cast<float>(screen_y);
+    return;
+  }
+  design_x = (static_cast<float>(screen_x) - ui_off_x_) / ui_scale_;
+  design_y = (static_cast<float>(screen_y) - ui_off_y_) / ui_scale_;
+}
+
+void Renderer::ui_rect(float x, float y, float w, float h, float r, float g, float b, float a) {
+  if (!initialized_) return;
+  x = ui_off_x_ + x * ui_scale_;
+  y = ui_off_y_ + y * ui_scale_;
+  w *= ui_scale_;
+  h *= ui_scale_;
+  const std::vector<float> xy = {x, y, x + w, y, x + w, y + h, x, y, x + w, y + h, x, y + h};
+  ui_draw_tris(ui_program_, ui_vao_, ui_vbo_, ui_proj_, xy, r, g, b, a);
+}
+
+void Renderer::ui_text(float x, float y, float scale, const char* text, float r, float g, float b,
+                       float a) {
+  if (!initialized_ || text == nullptr || *text == '\0') return;
+  static char buf[200000];
+  unsigned char col[4] = {255, 255, 255, 255};
+  const int quads =
+      stb_easy_font_print(0.f, 0.f, const_cast<char*>(text), col, buf, sizeof(buf));
+  if (quads <= 0) return;
+  const float* verts = reinterpret_cast<const float*>(buf);
+  const int floats_per_vert = 4;  // x, y, z, packed-colour
+  std::vector<float> tris;
+  tris.reserve(static_cast<std::size_t>(quads) * 12);
+  for (int q = 0; q < quads; ++q) {
+    const int base = q * 4 * floats_per_vert;
+    float qx[4], qy[4];
+    const float ts = scale * ui_scale_;
+    for (int i = 0; i < 4; ++i) {
+      qx[i] = ui_off_x_ + x * ui_scale_ + verts[base + i * floats_per_vert + 0] * ts;
+      qy[i] = ui_off_y_ + y * ui_scale_ + verts[base + i * floats_per_vert + 1] * ts;
+    }
+    const int order[6] = {0, 1, 2, 0, 2, 3};
+    for (int i = 0; i < 6; ++i) {
+      tris.push_back(qx[order[i]]);
+      tris.push_back(qy[order[i]]);
+    }
+  }
+  ui_draw_tris(ui_program_, ui_vao_, ui_vbo_, ui_proj_, tris, r, g, b, a);
+}
+
+float Renderer::ui_text_width(const char* text, float scale) const {
+  if (text == nullptr) return 0.f;
+  return static_cast<float>(stb_easy_font_width(const_cast<char*>(text))) * scale;
+}
+
+float Renderer::ui_text_height(float scale) const { return 12.f * scale; }
+
+void Renderer::end_ui() {
+  if (!initialized_) return;
+  glDisable(GL_BLEND);
+  glEnable(GL_DEPTH_TEST);
 }
 
 void Renderer::set_environment(const float* cam_pos3, const float* sun_dir3, const float* fog_color3,
@@ -1617,21 +2013,117 @@ void Renderer::begin_scene(int w, int h, float r, float g, float b) {
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 }
 
+void Renderer::set_bloom(bool enabled, float intensity) {
+  bloom_enabled_ = enabled;
+  bloom_intensity_ = std::max(0.f, intensity);
+}
+
+void Renderer::set_shadows_enabled(bool enabled) {
+  shadows_enabled_ = enabled ? 1 : 0;
+}
+
+void Renderer::set_anisotropic(int level) {
+  anisotropic_ = std::clamp(level, 1, 16);
+}
+
+bool Renderer::reload_shadow_res(int resolution) {
+  if (!initialized_ || resolution < 256 || resolution > 16384) return false;
+  if (resolution == shadow_res_) return true;
+  shadow_res_ = resolution;
+  if (shadow_array_ != 0) glDeleteTextures(1, &shadow_array_);
+  if (shadow_fbo_ != 0) glDeleteFramebuffers(1, &shadow_fbo_);
+  shadow_array_ = 0;
+  shadow_fbo_ = 0;
+  glGenTextures(1, &shadow_array_);
+  glBindTexture(GL_TEXTURE_2D_ARRAY, shadow_array_);
+  glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_DEPTH_COMPONENT24, shadow_res_, shadow_res_,
+               kShadowCascades, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+  const float border[] = {1.f, 1.f, 1.f, 1.f};
+  glTexParameterfv(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BORDER_COLOR, border);
+  glGenFramebuffers(1, &shadow_fbo_);
+  glBindFramebuffer(GL_FRAMEBUFFER, shadow_fbo_);
+  glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, shadow_array_, 0);
+  glDrawBuffer(GL_NONE);
+  glReadBuffer(GL_NONE);
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  return true;
+}
+
 void Renderer::present_scene(float degrade, float time_seconds) {
   if (!initialized_ || scene_fbo_ == 0) return;
+  glDisable(GL_DEPTH_TEST);
+  glBindVertexArray(sky_vao_);  // empty VAO; positions come from gl_VertexID
+
+  // ---- Bloom: bright-pass at half res, then a couple of separable blurs ----
+  float bloom_i = 0.f;
+  if (bloom_enabled_ && bright_program_ != 0 && blur_program_ != 0) {
+    const int bw = std::max(1, scene_w_ / 2);
+    const int bh = std::max(1, scene_h_ / 2);
+    if (bloom_fbo_[0] == 0 || bw != bloom_w_ || bh != bloom_h_) {
+      bloom_w_ = bw;
+      bloom_h_ = bh;
+      for (int i = 0; i < 2; ++i) {
+        if (bloom_tex_[i] == 0) glGenTextures(1, &bloom_tex_[i]);
+        glBindTexture(GL_TEXTURE_2D, bloom_tex_[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, bw, bh, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        if (bloom_fbo_[i] == 0) glGenFramebuffers(1, &bloom_fbo_[i]);
+        glBindFramebuffer(GL_FRAMEBUFFER, bloom_fbo_[i]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, bloom_tex_[i], 0);
+      }
+    }
+    glViewport(0, 0, bw, bh);
+
+    // Bright-pass scene -> bloom_tex_[0].
+    glBindFramebuffer(GL_FRAMEBUFFER, bloom_fbo_[0]);
+    glUseProgram(bright_program_);
+    glUniform1i(glGetUniformLocation(bright_program_, "uScene"), 0);
+    glUniform1f(glGetUniformLocation(bright_program_, "uThreshold"), bloom_threshold_);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, scene_color_);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+
+    // Separable Gaussian ping-pong: H (0->1) then V (1->0), twice for a wide glow.
+    glUseProgram(blur_program_);
+    glUniform1i(glGetUniformLocation(blur_program_, "uTex"), 0);
+    const GLint dir_loc = glGetUniformLocation(blur_program_, "uDir");
+    for (int pass = 0; pass < 2; ++pass) {
+      glBindFramebuffer(GL_FRAMEBUFFER, bloom_fbo_[1]);
+      glUniform2f(dir_loc, 1.f / static_cast<float>(bw), 0.f);
+      glBindTexture(GL_TEXTURE_2D, bloom_tex_[0]);
+      glDrawArrays(GL_TRIANGLES, 0, 3);
+      glBindFramebuffer(GL_FRAMEBUFFER, bloom_fbo_[0]);
+      glUniform2f(dir_loc, 0.f, 1.f / static_cast<float>(bh));
+      glBindTexture(GL_TEXTURE_2D, bloom_tex_[1]);
+      glDrawArrays(GL_TRIANGLES, 0, 3);
+    }
+    bloom_i = bloom_intensity_;  // blurred highlights live in bloom_tex_[0]
+  }
+
+  // ---- Final composite to the backbuffer ----
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
   glViewport(0, 0, scene_w_, scene_h_);
-  glDisable(GL_DEPTH_TEST);
   glUseProgram(post_program_);
   glUniform1i(glGetUniformLocation(post_program_, "uScene"), 0);
+  glUniform1i(glGetUniformLocation(post_program_, "uBloom"), 1);
+  glUniform1f(glGetUniformLocation(post_program_, "uBloomI"), bloom_i);
   glUniform1f(glGetUniformLocation(post_program_, "uDegrade"), degrade);
   glUniform1f(glGetUniformLocation(post_program_, "uTime"), time_seconds);
   glUniform2f(glGetUniformLocation(post_program_, "uResolution"), static_cast<float>(scene_w_),
               static_cast<float>(scene_h_));
+  glActiveTexture(GL_TEXTURE1);
+  glBindTexture(GL_TEXTURE_2D, bloom_i > 0.f ? bloom_tex_[0] : scene_color_);
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, scene_color_);
-  glBindVertexArray(sky_vao_);  // empty VAO; positions come from gl_VertexID
   glDrawArrays(GL_TRIANGLES, 0, 3);
+
   glBindVertexArray(0);
   glEnable(GL_DEPTH_TEST);
 }

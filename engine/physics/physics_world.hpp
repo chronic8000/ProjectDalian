@@ -81,6 +81,9 @@ private:
 
   std::vector<Tri> tris_;
   std::unordered_map<std::int64_t, std::vector<std::uint32_t>> grid_;
+  // Triangles too large to register per-cell without exploding the grid (carrier
+  // decks, bridges, cliffs). Checked with a linear scan so they stay solid.
+  std::vector<std::uint32_t> oversized_;
   float grid_cell_ = 8.f;
 };
 

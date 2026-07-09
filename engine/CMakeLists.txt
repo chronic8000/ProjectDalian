@@ -31,7 +31,14 @@ else()
   set(BF2_SDL_TARGET SDL2::SDL2)
 endif()
 
-FetchContent_MakeAvailable(glm imgui)
+FetchContent_Declare(
+  enet
+  GIT_REPOSITORY https://github.com/lsalzman/enet.git
+  GIT_TAG v1.3.18
+  GIT_SHALLOW TRUE
+)
+
+FetchContent_MakeAvailable(glm imgui enet)
 
 add_library(bf2glew STATIC ${CMAKE_SOURCE_DIR}/third_party/glew/glew.c)
 target_include_directories(bf2glew PUBLIC ${CMAKE_SOURCE_DIR}/third_party/glew)
@@ -61,6 +68,7 @@ add_library(bf2engine STATIC
   script/con_interpreter.cpp
   script/gameplay_script.cpp
   net/network_stub.cpp
+  net/net.cpp
   ${imgui_SOURCE_DIR}/imgui.cpp
   ${imgui_SOURCE_DIR}/imgui_draw.cpp
   ${imgui_SOURCE_DIR}/imgui_tables.cpp
@@ -74,6 +82,9 @@ target_include_directories(bf2engine
     ${CMAKE_SOURCE_DIR}
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
+  PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/stb
+    ${enet_SOURCE_DIR}/include
 )
 
 target_link_libraries(bf2engine
@@ -83,7 +94,14 @@ target_link_libraries(bf2engine
     bf2glew
   PRIVATE
     bf2miniz
+    enet
 )
+
+# ENet needs Winsock + multimedia timers on Windows (its own CMake doesn't
+# propagate these to consumers).
+if(WIN32)
+  target_link_libraries(bf2engine PRIVATE ws2_32 winmm)
+endif()
 
 target_compile_definitions(bf2engine PRIVATE IMGUI_IMPL_OPENGL_LOADER_GLEW)
 

@@ -75,9 +75,13 @@ void PhysicsWorld::add_collision_triangle(const Float3& a, const Float3& b, cons
 
 void PhysicsWorld::finalize_colliders() {
   grid_.clear();
-  // A single triangle spanning too many cells (e.g. cliff/harbor-scale geometry)
-  // would explode the grid; skip those to bound memory. Buildings/props are small.
-  constexpr int kMaxCellsPerTri = 256;
+  oversized_.clear();
+  // A single triangle spanning too many cells (e.g. carrier decks, bridges,
+  // cliff/harbor-scale geometry) would explode the grid. Register normal-sized
+  // triangles per-cell; large ones go to a fallback list that's always scanned,
+  // so big flat surfaces like an aircraft-carrier deck stay solid (you used to
+  // fall straight through them).
+  constexpr int kMaxCellsPerTri = 1024;
   for (std::uint32_t i = 0; i < tris_.size(); ++i) {
     const Tri& t = tris_[i];
     const float min_x = std::min({t.a.x, t.b.x, t.c.x});
@@ -90,7 +94,11 @@ void PhysicsWorld::finalize_colliders() {
     const int iz1 = static_cast<int>(std::floor(max_z / grid_cell_));
     const long long span =
         static_cast<long long>(ix1 - ix0 + 1) * static_cast<long long>(iz1 - iz0 + 1);
-    if (span <= 0 || span > kMaxCellsPerTri) {
+    if (span <= 0) {
+      continue;
+    }
+    if (span > kMaxCellsPerTri) {
+      oversized_.push_back(i);
       continue;
     }
     for (int ix = ix0; ix <= ix1; ++ix) {
@@ -103,6 +111,30 @@ void PhysicsWorld::finalize_colliders() {
 
 float PhysicsWorld::support_height(float x, float z, float feet, float step_up) const {
   float best = terrain_height(x, z);
+  const float ceiling = feet + step_up;
+  // Test one triangle for a higher walkable surface directly under (x,z).
+  auto consider = [&](std::uint32_t idx) {
+    const Tri& t = tris_[idx];
+    // Barycentric point-in-triangle in XZ.
+    const float d = (t.b.z - t.c.z) * (t.a.x - t.c.x) + (t.c.x - t.b.x) * (t.a.z - t.c.z);
+    if (std::fabs(d) < 1e-6f) {
+      return;
+    }
+    const float u = ((t.b.z - t.c.z) * (x - t.c.x) + (t.c.x - t.b.x) * (z - t.c.z)) / d;
+    const float v = ((t.c.z - t.a.z) * (x - t.c.x) + (t.a.x - t.c.x) * (z - t.c.z)) / d;
+    const float w = 1.0f - u - v;
+    if (u < -0.01f || v < -0.01f || w < -0.01f) {
+      return;
+    }
+    const float h = u * t.a.y + v * t.b.y + w * t.c.y;
+    if (h <= ceiling && h > best) {
+      best = h;
+    }
+  };
+  // Big surfaces (carrier decks, bridges) always get checked.
+  for (const std::uint32_t idx : oversized_) {
+    consider(idx);
+  }
   if (grid_.empty()) {
     return best;
   }
@@ -112,24 +144,8 @@ float PhysicsWorld::support_height(float x, float z, float feet, float step_up) 
   if (it == grid_.end()) {
     return best;
   }
-  const float ceiling = feet + step_up;
   for (const std::uint32_t idx : it->second) {
-    const Tri& t = tris_[idx];
-    // Barycentric point-in-triangle in XZ.
-    const float d = (t.b.z - t.c.z) * (t.a.x - t.c.x) + (t.c.x - t.b.x) * (t.a.z - t.c.z);
-    if (std::fabs(d) < 1e-6f) {
-      continue;
-    }
-    const float u = ((t.b.z - t.c.z) * (x - t.c.x) + (t.c.x - t.b.x) * (z - t.c.z)) / d;
-    const float v = ((t.c.z - t.a.z) * (x - t.c.x) + (t.a.x - t.c.x) * (z - t.c.z)) / d;
-    const float w = 1.0f - u - v;
-    if (u < -0.01f || v < -0.01f || w < -0.01f) {
-      continue;
-    }
-    const float h = u * t.a.y + v * t.b.y + w * t.c.y;
-    if (h <= ceiling && h > best) {
-      best = h;
-    }
+    consider(idx);
   }
   return best;
 }
@@ -143,6 +159,42 @@ PhysicsWorld::RayHit PhysicsWorld::raycast(const Float3& origin, const Float3& d
   }
   const Float3 d{dir.x / dlen, dir.y / dlen, dir.z / dlen};
   best.distance = max_dist;
+
+  // Exact Moller-Trumbore against one triangle; keeps the nearest hit.
+  auto intersect = [&](std::uint32_t idx) {
+    const Tri& t = tris_[idx];
+    const Float3 e1 = sub(t.b, t.a);
+    const Float3 e2 = sub(t.c, t.a);
+    const Float3 pv = cross3(d, e2);
+    const float det = dot3(e1, pv);
+    if (std::fabs(det) < 1e-8f) {
+      return;
+    }
+    const float inv = 1.f / det;
+    const Float3 tv = sub(origin, t.a);
+    const float u = dot3(tv, pv) * inv;
+    if (u < 0.f || u > 1.f) {
+      return;
+    }
+    const Float3 qv = cross3(tv, e1);
+    const float v = dot3(d, qv) * inv;
+    if (v < 0.f || u + v > 1.f) {
+      return;
+    }
+    const float tt = dot3(e2, qv) * inv;
+    if (tt > 0.01f && tt < best.distance) {
+      best.hit = true;
+      best.distance = tt;
+      best.point = {origin.x + d.x * tt, origin.y + d.y * tt, origin.z + d.z * tt};
+      Float3 n = cross3(e1, e2);
+      const float nl = std::sqrt(dot3(n, n));
+      best.normal = nl > 1e-6f ? Float3{n.x / nl, n.y / nl, n.z / nl} : Float3{0, 1, 0};
+    }
+  };
+  // Oversized surfaces (carrier decks, bridges) are always candidates.
+  for (const std::uint32_t idx : oversized_) {
+    intersect(idx);
+  }
 
   // Triangles: gather unique candidates from grid cells sampled along the ray,
   // then do exact Moller-Trumbore intersection.
@@ -161,34 +213,7 @@ PhysicsWorld::RayHit PhysicsWorld::raycast(const Float3& origin, const Float3& d
             continue;
           }
           for (const std::uint32_t idx : it->second) {
-            const Tri& t = tris_[idx];
-            const Float3 e1 = sub(t.b, t.a);
-            const Float3 e2 = sub(t.c, t.a);
-            const Float3 pv = cross3(d, e2);
-            const float det = dot3(e1, pv);
-            if (std::fabs(det) < 1e-8f) {
-              continue;
-            }
-            const float inv = 1.f / det;
-            const Float3 tv = sub(origin, t.a);
-            const float u = dot3(tv, pv) * inv;
-            if (u < 0.f || u > 1.f) {
-              continue;
-            }
-            const Float3 qv = cross3(tv, e1);
-            const float v = dot3(d, qv) * inv;
-            if (v < 0.f || u + v > 1.f) {
-              continue;
-            }
-            const float tt = dot3(e2, qv) * inv;
-            if (tt > 0.01f && tt < best.distance) {
-              best.hit = true;
-              best.distance = tt;
-              best.point = {origin.x + d.x * tt, origin.y + d.y * tt, origin.z + d.z * tt};
-              Float3 n = cross3(e1, e2);
-              const float nl = std::sqrt(dot3(n, n));
-              best.normal = nl > 1e-6f ? Float3{n.x / nl, n.y / nl, n.z / nl} : Float3{0, 1, 0};
-            }
+            intersect(idx);
           }
         }
       }
@@ -307,14 +332,51 @@ void PhysicsWorld::step_character(CharacterController& c, float delta_seconds) c
   // step-up height (i.e. an obstacle you can't just step onto). Low contacts
   // (curbs, ramps, floors) are intentionally ignored here and resolved by the
   // vertical support pass, so slopes and bridges stay walkable.
-  if (!grid_.empty()) {
+  if (!grid_.empty() || !oversized_.empty()) {
     const float feet = c.position.y - c.eye_height;
     const float head = feet + c.eye_height;
     const float block_above = feet + step_up + 0.05f;
     // Sample knee/waist/chest so both low props and tall walls register.
     const float samples[3] = {feet + step_up + 0.2f, feet + 0.9f, feet + 1.5f};
+    // Push the body out of one triangle if it's a wall (not steppable). Returns
+    // true if it moved the body.
+    auto push_out = [&](std::uint32_t idx) -> bool {
+      const Tri& t = tris_[idx];
+      const float tri_max_y = std::max({t.a.y, t.b.y, t.c.y});
+      const float tri_min_y = std::min({t.a.y, t.b.y, t.c.y});
+      if (tri_max_y < block_above || tri_min_y > head) {
+        return false;  // fully steppable, or entirely overhead
+      }
+      bool moved = false;
+      for (const float sy : samples) {
+        if (sy > tri_max_y + radius || sy < tri_min_y - radius) {
+          continue;
+        }
+        const Float3 p{c.position.x, sy, c.position.z};
+        const Float3 cp = closest_on_triangle(p, t.a, t.b, t.c);
+        if (cp.y <= block_above) {
+          continue;  // contact is low enough to step onto
+        }
+        const float ddx = p.x - cp.x;
+        const float ddz = p.z - cp.z;
+        const float d2 = ddx * ddx + ddz * ddz;
+        if (d2 < radius * radius) {
+          const float d = std::sqrt(d2);
+          if (d > 1e-4f) {
+            const float push = radius - d;
+            c.position.x += (ddx / d) * push;
+            c.position.z += (ddz / d) * push;
+            moved = true;
+          }
+        }
+      }
+      return moved;
+    };
     for (int iter = 0; iter < 6; ++iter) {
       bool pushed = false;
+      for (const std::uint32_t idx : oversized_) {
+        pushed |= push_out(idx);
+      }
       const int ix = static_cast<int>(std::floor(c.position.x / grid_cell_));
       const int iz = static_cast<int>(std::floor(c.position.z / grid_cell_));
       for (int dix = -1; dix <= 1; ++dix) {
@@ -324,34 +386,7 @@ void PhysicsWorld::step_character(CharacterController& c, float delta_seconds) c
             continue;
           }
           for (const std::uint32_t idx : it->second) {
-            const Tri& t = tris_[idx];
-            const float tri_max_y = std::max({t.a.y, t.b.y, t.c.y});
-            const float tri_min_y = std::min({t.a.y, t.b.y, t.c.y});
-            if (tri_max_y < block_above || tri_min_y > head) {
-              continue;  // fully steppable, or entirely overhead
-            }
-            for (const float sy : samples) {
-              if (sy > tri_max_y + radius || sy < tri_min_y - radius) {
-                continue;
-              }
-              const Float3 p{c.position.x, sy, c.position.z};
-              const Float3 cp = closest_on_triangle(p, t.a, t.b, t.c);
-              if (cp.y <= block_above) {
-                continue;  // contact is low enough to step onto
-              }
-              const float ddx = p.x - cp.x;
-              const float ddz = p.z - cp.z;
-              const float d2 = ddx * ddx + ddz * ddz;
-              if (d2 < radius * radius) {
-                const float d = std::sqrt(d2);
-                if (d > 1e-4f) {
-                  const float push = radius - d;
-                  c.position.x += (ddx / d) * push;
-                  c.position.z += (ddz / d) * push;
-                  pushed = true;
-                }
-              }
-            }
+            pushed |= push_out(idx);
           }
         }
       }

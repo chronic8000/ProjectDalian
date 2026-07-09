@@ -47,6 +47,31 @@ std::uint32_t TextureCache::get(const std::string& bf2_path) {
     try {
       const DdsTexture tex = DdsLoader::load_from_memory(*bytes);
       id = renderer_.upload_texture(tex);
+      if (id != 0) {
+        // Classify as a cutout mask if a meaningful fraction of texels are fully
+        // transparent (typical of foliage/fence alpha). Specular-in-alpha maps
+        // and opaque DXT1 have (almost) no alpha==0 texels, so they're excluded.
+        try {
+          const DdsTexture rgba = DdsLoader::decode_to_rgba8(tex);
+          const std::size_t px = rgba.pixels.size() / 4;
+          std::size_t clear = 0;  // fully transparent (hard cutout gaps)
+          std::size_t soft = 0;   // semi-transparent (feathered foliage edges)
+          for (std::size_t i = 0; i < px; ++i) {
+            const std::uint8_t a = rgba.pixels[i * 4 + 3];
+            if (a < 32) ++clear;
+            if (a < 96) ++soft;
+          }
+          // Treat as a transparency mask if it has real holes, or a meaningful
+          // band of soft alpha (leaf/plant/decal edges). Opaque building/fence
+          // textures are DXT1 (alpha=255 everywhere), so they never qualify.
+          const double fc = px ? static_cast<double>(clear) / px : 0.0;
+          const double fs = px ? static_cast<double>(soft) / px : 0.0;
+          if (fc > 0.02 || fs > 0.06) {
+            cutout_.insert(id);
+          }
+        } catch (...) {
+        }
+      }
     } catch (...) {
       id = 0;
     }

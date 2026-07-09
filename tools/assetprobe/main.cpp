@@ -1,4 +1,8 @@
+#include <algorithm>
+#include <cstring>
 #include <iostream>
+#include <map>
+#include <set>
 #include <string>
 
 #include "engine/formats/animation/bf2_animation.hpp"
@@ -98,9 +102,109 @@ int probe(bf2::ArchiveMount& archive, const std::string& vpath) {
 
 }  // namespace
 
+void dump_mesh_detail(bf2::ArchiveMount& archive, const std::string& vpath) {
+  const auto bytes = archive.read(vpath);
+  if (!bytes) {
+    std::cerr << "  NOT FOUND: " << vpath << '\n';
+    return;
+  }
+  const auto mesh = bf2::MeshLoader::load_from_memory(*bytes, mesh_kind(vpath));
+  std::cout << "[" << vpath << "] geoms=" << mesh.geometries.size()
+            << " stride=" << mesh.vertex_stride << " verts=" << mesh.vertex_count << '\n';
+  for (std::size_t i = 0; i < mesh.vertex_attributes.size(); ++i) {
+    const auto& a = mesh.vertex_attributes[i];
+    std::cout << "  attr[" << i << "] flag=" << a.flag << " off=" << a.offset
+              << " type=" << a.vartype << " usage=" << a.usage << '\n';
+  }
+  // Per-bone (per geometry-part) vertex bounds: reveals whether bundledmesh parts
+  // are stored in model space (assembled) or per-part local space (need transforms).
+  if (mesh_kind(vpath) == bf2::MeshKind::Bundled && mesh.vertex_stride >= 28 &&
+      !mesh.vertex_data.empty()) {
+    const std::size_t fstride = mesh.vertex_stride / 4;
+    const std::size_t nverts = mesh.vertex_data.size() / fstride;
+    struct BB {
+      float mn[3] = {1e30f, 1e30f, 1e30f};
+      float mx[3] = {-1e30f, -1e30f, -1e30f};
+      std::size_t n = 0;
+    };
+    std::map<int, BB> bb;
+    for (std::size_t v = 0; v < nverts; ++v) {
+      const float* p = &mesh.vertex_data[v * fstride];
+      // bone index = first byte of the UBYTE4 at byte offset 24 (float index 6)
+      float raw = mesh.vertex_data[v * fstride + 6];
+      unsigned char bytes[4];
+      std::memcpy(bytes, &raw, 4);
+      int bone = bytes[0];
+      auto& b = bb[bone];
+      for (int k = 0; k < 3; ++k) {
+        b.mn[k] = std::min(b.mn[k], p[k]);
+        b.mx[k] = std::max(b.mx[k], p[k]);
+      }
+      ++b.n;
+    }
+    std::cout << " per-bone bounds (bundledmesh):\n";
+    for (const auto& [bone, b] : bb) {
+      std::cout << "   bone[" << bone << "] n=" << b.n << " min(" << b.mn[0] << "," << b.mn[1]
+                << "," << b.mn[2] << ") max(" << b.mx[0] << "," << b.mx[1] << "," << b.mx[2]
+                << ")\n";
+    }
+  }
+  // For each geometry/lod, report the AABB and the distinct bone indices its
+  // triangles actually reference (via the shared index/vertex buffers).
+  if (mesh_kind(vpath) == bf2::MeshKind::Bundled && mesh.vertex_stride >= 28 &&
+      !mesh.vertex_data.empty() && !mesh.indices.empty()) {
+    const std::size_t fstride = mesh.vertex_stride / 4;
+    for (std::size_t g = 0; g < mesh.geometries.size(); ++g) {
+      for (std::size_t l = 0; l < mesh.geometries[g].lods.size(); ++l) {
+        const auto& lod = mesh.geometries[g].lods[l];
+        std::set<int> bones;
+        float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
+        for (const auto& mat : lod.materials) {
+          for (std::uint32_t i = 0; i < mat.index_count; ++i) {
+            const std::uint32_t vi =
+                mat.vertex_start + mesh.indices[mat.index_start + i];
+            if (vi >= mesh.vertex_count) continue;
+            const float* p = &mesh.vertex_data[vi * fstride];
+            float raw = mesh.vertex_data[vi * fstride + 6];
+            unsigned char b4[4];
+            std::memcpy(b4, &raw, 4);
+            bones.insert(b4[0]);
+            for (int k = 0; k < 3; ++k) {
+              mn[k] = std::min(mn[k], p[k]);
+              mx[k] = std::max(mx[k], p[k]);
+            }
+          }
+        }
+        std::cout << " ref geom[" << g << "].lod[" << l << "] bones={";
+        for (int b : bones) std::cout << b << ",";
+        std::cout << "} aabb Y[" << mn[1] << "," << mx[1] << "] Z[" << mn[2] << "," << mx[2]
+                  << "]\n";
+      }
+    }
+  }
+  for (std::size_t g = 0; g < mesh.geometries.size(); ++g) {
+    const auto& geom = mesh.geometries[g];
+    std::cout << " geom[" << g << "] lods=" << geom.lods.size() << '\n';
+    for (std::size_t l = 0; l < geom.lods.size(); ++l) {
+      const auto& lod = geom.lods[l];
+      std::cout << "   lod[" << l << "] mats=" << lod.materials.size()
+                << " rigs=" << lod.rigs.size() << " nodes=" << lod.nodes.size() << '\n';
+      for (std::size_t m = 0; m < lod.materials.size(); ++m) {
+        const auto& mat = lod.materials[m];
+        std::cout << "     mat[" << m << "] verts=" << mat.vertex_count
+                  << " idx=" << mat.index_count << " tech=" << mat.technique;
+        if (!mat.maps.empty()) std::cout << " map0=" << mat.maps[0];
+        std::cout << '\n';
+      }
+    }
+  }
+}
+
 int main(int argc, char** argv) {
   if (argc < 3) {
-    std::cerr << "Usage: assetprobe <archive.zip> <virtual/path> [more paths...]\n";
+    std::cerr << "Usage: assetprobe <archive.zip> <virtual/path> [more paths...]\n"
+                 "       assetprobe <archive.zip> --list [prefix]\n"
+                 "       assetprobe <archive.zip> --dump <mesh/path>\n";
     return 1;
   }
 
@@ -110,6 +214,32 @@ int main(int argc, char** argv) {
     return 1;
   }
   std::cout << "Mounted " << argv[1] << " (" << archive.list().size() << " files)\n\n";
+
+  if (std::string(argv[2]) == "--list") {
+    const std::string prefix = argc >= 4 ? lower(argv[3]) : std::string();
+    for (const auto& p : archive.list()) {
+      if (prefix.empty() || lower(p).find(prefix) != std::string::npos) std::cout << p << '\n';
+    }
+    return 0;
+  }
+  if (std::string(argv[2]) == "--dump") {
+    for (int i = 3; i < argc; ++i) dump_mesh_detail(archive, argv[i]);
+    return 0;
+  }
+  if (std::string(argv[2]) == "--cat") {
+    for (int i = 3; i < argc; ++i) {
+      const auto bytes = archive.read(argv[i]);
+      if (!bytes) {
+        std::cerr << "NOT FOUND: " << argv[i] << '\n';
+        continue;
+      }
+      std::cout << "===== " << argv[i] << " =====\n";
+      std::cout.write(reinterpret_cast<const char*>(bytes->data()),
+                      static_cast<std::streamsize>(bytes->size()));
+      std::cout << "\n";
+    }
+    return 0;
+  }
 
   int rc = 0;
   for (int i = 2; i < argc; ++i) {

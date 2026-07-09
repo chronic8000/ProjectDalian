@@ -12,6 +12,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -108,11 +109,16 @@ inline Undergrowth parse_undergrowth(const std::string& cfg, const std::vector<s
   float cur_density = 1.0f;
   auto commit_type = [&]() {
     if (cur_id >= 0 && have_type && !cur_tex.empty() && ug.grass.find(cur_id) == ug.grass.end()) {
-      GrassType g;
-      g.density = cur_density;
+      // Only register grass whose texture has a known atlas sub-rect. Without it
+      // the billboard would sample the whole atlas (default 0,0,1,1) and show up
+      // as a tiny crossed square of the entire grass sheet, not a blade.
       const auto it = atlas.find(detail::ug_basename(cur_tex));
-      if (it != atlas.end()) g.atlas_rect = it->second;
-      ug.grass[cur_id] = g;
+      if (it != atlas.end()) {
+        GrassType g;
+        g.density = cur_density;
+        g.atlas_rect = it->second;
+        ug.grass[cur_id] = g;
+      }
     }
     have_type = false;
     cur_tex.clear();
