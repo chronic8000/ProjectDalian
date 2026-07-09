@@ -426,7 +426,7 @@ if (v.is_air && v.is_heli) {
     const float terr = params_.world->terrain_height(x, z);
     float s = terr;
     const float top = std::max(v.pos.y, terr) + 2.0f;
-    const auto dn = params_.world->raycast({x, top, z}, {0.f, -1.f, 0.f}, 12.f);
+    const auto dn = params_.world->raycast({x, top, z}, {0.f, -1.f, 0.f}, 28.f);
     if (dn.hit && dn.normal.y > 0.5f) s = std::max(s, top - dn.distance);
     return s;
   };

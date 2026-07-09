@@ -7,6 +7,7 @@
 #include "radial_menu.hpp"
 #include "tweak_parser.hpp"
 
+#include "engine/core/collision_resolver.hpp"
 #include "vehicle_air_profile.hpp"
 #include "vehicle_weapon_profile.hpp"
 #include "projectile_profile.hpp"
@@ -39,6 +40,7 @@ int main() {
     e.pos = {1.f, 2.f, 3.f};
     const auto lights = dalian::collect_scene_lights({e});
     check("scene_lights", lights.size() == 1 && lights[0].pos.y == 2.f);
+  check("collision_resolver", bf2::collision_resolver_self_test());
   }
 
   return failed == 0 ? 0 : 1;

@@ -27,7 +27,8 @@ world-placement areas remain open.
 | Conquest | Tickets, CP capture, voice cues — not full retail ruleset |
 | Multiplayer | LAN host/join, snapshots — not production-ready dedicated server |
 | Static prop height | Authored `StaticObjects.con` Y used as-is; deck/road props may float vs bare terrain |
-| Vehicle ground contact | Clearance heuristic; tires can embed on roads or float on uneven mesh |
+| Vehicle ground contact | Clearance heuristic; tires can embed on roads — **v0.5.1 improves road/bridge collision** |
+| Walk/drive through props | **Fixed for most meshes** — bundledmesh collision + compiled-road render fallback; some gaps remain |
 
 ## Not started / backlog
 

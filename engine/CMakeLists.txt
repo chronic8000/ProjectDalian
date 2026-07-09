@@ -73,6 +73,8 @@ add_library(bf2engine STATIC
   core/level_validator.cpp
   core/mesh_bounds.cpp
   core/placement_audit.cpp
+  core/collision_resolver.cpp
+  core/placement_snap.cpp
   core/template_resolver.cpp
   render/renderer.cpp
   render/texture_cache.cpp

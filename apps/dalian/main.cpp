@@ -71,7 +71,9 @@
 #include "engine/core/asset_audit.hpp"
 #include "engine/core/atmosphere.hpp"
 #include "engine/core/level_loader.hpp"
+#include "engine/core/collision_resolver.hpp"
 #include "engine/core/mesh_bounds.hpp"
+#include "engine/core/placement_snap.hpp"
 #include "engine/core/overgrowth_instances.hpp"
 #include "engine/core/object_lightmaps.hpp"
 #include "engine/core/undergrowth.hpp"
@@ -205,37 +207,11 @@ struct Instance {
   glm::vec4 lm_xform{1.f, 1.f, 0.f, 0.f};
 };
 
-// Extract a local-space triangle soup
-// col best suited to soldier movement (col_type 2, else the densest col).
-std::vector<bf2::Float3> collision_soup(const bf2::CollisionMesh& cm) {
-  const bf2::CollisionCol* best = nullptr;
-  for (const auto& col : cm.cols) {
-    if (col.col_type == 2) {
-      best = &col;
-      break;
-    }
-  }
-  if (best == nullptr) {
-    for (const auto& col : cm.cols) {
-      if (best == nullptr || col.faces.size() > best->faces.size()) {
-        best = &col;
-      }
-    }
-  }
-  std::vector<bf2::Float3> out;
-  if (best == nullptr) {
-    return out;
-  }
-  const std::size_t vcount = best->vertices.size();
-  out.reserve(best->faces.size() * 3);
-  for (const auto& f : best->faces) {
-    if (f.v1 < vcount && f.v2 < vcount && f.v3 < vcount) {
-      out.push_back(best->vertices[f.v1]);
-      out.push_back(best->vertices[f.v2]);
-      out.push_back(best->vertices[f.v3]);
-    }
-  }
-  return out;
+// Extract a local-space triangle soup — delegated to collision_resolver (soldier+vehicle cols,
+// render-mesh fallback for compiled roads / bridges without a separate collisionmesh).
+std::vector<bf2::Float3> load_instance_collision(bf2::ResourceManager& resources,
+                                                 const std::string& mesh_vpath) {
+  return bf2::load_collision_soup(resources, mesh_vpath);
 }
 
 // Append an axis-aligned box (center c, half-extents h) with per-face normals to
@@ -396,13 +372,7 @@ std::vector<VehicleSpawn> parse_vehicle_spawns(const std::string& script) {
 }
 
 std::string collision_path_for(const std::string& static_mesh_vpath) {
-  const std::string suffix = ".staticmesh";
-  if (static_mesh_vpath.size() > suffix.size() &&
-      static_mesh_vpath.compare(static_mesh_vpath.size() - suffix.size(), suffix.size(), suffix) ==
-          0) {
-    return static_mesh_vpath.substr(0, static_mesh_vpath.size() - suffix.size()) + ".collisionmesh";
-  }
-  return {};
+  return bf2::resolve_collision_vpath(static_mesh_vpath);
 }
 
 // A bone-tracked capsule collider. `a`/`b` are the world-space segment endpoints
@@ -898,6 +868,13 @@ int main(int argc, char** argv) {
     }
   }
 
+  // Physics world (terrain sampling for foliage snap + collision build below).
+  bf2::PhysicsWorld world;
+  world.set_terrain(level.terrain, xz, /*centered=*/true);
+  if (level.has_heightmap_cluster) {
+    world.set_heightmap_cluster(&level.heightmap_cluster);
+  }
+
   // Build one textured GPU mesh per unique resolved template.
   std::unordered_map<std::string, bf2::GpuTexturedMesh> template_cache;
   template_cache.reserve(512);
@@ -908,6 +885,8 @@ int main(int argc, char** argv) {
   std::vector<Instance> instances;
   instances.reserve(level.placements.size());
   int resolved = 0;
+  int collision_tris = 0;
+  int collision_miss = 0;
   for (const auto& inst : level.placements) {
     const std::string vpath = resolver.resolve_mesh(inst.template_name);
     if (vpath.empty()) {
@@ -915,24 +894,19 @@ int main(int argc, char** argv) {
     }
     auto& gpu = ensure_textured_mesh(vpath, template_cache, resources, textures, renderer);
     if (collision_cache.find(vpath) == collision_cache.end()) {
-      std::vector<bf2::Float3> soup;
-      const std::string col_vpath = collision_path_for(vpath);
-      if (!col_vpath.empty()) {
-        if (const auto bytes = resources.read_bytes(col_vpath)) {
-          try {
-            const auto cm = bf2::CollisionLoader::load_from_memory(*bytes);
-            soup = collision_soup(cm);
-          } catch (const std::exception&) {
-          }
-        }
-      }
-      collision_cache.emplace(vpath, std::move(soup));
+      collision_cache.emplace(vpath, load_instance_collision(resources, vpath));
     }
     if (gpu.vao != 0) {
+      bf2::ObjectInstance placed = inst;
+      const float min_y = bf2::mesh_local_min_y(resources, vpath, &mesh_min_y_cache);
+      if (bf2::is_foliage_template(inst.template_name)) {
+        placed.position[1] =
+            world.terrain_height(placed.position[0], placed.position[2]) - min_y;
+      }
       Instance in;
       in.mesh_key = vpath;
-      in.model = placement_matrix(inst);
-      in.origin = glm::vec3(inst.position[0], inst.position[1], inst.position[2]);
+      in.model = placement_matrix(placed);
+      in.origin = glm::vec3(placed.position[0], placed.position[1], placed.position[2]);
       if (!lm_atlases.empty()) {
         if (const auto* e = obj_lm.find(basename_lower(vpath), in.origin)) {
           if (e->atlas >= 0 && e->atlas < static_cast<int>(lm_atlases.size())) {
@@ -943,6 +917,12 @@ int main(int argc, char** argv) {
       }
       instances.push_back(in);
       ++resolved;
+      const auto& soup = collision_cache[vpath];
+      if (soup.empty()) {
+        ++collision_miss;
+      } else {
+        collision_tris += static_cast<int>(bf2::count_collision_soup_tris(soup));
+      }
     }
   }
 
@@ -950,6 +930,9 @@ int main(int argc, char** argv) {
   int road_resolved = 0;
   for (const auto& road : level.roads) {
     if (road.mesh_vpath.empty()) continue;
+    if (collision_cache.find(road.mesh_vpath) == collision_cache.end()) {
+      collision_cache.emplace(road.mesh_vpath, load_instance_collision(resources, road.mesh_vpath));
+    }
     auto& gpu = ensure_textured_mesh(road.mesh_vpath, template_cache, resources, textures, renderer);
     if (gpu.vao == 0) continue;
     Instance in;
@@ -959,6 +942,12 @@ int main(int argc, char** argv) {
     in.origin = glm::vec3(road.position[0], road.position[1], road.position[2]);
     instances.push_back(in);
     ++road_resolved;
+    const auto& soup = collision_cache[road.mesh_vpath];
+    if (soup.empty()) {
+      ++collision_miss;
+    } else {
+      collision_tris += static_cast<int>(bf2::count_collision_soup_tris(soup));
+    }
   }
   if (road_resolved > 0) {
     std::cout << "CompiledRoads: rendered " << road_resolved << " segments\n";
@@ -966,7 +955,8 @@ int main(int argc, char** argv) {
 
   std::cout << "Uploaded " << template_cache.size() << " unique meshes, " << resolved
             << " static instances; textures loaded " << textures.loaded_count() << ", missing "
-            << textures.missing_count() << '\n';
+            << textures.missing_count() << "; collision tris " << collision_tris << ", meshes w/o "
+            << "collision " << collision_miss << '\n';
 
   std::vector<dalian::AmbientEmitter> ambient_emitters =
       dalian::collect_ambient_emitters(level.placements);
@@ -978,11 +968,8 @@ int main(int argc, char** argv) {
     std::cout << "\n";
   }
 
-  // Physics / player.
-  bf2::PhysicsWorld world;
-  world.set_terrain(level.terrain, xz, /*centered=*/true);
+  // Physics / player (world already has terrain + heightmap cluster).
   if (level.has_heightmap_cluster) {
-    world.set_heightmap_cluster(&level.heightmap_cluster);
     std::cout << "Physics: using full 3x3 heightmap cluster (" << level.heightmap_cluster.patches().size()
               << " patches)\n";
   }
@@ -1021,7 +1008,7 @@ int main(int argc, char** argv) {
   // Feed world-space collision triangles for every placed building.
   for (const auto& in : instances) {
     const auto cit = collision_cache.find(in.mesh_key);
-    if (cit == collision_cache.end()) {
+    if (cit == collision_cache.end() || cit->second.empty()) {
       continue;
     }
     const auto& soup = cit->second;

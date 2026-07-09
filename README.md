@@ -124,6 +124,7 @@ its respective owner.
 - **Handheld depth** — deviation ramp, burst fire, `e_bhit_*` impacts, tweak `addTemplate` chains
 - **AI kit weapons** — defenders use retail rifle fire rate/damage/spread
 - **Placement audit** — `placement_audit` tool flags floating/embedded props (`docs/PARITY.md`)
+- **Collision** — bundledmesh + compiled-road collision; soldier+vehicle col merge; render-mesh fallback for roads/bridges
 
 See **[docs/PARITY.md](docs/PARITY.md)** for the full gap list (afterburner particles, jet tuning,
 multiplayer, conquest, static prop heights, etc.).

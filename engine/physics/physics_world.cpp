@@ -196,10 +196,9 @@ PhysicsWorld::RayHit PhysicsWorld::raycast(const Float3& origin, const Float3& d
     intersect(idx);
   }
 
-  // Triangles: gather unique candidates from grid cells sampled along the ray,
-  // then do exact Moller-Trumbore intersection.
+  // Triangles: sample grid cells along the ray (finer step catches thin bridge decks).
   if (!grid_.empty()) {
-    const float step = grid_cell_ * 0.5f;
+    const float step = std::max(0.35f, grid_cell_ * 0.2f);
     for (float s = 0.f; s <= max_dist; s += step) {
       const float px = origin.x + d.x * s;
       const float pz = origin.z + d.z * s;
