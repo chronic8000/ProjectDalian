@@ -260,6 +260,8 @@ private:
     SDL_Window* sdl_window_ = nullptr;
     int ui_fb_w_ = 0;
     int ui_fb_h_ = 0;
+    int vp_w_ = 1600;
+    int vp_h_ = 900;
     std::uint32_t sky_vao_ = 0;
     std::uint32_t water_vao_ = 0;
     std::uint32_t water_vbo_ = 0;

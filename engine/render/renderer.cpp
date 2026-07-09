@@ -1291,6 +1291,7 @@ void Renderer::shutdown() {
 void Renderer::begin_frame(float r, float g, float b) {
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
   glDisable(GL_POLYGON_OFFSET_FILL);
+  if (vp_w_ > 0 && vp_h_ > 0) glViewport(0, 0, vp_w_, vp_h_);
   glClearColor(r, g, b, 1.f);
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 }
@@ -1298,6 +1299,10 @@ void Renderer::begin_frame(float r, float g, float b) {
 void Renderer::end_frame() {}
 
 void Renderer::set_viewport(int width, int height) {
+  if (width <= 0) width = 1600;
+  if (height <= 0) height = 900;
+  vp_w_ = width;
+  vp_h_ = height;
   glViewport(0, 0, width, height);
 }
 

@@ -3777,6 +3777,7 @@ int main(int argc, char** argv) {
           }
         }
       }
+      renderer.set_viewport(cur_w, cur_h);
     }
     renderer.set_shadows(cascade_vp, cascade_splits, settings.shadows_enabled);
 

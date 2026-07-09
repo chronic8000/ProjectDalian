@@ -1,7 +1,7 @@
 # Package a Windows x64 binary release (no EA/DICE assets — user supplies BF2 install).
 param(
     [string]$BuildDir = "C:\Projects\bf2respawn\build",
-    [string]$Version = "v0.5.6-alpha",
+    [string]$Version = "v0.5.7-alpha",
     [string]$OutDir = "C:\Projects\bf2respawn\dist"
 )
 
