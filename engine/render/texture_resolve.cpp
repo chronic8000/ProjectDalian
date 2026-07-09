@@ -41,6 +41,17 @@ std::vector<std::string> texture_candidate_paths(const std::string& bf2_path,
   } else {
     push_unique(candidates, "objects/" + key);
   }
+  // Meshes often reference .tga while archives store .dds.
+  if (key.size() > 4 && key.rfind(".tga") == key.size() - 4) {
+    std::string dds = key;
+    dds.replace(dds.size() - 4, 4, ".dds");
+    push_unique(candidates, dds);
+    if (dds.rfind("objects/", 0) == 0) {
+      push_unique(candidates, dds.substr(std::string("objects/").size()));
+    } else {
+      push_unique(candidates, "objects/" + dds);
+    }
+  }
 
   if (!mesh_folder.empty()) {
     const std::string folder = normalize(mesh_folder);

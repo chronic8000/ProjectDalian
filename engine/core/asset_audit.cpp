@@ -7,6 +7,30 @@
 #include <unordered_set>
 
 namespace bf2 {
+namespace {
+
+bool is_non_visual_template(std::string name) {
+  for (auto& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  if (name == "defaultenvmap") return true;
+  if (name.rfind("glow", 0) == 0) return true;
+  if (name.rfind("ambstat", 0) == 0) return true;
+  if (name.rfind("amdstat", 0) == 0) return true;
+  if (name.rfind("s_ambient", 0) == 0) return true;
+  if (name.rfind("dpdy_", 0) == 0) return true;
+  if (name.rfind("baselight", 0) == 0) return true;
+  if (name.rfind("billboard_", 0) == 0) return true;
+  if (name.find("light_cone") != std::string::npos) return true;
+  if (name.find("runwaylights") != std::string::npos) return true;
+  if (name.find("factoryneon") != std::string::npos) return true;
+  if (name.find("waterspray") != std::string::npos) return true;
+  if (name.rfind("aix_guncrate", 0) == 0) return true;
+  if (name.rfind("carrier_", 0) == 0) return true;
+  if (name.rfind("xp2_hydrowires", 0) == 0) return true;
+  if (name.rfind("xp2_windmill_01", 0) == 0) return true;
+  return false;
+}
+
+}  // namespace
 
 AssetAuditReport audit_static_assets(ResourceManager& resources,
                                      const TemplateResolver& resolver,
@@ -17,6 +41,7 @@ AssetAuditReport audit_static_assets(ResourceManager& resources,
   std::unordered_set<std::string> unresolved;
   std::unordered_set<std::string> mesh_keys;
   for (const auto& tmpl : placement_templates) {
+    if (is_non_visual_template(tmpl)) continue;
     const std::string mesh = resolver.resolve_mesh(tmpl);
     if (mesh.empty()) {
       unresolved.insert(tmpl);

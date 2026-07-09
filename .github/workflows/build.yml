@@ -13,9 +13,21 @@ jobs:
       - name: Configure
         run: cmake --preset default
       - name: Build
-        run: cmake --build build --config Release
+        run: cmake --build build --config Release --target project_dalian level_validator placement_audit dalian_util_tests
       - name: Test meshinfo fixture
         run: .\build\tools\meshinfo\meshinfo.exe tests\fixtures\cube.staticmesh
+      - name: Unit tests
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Validate BF2 levels (if installed)
+        shell: pwsh
+        run: |
+          $bf2 = "${{ env.BF2_ROOT }}"
+          if (-not $bf2) { $bf2 = "C:\Program Files (x86)\Battlefield2" }
+          if (Test-Path $bf2) {
+            .\build\tools\level_validator\level_validator.exe $bf2 --fail-on-miss
+          } else {
+            Write-Host "BF2 not installed on runner — skipping level_validator"
+          }
 
   build-linux:
     runs-on: ubuntu-latest
@@ -26,6 +38,8 @@ jobs:
       - name: Configure
         run: cmake --preset default
       - name: Build
-        run: cmake --build build
+        run: cmake --build build --target project_dalian level_validator placement_audit dalian_util_tests
       - name: Test meshinfo fixture
         run: ./build/tools/meshinfo/meshinfo tests/fixtures/cube.staticmesh
+      - name: Unit tests
+        run: ctest --test-dir build --output-on-failure

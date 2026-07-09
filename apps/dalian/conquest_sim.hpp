@@ -5,12 +5,12 @@
 namespace dalian {
 
 struct ConquestConfig {
-  int starting_tickets = 150;
+  int starting_tickets = 250;
   float capture_radius = 15.f;
   float neutral_capture_rate = 0.12f;   // progress per second
   float enemy_capture_rate = 0.06f;   // flipping an owned flag
   float uncontested_decay_rate = 0.5f;  // progress lost per second when empty
-  float bleed_per_flag = 0.08f;         // tickets/sec per flag advantage
+  float ticket_loss_per_min = 4.f;      // retail gpm_cq default at full dominance
   int death_ticket_cost = 1;
 };
 

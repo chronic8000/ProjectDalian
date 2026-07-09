@@ -20,6 +20,8 @@ struct ControlPoint {
   float capture_progress = 0.f;  // 0..1 toward capturer
   float radius = 15.f;
   bool capturable = true;
+  int area_value_team1 = 0;
+  int area_value_team2 = 0;
 };
 
 struct TicketState {

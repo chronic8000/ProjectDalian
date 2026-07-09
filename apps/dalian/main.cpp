@@ -24,9 +24,22 @@
 #include "conquest_voice.hpp"
 #include "game_sim.hpp"
 #include "game_snapshot.hpp"
+#include "game_logic_parser.hpp"
 #include "map_conquest_parser.hpp"
 #include "minimap_projector.hpp"
+#include "bf2_effects.hpp"
 #include "vehicle_classify.hpp"
+#include "weapon_profile.hpp"
+#include "soldier_anim.hpp"
+#include "soldier_anim_library.hpp"
+#include "vehicle_tweak_profile.hpp"
+#include "vehicle_wing_profile.hpp"
+#include "vehicle_air_profile.hpp"
+#include "vehicle_weapon_profile.hpp"
+#include "projectile_profile.hpp"
+#include "ambient_emitter.hpp"
+#include "engine/formats/effects/effect_bundle.hpp"
+#include "engine/formats/nav/bf2_nav_mesh.hpp"
 
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/glm.hpp>
@@ -38,7 +51,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
-#include <cstring>
+#include <fstream>
 #include <memory>
 #include <cstdio>
 #include <utility>
@@ -58,7 +71,7 @@
 #include "engine/core/asset_audit.hpp"
 #include "engine/core/atmosphere.hpp"
 #include "engine/core/level_loader.hpp"
-#include "engine/core/overgrowth_parser.hpp"
+#include "engine/core/mesh_bounds.hpp"
 #include "engine/core/overgrowth_instances.hpp"
 #include "engine/core/object_lightmaps.hpp"
 #include "engine/core/undergrowth.hpp"
@@ -632,6 +645,13 @@ int main(int argc, char** argv) {
       if (std::filesystem::exists(common_zip) && resources.archives().mount(common_zip)) {
         std::cout << "Common archive: " << common_zip << '\n';
       }
+      const auto mod_dir = std::filesystem::path(objects_zip).parent_path();
+      for (const char* booster : {"Booster_client.zip", "Booster_server.zip"}) {
+        const auto booster_zip = (mod_dir / booster).string();
+        if (std::filesystem::exists(booster_zip) && resources.archives().mount(booster_zip)) {
+          std::cout << "Booster archive: " << booster_zip << '\n';
+        }
+      }
     }
 
     const std::string client_zip = sibling_client_zip(archive_path);
@@ -670,15 +690,30 @@ int main(int argc, char** argv) {
       atmo.fog_end = std::max(atmo.fog_end, 6500.f) * fog_scale;
     }
     std::cout << "Atmosphere: sky " << atmo.sky_color.x << "/" << atmo.sky_color.y << "/"
-              << atmo.sky_color.z << (atmo.has_water ? "  water level " : "  (no water")
+              << atmo.sky_color.z << (atmo.is_night ? " (night)" : "")
+              << (atmo.has_water ? "  water level " : "  (no water")
               << (atmo.has_water ? std::to_string(atmo.water_level) : std::string(")"))
-              << "  fog " << atmo.fog_start << ".." << atmo.fog_end << '\n';
+              << "  fog " << atmo.fog_start << ".." << atmo.fog_end;
+    if (atmo.has_cloud_layer) std::cout << "  clouds";
+    std::cout << '\n';
+
+    bf2::NavMesh nav_mesh;
+    if (const auto nav_bytes = resources.read_bytes("GTSData/output/Infantry.vbf")) {
+      if (nav_mesh.load_from_bytes(*nav_bytes)) {
+        std::cout << "Nav mesh: " << nav_mesh.vertex_count() << " verts, "
+                  << nav_mesh.triangle_count() << " tris\n";
+      }
+    }
 
     bf2::TemplateResolver resolver(resources);
+    std::string static_script, dummy_script;
     if (const auto so = resources.read_bytes("StaticObjects.con")) {
-      const std::string script(reinterpret_cast<const char*>(so->data()), so->size());
-      resolver.build_from_static_objects(script);
+      static_script.assign(reinterpret_cast<const char*>(so->data()), so->size());
     }
+    if (const auto dummy = resources.read_bytes("DummyObjects.con")) {
+      dummy_script.assign(reinterpret_cast<const char*>(dummy->data()), dummy->size());
+    }
+    resolver.build_from_level_scripts(static_script, dummy_script);
     std::cout << "Resolved " << resolver.map().size() << " templates; " << level.placements.size()
               << " placements\n";
 
@@ -691,6 +726,33 @@ int main(int argc, char** argv) {
     }
 
     bf2::TextureCache textures(resources, renderer);
+    const std::uint32_t fx_smoke_tex =
+        textures.get("effects/textures/animated/anim_smoketrail.dds");
+    const std::uint32_t fx_fire_tex =
+        textures.get("effects/textures/fire/tank_muzzleflash.dds");
+    const std::uint32_t fx_flash_tex =
+        textures.get("effects/textures/singles/flash.dds");
+    if (fx_smoke_tex) std::cout << "FX: smoke/trail texture loaded\n";
+    if (fx_fire_tex) std::cout << "FX: fire/explosion texture loaded\n";
+    if (fx_flash_tex) std::cout << "FX: afterburner flash texture loaded\n";
+
+    std::uint32_t cloud_tex = 0;
+    if (!atmo.cloud_texture.empty()) {
+      cloud_tex = textures.get(atmo.cloud_texture + ".dds");
+      if (!cloud_tex) cloud_tex = textures.get(atmo.cloud_texture);
+      if (cloud_tex) std::cout << "Sky cloud texture loaded\n";
+    }
+
+    bf2::EffectBundleLibrary fx_library;
+    for (const char* bundle :
+         {"e_jetexhaust_AB", "e_muzz_rocketpod", "e_mexp_grenade_grass", "e_mexp_grenade_dirt",
+          "e_mexp_grenade_water", "e_mexp_grenade_sand", "e_mexp_grenade_rock",
+          "e_sAmb_Fountain_waterSpray", "e_sAmb_OnlySmoke", "e_sAmb_fire"}) {
+      if (fx_library.load(resources, bundle)) {
+        std::cout << "FX bundle loaded: " << bundle << '\n';
+      }
+    }
+    dalian::init_bf2_fx(&fx_library);
 
     // Terrain: colormap + lightmap tiles from client.zip when available.
   bf2::TerrainVisualConfig terrain_cfg;
@@ -839,6 +901,7 @@ int main(int argc, char** argv) {
   // Build one textured GPU mesh per unique resolved template.
   std::unordered_map<std::string, bf2::GpuTexturedMesh> template_cache;
   template_cache.reserve(512);
+  std::unordered_map<std::string, float> mesh_min_y_cache;
   // Local-space collision triangle soup per unique template.
   std::unordered_map<std::string, std::vector<bf2::Float3>> collision_cache;
   collision_cache.reserve(512);
@@ -905,6 +968,16 @@ int main(int argc, char** argv) {
             << " static instances; textures loaded " << textures.loaded_count() << ", missing "
             << textures.missing_count() << '\n';
 
+  std::vector<dalian::AmbientEmitter> ambient_emitters =
+      dalian::collect_ambient_emitters(level.placements);
+  const std::vector<dalian::SceneLight> scene_lights =
+      dalian::collect_scene_lights(ambient_emitters);
+  if (!ambient_emitters.empty()) {
+    std::cout << "Ambient emitters: " << ambient_emitters.size() << " placements";
+    if (!scene_lights.empty()) std::cout << " (" << scene_lights.size() << " baselights)";
+    std::cout << "\n";
+  }
+
   // Physics / player.
   bf2::PhysicsWorld world;
   world.set_terrain(level.terrain, xz, /*centered=*/true);
@@ -924,7 +997,9 @@ int main(int argc, char** argv) {
         if (gpu.vao == 0) continue;
         bf2::ObjectInstance pseudo;
         pseudo.position[0] = tr.position[0];
-        pseudo.position[1] = world.terrain_height(tr.position[0], tr.position[2]);
+        const float min_y = bf2::mesh_local_min_y(resources, tr.mesh_vpath, &mesh_min_y_cache);
+        pseudo.position[1] =
+            world.terrain_height(tr.position[0], tr.position[2]) - min_y * tr.scale;
         pseudo.position[2] = tr.position[2];
         pseudo.rotation[0] = tr.rotation[0];
         pseudo.rotation[1] = tr.rotation[1];
@@ -1628,17 +1703,42 @@ int main(int argc, char** argv) {
       m = glm::rotate(m, glm::radians(vs.rot.z), glm::vec3(0, 0, 1));
       v.model = m;
       v.parts = pcit->second;
-      if (v.is_air && !v.is_heli) {
-        v.throttle = 0.f;
-        v.jet_rpm = 0.f;
-        v.jet_airborne = false;
-        v.jet_gear_down = true;
-        v.jet_gear_anim = 0.f;
-        v.jet_sprint = 1.f;
-        v.vel = glm::vec3(0.f);
-        v.pitch = 0.f;
-        v.roll = 0.f;
-        v.wheels_on_ground = true;
+      if (v.is_air) {
+        if (!v.is_heli) {
+          v.throttle = 0.f;
+          v.jet_rpm = 0.f;
+          v.jet_airborne = false;
+          v.jet_gear_down = true;
+          v.jet_gear_anim = 0.f;
+          v.jet_sprint = 1.f;
+          v.vel = glm::vec3(0.f);
+          v.pitch = 0.f;
+          v.roll = 0.f;
+          v.wheels_on_ground = true;
+        }
+      }
+      {
+        const auto meshes_pos = vpath.rfind("/meshes/");
+        if (meshes_pos != std::string::npos) {
+          const std::string folder = vpath.substr(0, meshes_pos);
+          const std::string name = bf2::detail::basename_no_ext(vpath);
+          std::string tweak_text;
+          for (const char* ext : {".tweak", ".con"}) {
+            if (const auto tb = resources.read_bytes(folder + "/" + name + ext)) {
+              tweak_text.append(reinterpret_cast<const char*>(tb->data()), tb->size());
+              tweak_text.push_back('\n');
+            }
+          }
+          if (!tweak_text.empty()) {
+            if (v.is_air) {
+              const dalian::VehicleAirProfile air = dalian::parse_vehicle_air_profile(tweak_text);
+              dalian::apply_vehicle_air_profile(v, air);
+              v.jet_sprint = v.sprint_limit;
+            }
+            v.weapons = dalian::parse_vehicle_weapons(tweak_text);
+            dalian::resolve_vehicle_weapon_projectiles(resources, tweak_text, v.weapons);
+          }
+        }
       }
       // A rotor part means this is a helicopter (not a jet): it flies the cyclic
       // model well and carries a co-pilot/gunner station.
@@ -1694,6 +1794,20 @@ int main(int argc, char** argv) {
       {"G36E", "weapons/handheld/sasrif_g36e/meshes/sasrif_g36e.bundledmesh"},
       {"G3A3", "weapons/handheld/usrif_g3a3/meshes/usrif_g3a3.bundledmesh"},
   };
+  static const char* kWeaponTweakPaths[] = {
+      "weapons/handheld/usrif_m4/usrif_m4.tweak",
+      "weapons/handheld/usrif_m16a2/usrif_m16a2.tweak",
+      "weapons/handheld/rurif_ak47/rurif_ak47.tweak",
+      "weapons/handheld/rurif_ak101/rurif_ak101.tweak",
+      "weapons/handheld/sasrif_g36e/sasrif_g36e.tweak",
+      "weapons/handheld/usrif_g3a3/usrif_g3a3.tweak",
+  };
+  std::vector<dalian::WeaponProfile> weapon_profiles(weapon_defs.size());
+  for (std::size_t i = 0; i < weapon_defs.size(); ++i) {
+    if (i < std::size(kWeaponTweakPaths)) {
+      weapon_profiles[i] = dalian::load_weapon_profile(resources, kWeaponTweakPaths[i]);
+    }
+  }
   std::vector<bf2::GpuTexturedMesh> weapon_meshes(weapon_defs.size());
   std::vector<bool> weapon_loaded(weapon_defs.size(), false);
 
@@ -1784,6 +1898,11 @@ int main(int argc, char** argv) {
       game_audio.set_weapon_sounds(&weapon_sound_sets[weapon_index]);
     }
   };
+  auto bind_weapon_sim = [&](bool refill_ammo) {
+    if (weapon_index < weapon_profiles.size() && weapon_profiles[weapon_index].valid) {
+      game_sim.set_weapon_profile(weapon_profiles[weapon_index], refill_ammo);
+    }
+  };
   float voice_cooldown = 0.f;
   float snapshot_log_timer = 0.f;
 
@@ -1800,6 +1919,8 @@ int main(int argc, char** argv) {
   // resolve its _c/_deb/... textures. Falls back to any missile/rocket mesh, and
   // if none is present the launcher draws a procedural streak instead. ----
   bf2::GpuTexturedMesh missile_mesh{};
+  bf2::GpuTexturedMesh tracer_mesh{};
+  std::uint32_t tracer_tex = 0;
   {
     const std::vector<const char*> pref = {"ru_sam_9m311", "9m311", "ru_sam_sa18"};
     const auto all = resources.archives().list();
@@ -1859,6 +1980,26 @@ int main(int argc, char** argv) {
               << (missile_mesh.vao != 0 ? mpath : std::string("procedural (no mesh found)")) << '\n';
   }
 
+  {
+    const char* tpath = "effects/weapons/tracers/geometry/p_tracer_g/meshes/p_tracer_g.bundledmesh";
+    try {
+      const auto mesh = resources.load_mesh(tpath);
+      const auto data = bf2::MeshLoader::extract_textured(mesh, 0, 0);
+      if (!data.vertices.empty()) {
+        tracer_mesh = renderer.upload_textured(data);
+        for (std::size_t i = 0; i < tracer_mesh.submeshes.size() && i < data.submeshes.size();
+             ++i) {
+          tracer_mesh.submeshes[i].base_tex = textures.get(data.submeshes[i].base_map);
+        }
+        tracer_tex = textures.get("effects/textures/tracer_mg.dds");
+        if (!tracer_tex && !data.submeshes.empty())
+          tracer_tex = textures.get(data.submeshes[0].base_map);
+        std::cout << "Tracer mesh: p_tracer_g\n";
+      }
+    } catch (...) {
+    }
+  }
+
   // Third-person animated soldier: GPU-skinned body driven by 3p locomotion
   // clips (stand / walk / run) selected by movement speed.
   bf2::GpuSkinnedMesh soldier_mesh{};   // player (friendly, US)
@@ -1868,10 +2009,26 @@ int main(int argc, char** argv) {
   bf2::Mesh soldier_src;
   bf2::Mesh enemy_src;  // opfor mesh source (own bind pose for correct skinning)
   bf2::Skeleton soldier_ske;
-  bf2::AnimationClip clip_stand, clip_walk, clip_run;
+  dalian::SoldierAnimLibrary soldier_anim_lib;
+  dalian::SoldierAnimSet soldier_anims{};
   bool have_soldier = false;
-  bool have_enemy_mesh = false;  // true when a distinct opfor model loaded
+  bool have_enemy_mesh = false;
   bool have_clip_stand = false, have_clip_walk = false, have_clip_run = false;
+  dalian::WeaponProfile weapon_profile =
+      weapon_index < weapon_profiles.size() ? weapon_profiles[weapon_index] : dalian::WeaponProfile{};
+  if (!weapon_profile.valid) {
+    for (const auto& wp : weapon_profiles) {
+      if (wp.valid) {
+        weapon_profile = wp;
+        break;
+      }
+    }
+  }
+  if (weapon_profile.valid) {
+    std::cout << "Weapon profile: " << weapon_profile.name << " rate=" << weapon_profile.fire_rate
+              << " dmg=" << weapon_profile.damage << " mag=" << weapon_profile.magazine_size
+              << '\n';
+  }
 
   // Pick the diffuse (colour) map from a skinnedmesh material set. BF2 kit
   // materials list several maps; the colour one is usually first and lacks the
@@ -1951,29 +2108,18 @@ int main(int argc, char** argv) {
       } catch (const std::exception&) {
       }
     }
-    auto try_clip = [&](const char* vpath, bf2::AnimationClip& out) -> bool {
-      try {
-        if (const auto b = resources.read_bytes(vpath)) {
-          out = bf2::AnimationLoader::load_from_memory(*b);
-          return out.frame_count > 0;
-        }
-      } catch (const std::exception&) {
-      }
-      return false;
-    };
-    if (have_soldier) {
-      have_clip_stand = try_clip("soldiers/common/animations/3p/3p_stand.baf", clip_stand);
-      have_clip_walk = try_clip("soldiers/common/animations/3p/3p_walkforward.baf", clip_walk);
-      have_clip_run = try_clip("soldiers/common/animations/3p/3p_runforward.baf", clip_run);
+    if (have_soldier && soldier_anim_lib.load_from_inc(resources)) {
+      soldier_anim_lib.fill_anim_set(soldier_anims);
+      have_clip_stand = soldier_anims.stand != nullptr;
+      have_clip_walk = soldier_anims.walk != nullptr;
+      have_clip_run = soldier_anims.run != nullptr;
+      std::cout << "Soldier anim library: " << soldier_anim_lib.size() << " clips loaded\n";
     }
     std::cout << "Soldier body: " << (have_soldier ? "US light (3p, animated)" : "none")
               << ", tex " << soldier_tex << "; enemy tex " << enemy_tex << '\n';
-    std::cout << "Clips: stand=" << (have_clip_stand ? clip_stand.frame_count : -1)
-              << "/" << (have_clip_stand ? clip_stand.bone_count : -1) << "b"
-              << " walk=" << (have_clip_walk ? clip_walk.frame_count : -1)
-              << "/" << (have_clip_walk ? clip_walk.bone_count : -1) << "b"
-              << " run=" << (have_clip_run ? clip_run.frame_count : -1)
-              << "/" << (have_clip_run ? clip_run.bone_count : -1) << "b"
+    std::cout << "Clips: stand=" << (soldier_anims.stand ? soldier_anims.stand->frame_count : -1)
+              << " walk=" << (soldier_anims.walk ? soldier_anims.walk->frame_count : -1)
+              << " run=" << (soldier_anims.run ? soldier_anims.run->frame_count : -1)
               << " (ske nodes=" << soldier_ske.nodes.size() << ")\n";
   }
 
@@ -1985,17 +2131,55 @@ int main(int argc, char** argv) {
     sim_init.spawn = {spawn.x, spawn.y, spawn.z};
     sim_init.control_points = control_points;
     sim_init.soldier_ske = &soldier_ske;
-    sim_init.clip_stand = &clip_stand;
-    sim_init.clip_walk = &clip_walk;
+    sim_init.clip_stand = soldier_anims.stand;
+    sim_init.clip_walk = soldier_anims.walk;
+    sim_init.clip_run = soldier_anims.run;
     sim_init.have_soldier = have_soldier;
     sim_init.have_clip_stand = have_clip_stand;
     sim_init.have_clip_walk = have_clip_walk;
+    sim_init.have_clip_run = have_clip_run;
+    sim_init.nav_mesh = nav_mesh.valid() ? &nav_mesh : nullptr;
+    sim_init.weapon = weapon_profile;
+    sim_init.sam_missile = dalian::load_projectile_profile(resources, "igla_9k38");
+    sim_init.at_missile = dalian::load_projectile_profile(resources, "insgr_rpg");
+    if (!sim_init.at_missile.valid) {
+      sim_init.at_missile = dalian::load_projectile_profile(resources, "at_predator");
+    }
+    sim_init.enemy_weapon =
+        dalian::load_weapon_profile(resources, "weapons/handheld/rurif_ak47/rurif_ak47.tweak");
+    if (!sim_init.enemy_weapon.valid) {
+      sim_init.enemy_weapon =
+          dalian::load_weapon_profile(resources, "weapons/handheld/usrif_m16a2/usrif_m16a2.tweak");
+    }
+    sim_init.soldier_anims = soldier_anims;
     sim_init.missile_headless_demo = shot_missile;
-    sim_init.starting_tickets = 150;
+    dalian::GameLogicDefaults game_logic{};
+    if (!objects_zip.empty()) {
+      const auto mod_dir = std::filesystem::path(objects_zip).parent_path();
+      if (std::ifstream in(mod_dir / "GameLogicInit.con"); in) {
+        std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        game_logic = dalian::parse_game_logic_init(text);
+      }
+      if (std::ifstream in(mod_dir / "Settings" / "ServerSettings.con"); in) {
+        std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const auto srv = dalian::parse_server_settings(text);
+        if (srv.valid) game_logic.ticket_ratio_percent = srv.ticket_ratio_percent;
+      }
+      if (game_logic.valid) {
+        std::cout << "GameLogic: tickets T1=" << game_logic.tickets_team1 << " T2="
+                  << game_logic.tickets_team2
+                  << " ratio=" << game_logic.ticket_ratio_percent << "%\n";
+      }
+    }
+    const int base_tickets =
+        game_logic.valid ? std::max(game_logic.tickets_team1, game_logic.tickets_team2) : 250;
+    sim_init.starting_tickets =
+        std::max(1, base_tickets * game_logic.ticket_ratio_percent / 100);
     sim_init.map_layout = map_layout;
     sim_init.team1_faction_id = map_layout.team1_faction_id;
     sim_init.team2_faction_id = map_layout.team2_faction_id;
     game_sim.init(sim_init);
+    if (weapon_profile.valid) game_sim.set_weapon_profile(weapon_profile, true);
     game_sim.state().vehicles = std::move(loaded_vehicles);
     std::cout << "Enemies: " << game_sim.state().enemies.size() << " defenders\n";
     std::cout << "Conquest: " << game_sim.state().control_points.size() << " control points, "
@@ -2200,8 +2384,6 @@ int main(int argc, char** argv) {
 
   auto detonate_kamikaze = [&](const glm::vec3& pt) {
     explode_at(pt, 6.f, 130.f);
-    explosions.push_back({pt, 0.f, 0.55f});
-    for (int i = 0; i < 8; ++i) smoke.push_back({pt, 0.f, 1.4f});
     drone_mode = false;
     kamikaze_mode = false;
   };
@@ -2391,7 +2573,6 @@ int main(int argc, char** argv) {
 
   bool deploy_open = shot_path.empty();  // headless captures skip the spawn menu
   if (std::getenv("BF2_DEPLOYSHOT")) deploy_open = true;  // force menu for capture
-  if (!deploy_open) game_sim.begin_match();
   bool deploy_click = false;
 
   // Push an (x,z) point out of any vehicle hull it overlaps, treating each
@@ -2506,8 +2687,12 @@ int main(int argc, char** argv) {
         }
     }
     weapon_index = wi;
-    mag_ammo = kMagSize;
-    reserve_ammo = kMagSize * kReserveMags;
+    const dalian::WeaponProfile& wprof =
+        wi < weapon_profiles.size() ? weapon_profiles[wi] : dalian::WeaponProfile{};
+    const int mag = wprof.magazine_size > 0 ? wprof.magazine_size : kMagSize;
+    const int reserve = wprof.reserve_ammo > 0 ? wprof.reserve_ammo : mag * kReserveMags;
+    mag_ammo = mag;
+    reserve_ammo = reserve;
     grenades_left = k.grenades;
     c4_left = k.c4;
     has_medkit = k.medic;
@@ -2526,8 +2711,19 @@ int main(int argc, char** argv) {
     player_stamina = 100.f;
     live_grenades.clear();
     placed_c4.clear();
+    if (wprof.valid) game_sim.set_weapon_profile(wprof, false);
+    if (k.at) {
+      const bool us_faction = player_faction_id == 0 || player_faction_id == 1;
+      const char* at_tpl = us_faction ? "at_predator" : "insgr_rpg";
+      dalian::ProjectileProfile atp = dalian::load_projectile_profile(resources, at_tpl);
+      if (!atp.valid) {
+        atp = dalian::load_projectile_profile(resources, us_faction ? "insgr_rpg" : "at_predator");
+      }
+      if (atp.valid) game_sim.set_at_missile_profile(atp);
+    }
   };
   apply_loadout();  // sensible defaults so the weapon/ammo exist behind the menu
+  if (!deploy_open) game_sim.begin_match();
 
   std::string map_label = std::filesystem::path(archive_path).parent_path().filename().string();
   for (char& c : map_label)
@@ -2844,8 +3040,6 @@ int main(int argc, char** argv) {
         // Detonate all placed C4.
         for (const auto& pt : placed_c4) {
           explode_at(pt, 7.f, 160.f);
-          explosions.push_back({pt, 0.f, 0.55f});
-          for (int s = 0; s < 6; ++s) smoke.push_back({pt, 0.f, 1.4f});
         }
         placed_c4.clear();
       } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_h && !drone_mode &&
@@ -2883,7 +3077,11 @@ int main(int argc, char** argv) {
         const int dir = (e.type == SDL_MOUSEWHEEL && e.wheel.y < 0) ? -1 : 1;
         for (std::size_t step = 0; step < weapon_defs.size(); ++step) {
           weapon_index = (weapon_index + weapon_defs.size() + dir) % weapon_defs.size();
-          if (load_weapon(weapon_index)) break;
+          if (load_weapon(weapon_index)) {
+            bind_weapon_audio();
+            bind_weapon_sim(true);
+            break;
+          }
         }
         bind_weapon_audio();
       } else if (e.type == SDL_MOUSEMOTION && mouse_look && !deploy_open && !pause_open &&
@@ -3006,9 +3204,10 @@ int main(int argc, char** argv) {
     if (!drone_mode) {
       if (shot_missile && frame_no == std::max(2, shot_frames - 12)) launch_requested = true;
       dalian::PlayerInput inp{};
-      const bool in_jet_pilot =
+      const bool in_air_pilot =
           in_vehicle >= 0 && in_vehicle < static_cast<int>(vehicles.size()) &&
-          vehicles[in_vehicle].is_air && !vehicles[in_vehicle].is_heli && player_seat == 0;
+          vehicles[in_vehicle].is_air && player_seat == 0;
+      const bool in_jet_pilot = in_air_pilot && !vehicles[in_vehicle].is_heli;
       if (keys != nullptr && !deploy_open) {
         glm::vec3 move(0.f);
         if (keys[SDL_SCANCODE_W]) move += flat_front;
@@ -3016,8 +3215,15 @@ int main(int argc, char** argv) {
         if (keys[SDL_SCANCODE_D]) move += right;
         if (keys[SDL_SCANCODE_A]) move -= right;
         inp.move_wish = move;
-        inp.sprint = keys[SDL_SCANCODE_LSHIFT];
-        inp.jump = keys[SDL_SCANCODE_SPACE];
+        if (in_air_pilot) {
+          // BF2: Shift = afterburner (jets) / extra rotor (helis).
+          inp.boost = keys[SDL_SCANCODE_LSHIFT];
+          inp.pitch_up = keys[SDL_SCANCODE_SPACE];
+          inp.jump = false;
+        } else {
+          inp.sprint = keys[SDL_SCANCODE_LSHIFT];
+          inp.jump = keys[SDL_SCANCODE_SPACE];
+        }
         const bool w_down = keys[SDL_SCANCODE_W];
         if (in_jet_pilot) {
           if (w_down && !jet_w_was_down) {
@@ -3029,9 +3235,7 @@ int main(int argc, char** argv) {
           const float sprint =
               in_vehicle >= 0 ? vehicles[in_vehicle].jet_sprint : 0.f;
           if (jet_afterburner && sprint <= 0.01f) jet_afterburner = false;
-          inp.boost = jet_afterburner && sprint > 0.01f;
-        } else {
-          inp.boost = keys[SDL_SCANCODE_LSHIFT];
+          if (inp.boost || (jet_afterburner && sprint > 0.01f)) inp.boost = true;
         }
         jet_w_was_down = w_down;
         inp.gear_toggle = jet_gear_toggle;
@@ -3055,19 +3259,24 @@ int main(int argc, char** argv) {
       inp.air_stick_moved = air_stick_moved;
       inp.enter_exit = pending_enter_exit;
       inp.seat_switch = pending_seat_switch;
-      inp.launch_missile = launch_requested;
+      inp.launch_at = launch_requested && has_at;
+      inp.launch_missile = launch_requested && !has_at;
       inp.flare_request = heli_flare_requested;
       pending_enter_exit = false;
       pending_seat_switch = -1;
       launch_requested = false;
       heli_flare_requested = false;
       game_sim.tick(dt, inp);
+      if (!ambient_emitters.empty()) {
+        dalian::step_ambient_emitters(ambient_emitters, smoke, dt);
+      }
       if (in_jet_pilot && jet_afterburner && in_vehicle >= 0 &&
           vehicles[in_vehicle].jet_sprint > 0.01f) {
         const Vehicle& jv = vehicles[in_vehicle];
         for (const glm::vec3& ex : {jv.jet_exhaust_l, jv.jet_exhaust_r}) {
           const glm::vec4 wp = jv.model * glm::vec4(ex, 1.f);
-          smoke.push_back({glm::vec3(wp), 0.f, 0.28f});
+          const glm::vec3 back = glm::normalize(glm::vec3(jv.model[2]));
+          spawn_jet_exhaust_fx(smoke, glm::vec3(wp), -back, true, 2);
         }
       }
       const auto& ev = game_sim.events();
@@ -3237,14 +3446,6 @@ int main(int argc, char** argv) {
         glm::vec3 boom = gr.pos;
         if (ground) boom.y = th;
         explode_at(boom, 8.f, 110.f);
-        explosions.push_back({boom, 0.f, 0.5f});
-        for (int s = 0; s < 5; ++s) smoke.push_back({boom, 0.f, 1.2f});
-        // Grenades hurt the player too if they're close.
-        if (!deploy_open) {
-          const float d = glm::length(glm::vec3(player.position.x, player.position.y - 1.f,
-                                                player.position.z) - boom);
-          if (d < 8.f) player_health -= (1.f - d / 8.f) * 80.f;
-        }
         gr.fuse = -1.f;  // mark for removal
       }
       (void)prev;
@@ -3406,12 +3607,24 @@ int main(int argc, char** argv) {
 
     // Per-frame environment: camera position + sun + horizon fog. Fog fades far
     // terrain/objects/water into the horizon colour so map edges disappear.
+    glm::vec3 env_sun = atmo.sun_color;
+    glm::vec3 env_fog = atmo.fog_color;
+    if (atmo.is_night) {
+      env_sun *= 0.35f;
+      env_fog = glm::mix(atmo.terrain_sky_color, atmo.fog_color, 0.5f);
+    }
     renderer.set_environment(glm::value_ptr(cam), glm::value_ptr(atmo.sun_dir),
-                             glm::value_ptr(atmo.horizon_color), atmo.fog_start, atmo.fog_end);
+                             glm::value_ptr(env_fog), atmo.fog_start, atmo.fog_end);
 
-    // Gradient sky behind everything (does not write depth).
+    glm::vec3 night_sky = atmo.is_night ? atmo.terrain_sky_color : atmo.sky_color;
+    glm::vec3 night_horizon = atmo.is_night ? glm::mix(atmo.terrain_sky_color, env_fog, 0.65f)
+                                            : atmo.horizon_color;
+    const float sky_t =
+        static_cast<float>(now) / static_cast<float>(SDL_GetPerformanceFrequency());
     renderer.draw_sky(glm::value_ptr(inv_view_proj), glm::value_ptr(cam),
-                      glm::value_ptr(atmo.sky_color), glm::value_ptr(atmo.horizon_color));
+                      glm::value_ptr(night_sky), glm::value_ptr(night_horizon), cloud_tex,
+                      atmo.cloud_scroll.x * sky_t, atmo.cloud_scroll.y * sky_t,
+                      atmo.is_night ? 0.22f : 0.55f);
 
     if (have_ground_tex) {
       // Repeat the detail grit roughly every ~6 m of world space.
@@ -3535,12 +3748,12 @@ int main(int argc, char** argv) {
       const bool moving = spd > 0.3f;
       const bool running = spd > 8.0f;
       const bf2::AnimationClip* clip = nullptr;
-      if (running && have_clip_run) {
-        clip = &clip_run;
-      } else if (moving && have_clip_walk) {
-        clip = &clip_walk;
-      } else if (have_clip_stand) {
-        clip = &clip_stand;
+      if (running && soldier_anims.run) {
+        clip = soldier_anims.run;
+      } else if (moving && soldier_anims.walk) {
+        clip = soldier_anims.walk;
+      } else if (soldier_anims.stand) {
+        clip = soldier_anims.stand;
       }
 
       constexpr float kAnimFps = 30.f;
@@ -3581,15 +3794,18 @@ int main(int argc, char** argv) {
       for (auto& en : enemies) {
         const glm::vec3 d = en.pos - cam;
         if (glm::dot(d, d) > draw_dist2) continue;
-        const bf2::AnimationClip* clip = nullptr;
-        if (en.alive && en.moving && have_clip_walk) {
-          clip = &clip_walk;
-        } else if (have_clip_stand) {
-          clip = &clip_stand;
-        }
+        dalian::SoldierAnimState ast;
+        ast.alive = en.alive;
+        ast.moving = en.moving;
+        ast.move_speed = en.moving ? 2.8f : 0.f;
+        ast.pose = !en.alive ? dalian::SoldierPose::Death : dalian::SoldierPose::Stand;
+        ast.time = en.anim_time;
+        float anim_rate = 1.f;
+        const bf2::AnimationClip* clip =
+            dalian::select_soldier_clip(soldier_anims, ast, anim_rate);
         int frame = 0;
         if (clip && clip->frame_count > 0) {
-          frame = static_cast<int>(en.anim_time * 30.f) % clip->frame_count;
+          frame = static_cast<int>(en.anim_time * 30.f * anim_rate) % clip->frame_count;
         }
         // Skin against the opfor mesh's own bind when present, else the US body.
         const bf2::Mesh& esrc = have_enemy_mesh ? enemy_src : soldier_src;
@@ -3629,9 +3845,9 @@ int main(int argc, char** argv) {
         const glm::vec3 rpos(rp.rx, rp.ry, rp.rz);
         if (glm::dot(rpos - cam, rpos - cam) > draw_dist2) continue;
         const bf2::AnimationClip* clip =
-            (rp.anim == 2 && have_clip_run)    ? &clip_run
-            : (rp.anim == 1 && have_clip_walk) ? &clip_walk
-            : have_clip_stand                  ? &clip_stand
+            (rp.anim == 2 && soldier_anims.run)    ? soldier_anims.run
+            : (rp.anim == 1 && soldier_anims.walk) ? soldier_anims.walk
+            : soldier_anims.stand                  ? soldier_anims.stand
                                                : nullptr;
         int frame = 0;
         if (clip && clip->frame_count > 0) {
@@ -3682,22 +3898,44 @@ int main(int argc, char** argv) {
 
     // Translucent water plane at sea level, centred on the camera so it always
     // reaches the horizon. Drawn after opaque geometry so blending is correct.
-    if (atmo.has_water && cam.y < atmo.water_level + 400.f) {
+    if (atmo.has_water && cam.y < atmo.water_level + 280.f) {
       const float t_sec =
           static_cast<float>(now) / static_cast<float>(SDL_GetPerformanceFrequency());
-      renderer.draw_water(glm::value_ptr(view_proj), atmo.water_level, cam.x, cam.z, 1800.f, t_sec,
+      const float extent = (cam.y - atmo.water_level) > 100.f ? 900.f : 1600.f;
+      renderer.draw_water(glm::value_ptr(view_proj), atmo.water_level, cam.x, cam.z, extent, t_sec,
                           glm::value_ptr(atmo.water_color));
     }
 
-    // World-space effects: tracers (bright lines) and bullet impacts (crosses).
+    // World-space effects: tracers (mesh or lines) and bullet impacts.
     if (!tracers.empty()) {
-      std::vector<float> line_verts;
-      line_verts.reserve(tracers.size() * 6);
-      for (const auto& t : tracers) {
-        line_verts.insert(line_verts.end(), {t.a.x, t.a.y, t.a.z, t.b.x, t.b.y, t.b.z});
+      if (tracer_mesh.vao != 0) {
+        for (const auto& t : tracers) {
+          const glm::vec3 f = glm::normalize(t.b - t.a);
+          glm::vec3 up0(0.f, 1.f, 0.f);
+          if (std::fabs(glm::dot(f, up0)) > 0.99f) up0 = glm::vec3(1.f, 0.f, 0.f);
+          const glm::vec3 r = glm::normalize(glm::cross(up0, f));
+          const glm::vec3 u = glm::cross(f, r);
+          glm::mat4 rot(1.f);
+          rot[0] = glm::vec4(r, 0.f);
+          rot[1] = glm::vec4(u, 0.f);
+          rot[2] = glm::vec4(f, 0.f);
+          const glm::vec3 mid = (t.a + t.b) * 0.5f;
+          const float len = glm::length(t.b - t.a);
+          glm::mat4 model = glm::translate(glm::mat4(1.f), mid) * rot;
+          model = glm::scale(model, glm::vec3(0.04f, 0.04f, std::max(0.35f, len)));
+          const glm::mat4 mvp = view_proj * model;
+          renderer.draw_textured(tracer_mesh, glm::value_ptr(mvp), glm::value_ptr(model));
+        }
+      } else {
+        std::vector<float> line_verts;
+        line_verts.reserve(tracers.size() * 6);
+        for (const auto& t : tracers) {
+          line_verts.insert(line_verts.end(), {t.a.x, t.a.y, t.a.z, t.b.x, t.b.y, t.b.z});
+        }
+        renderer.draw_lines(glm::value_ptr(view_proj), line_verts.data(),
+                            static_cast<int>(line_verts.size() / 3), 1.0f, 0.85f, 0.35f, 2.5f,
+                            true);
       }
-      renderer.draw_lines(glm::value_ptr(view_proj), line_verts.data(),
-                          static_cast<int>(line_verts.size() / 3), 1.0f, 0.85f, 0.35f, 2.5f, true);
     }
     if (!impacts.empty()) {
       std::vector<float> imp_verts;
@@ -3753,40 +3991,112 @@ int main(int argc, char** argv) {
                           static_cast<int>(mv.size() / 3), 1.0f, 0.7f, 0.2f, 4.0f, true);
     }
 
-    // Exhaust / launch smoke: grey line-stars that expand and fade with age.
-    if (!smoke.empty()) {
-      std::vector<float> sv;
-      sv.reserve(smoke.size() * 18);
+    // BF2-style particle billboards (smoke, exhaust, explosions).
+    {
+      const float t_sec =
+          static_cast<float>(now) / static_cast<float>(SDL_GetPerformanceFrequency());
+      std::vector<bf2::Renderer::BillboardParticle> parts;
+      parts.reserve(smoke.size() + explosions.size() * 4);
       for (const auto& s : smoke) {
-        const float k = s.life > 0.f ? s.age / s.life : 1.f;
-        const float sz = 0.25f + k * 1.6f;
-        const glm::vec3 p = s.p;
-        sv.insert(sv.end(), {p.x - sz, p.y, p.z, p.x + sz, p.y, p.z});
-        sv.insert(sv.end(), {p.x, p.y - sz, p.z, p.x, p.y + sz, p.z});
-        sv.insert(sv.end(), {p.x, p.y, p.z - sz, p.x, p.y, p.z + sz});
+        const float k = s.life > 0.f ? glm::clamp(s.age / s.life, 0.f, 1.f) : 1.f;
+        const float graph_a =
+            s.use_graphs ? std::clamp(s.transp_graph.eval(k), 0.f, 1.f) : (1.f - k);
+        const float alpha = graph_a * (s.kind == 2 ? 1.f : 0.75f);
+        bf2::Renderer::BillboardParticle bp{};
+        bp.x = s.p.x;
+        bp.y = s.p.y;
+        bp.z = s.p.z;
+        bp.size = s.size * (s.use_graphs ? 1.f : (1.f + k * 1.8f));
+        bp.kind = static_cast<float>(s.kind);
+        if (glm::length(s.tint) > 0.01f) {
+          bp.r = s.tint.r;
+          bp.g = s.tint.g;
+          bp.b = s.tint.b;
+        } else if (s.kind == 2) {
+          bp.r = 1.f;
+          bp.g = 0.55f;
+          bp.b = 0.12f;
+        } else if (s.kind == 3) {
+          bp.r = 1.f;
+          bp.g = 0.7f;
+          bp.b = 0.2f;
+        } else if (s.kind == 1) {
+          bp.r = 0.85f;
+          bp.g = 0.85f;
+          bp.b = 0.8f;
+        } else {
+          bp.r = 0.55f;
+          bp.g = 0.56f;
+          bp.b = 0.58f;
+        }
+        bp.a = alpha;
+        parts.push_back(bp);
       }
-      const float g = 0.72f;
-      renderer.draw_lines(glm::value_ptr(view_proj), sv.data(),
-                          static_cast<int>(sv.size() / 3), g, g, g + 0.03f, 3.0f, true);
-    }
-
-    // Explosions: expanding bright orange stars.
-    if (!explosions.empty()) {
-      std::vector<float> ev;
-      ev.reserve(explosions.size() * 30);
+      for (const auto& sl : scene_lights) {
+        const float pulse = 0.85f + 0.15f * std::sin(t_sec * 4.2f + sl.pos.x * 0.1f);
+        bf2::Renderer::BillboardParticle bp{};
+        bp.x = sl.pos.x;
+        bp.y = sl.pos.y + 0.15f;
+        bp.z = sl.pos.z;
+        bp.size = sl.radius * 0.35f * pulse;
+        bp.r = sl.color.r;
+        bp.g = sl.color.g;
+        bp.b = sl.color.b;
+        bp.a = 0.55f * pulse;
+        bp.kind = 2.f;
+        parts.push_back(bp);
+      }
       for (const auto& ex : explosions) {
-        const float k = ex.life > 0.f ? ex.age / ex.life : 1.f;
-        const float sz = 0.5f + k * 6.0f;
-        const glm::vec3 p = ex.p;
-        ev.insert(ev.end(), {p.x - sz, p.y, p.z, p.x + sz, p.y, p.z});
-        ev.insert(ev.end(), {p.x, p.y - sz, p.z, p.x, p.y + sz, p.z});
-        ev.insert(ev.end(), {p.x, p.y, p.z - sz, p.x, p.y, p.z + sz});
-        const float dz = sz * 0.7f;
-        ev.insert(ev.end(), {p.x - dz, p.y - dz, p.z, p.x + dz, p.y + dz, p.z});
-        ev.insert(ev.end(), {p.x - dz, p.y + dz, p.z, p.x + dz, p.y - dz, p.z});
+        const float k = ex.life > 0.f ? glm::clamp(ex.age / ex.life, 0.f, 1.f) : 1.f;
+        const float alpha = 1.f - k;
+        for (int layer = 0; layer < 3; ++layer) {
+          bf2::Renderer::BillboardParticle bp{};
+          bp.x = ex.p.x;
+          bp.y = ex.p.y + layer * 0.4f;
+          bp.z = ex.p.z;
+          bp.size = (1.2f + k * 7.f) * ex.scale * (1.f + layer * 0.25f);
+          bp.r = 1.f;
+          bp.g = 0.45f + layer * 0.1f;
+          bp.b = 0.08f;
+          bp.a = alpha * (0.9f - layer * 0.2f);
+          bp.kind = 3.f;
+          parts.push_back(bp);
+        }
       }
-      renderer.draw_lines(glm::value_ptr(view_proj), ev.data(),
-                          static_cast<int>(ev.size() / 3), 1.0f, 0.6f, 0.15f, 4.0f, true);
+      if (!parts.empty() && (fx_smoke_tex || fx_fire_tex)) {
+        renderer.draw_billboards(glm::value_ptr(view_proj), glm::value_ptr(cam), parts.data(),
+                                 static_cast<int>(parts.size()), fx_smoke_tex, fx_fire_tex, true);
+      } else {
+        if (!smoke.empty()) {
+          std::vector<float> sv;
+          sv.reserve(smoke.size() * 18);
+          for (const auto& s : smoke) {
+            const float k = s.life > 0.f ? s.age / s.life : 1.f;
+            const float sz = s.size + k * 1.6f;
+            const glm::vec3 p = s.p;
+            sv.insert(sv.end(), {p.x - sz, p.y, p.z, p.x + sz, p.y, p.z});
+            sv.insert(sv.end(), {p.x, p.y - sz, p.z, p.x, p.y + sz, p.z});
+            sv.insert(sv.end(), {p.x, p.y, p.z - sz, p.x, p.y, p.z + sz});
+          }
+          const float g = 0.72f;
+          renderer.draw_lines(glm::value_ptr(view_proj), sv.data(),
+                              static_cast<int>(sv.size() / 3), g, g, g + 0.03f, 3.0f, true);
+        }
+        if (!explosions.empty()) {
+          std::vector<float> ev;
+          ev.reserve(explosions.size() * 30);
+          for (const auto& ex : explosions) {
+            const float k = ex.life > 0.f ? ex.age / ex.life : 1.f;
+            const float sz = 0.5f + k * 6.0f * ex.scale;
+            const glm::vec3 p = ex.p;
+            ev.insert(ev.end(), {p.x - sz, p.y, p.z, p.x + sz, p.y, p.z});
+            ev.insert(ev.end(), {p.x, p.y - sz, p.z, p.x, p.y + sz, p.z});
+            ev.insert(ev.end(), {p.x, p.y, p.z - sz, p.x, p.y, p.z + sz});
+          }
+          renderer.draw_lines(glm::value_ptr(view_proj), ev.data(),
+                              static_cast<int>(ev.size() / 3), 1.0f, 0.6f, 0.15f, 4.0f, true);
+        }
+      }
     }
 
     // First-person weapon viewmodel: rendered in view space over the scene with a

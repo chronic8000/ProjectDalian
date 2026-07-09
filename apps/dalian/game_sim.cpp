@@ -1,5 +1,8 @@
 #include "game_sim.hpp"
 
+#include "bf2_effects.hpp"
+#include "hitbox_zones.hpp"
+
 #include "engine/anim/pose.hpp"
 
 #define GLM_ENABLE_EXPERIMENTAL
@@ -78,6 +81,7 @@ float frand() { return static_cast<float>(std::rand()) / static_cast<float>(RAND
 void GameSim::init(const SimInitParams& params) {
   params_ = params;
   state_ = GameState{};
+  defenders_spawned_ = false;
   conquest_cfg_.starting_tickets = params_.starting_tickets;
   state_.tickets.team1_tickets = params_.starting_tickets;
   state_.tickets.team2_tickets = params_.starting_tickets;
@@ -86,7 +90,6 @@ void GameSim::init(const SimInitParams& params) {
     state_.player.position = {params_.spawn.x, params_.spawn.y, params_.spawn.z};
   }
   init_conquest();
-  spawn_defenders();
 }
 
 void GameSim::init_conquest() {
@@ -114,6 +117,9 @@ void GameSim::init_conquest() {
       cp.capturer = pcp.initial_team;
       cp.capture_progress = pcp.initial_team != TeamId::Neutral ? 1.f : 0.f;
       cp.radius = pcp.radius > 0.1f ? pcp.radius : conquest_cfg_.capture_radius;
+      cp.area_value_team1 = pcp.area_value_team1;
+      cp.area_value_team2 = pcp.area_value_team2;
+      cp.capturable = !pcp.unable_to_change_team;
       state_.control_points.push_back(cp);
     }
     return;
@@ -172,6 +178,10 @@ void GameSim::begin_match() {
   state_.tickets.team2_tickets = conquest_cfg_.starting_tickets;
   state_.tickets.team1_bleed_accum = 0.f;
   state_.tickets.team2_bleed_accum = 0.f;
+  if (!defenders_spawned_) {
+    spawn_defenders();
+    defenders_spawned_ = true;
+  }
 }
 
 void GameSim::set_match_factions(int team1_faction, int team2_faction, TeamId player_team) {
@@ -188,24 +198,83 @@ void GameSim::clear_events() { events_ = SimEvents{}; }
 
 void GameSim::spawn_defenders() {
   if (!params_.have_soldier || !params_.world) return;
-  const float min_from_spawn = 55.f;
+  state_.enemies.clear();
+
+  const TeamId player = state_.player_team;
+  const TeamId opfor = player == TeamId::Team1 ? TeamId::Team2 : TeamId::Team1;
+  constexpr float kMinFromPlayer = 70.f;
+  constexpr float kMinFromFriendlyBase = 50.f;
   constexpr float kMinPostSpacing = 90.f;
   constexpr std::size_t kMaxPosts = 10;
   constexpr std::size_t kMaxEnemies = 28;
+
+  const glm::vec3 player_feet(state_.player.position.x,
+                              state_.player.position.y - state_.player.eye_height,
+                              state_.player.position.z);
+
+  auto xz_dist = [](const glm::vec3& a, const glm::vec3& b) {
+    return glm::distance(glm::vec2(a.x, a.z), glm::vec2(b.x, b.z));
+  };
+
+  auto too_near_player = [&](const glm::vec3& p) {
+    return xz_dist(p, player_feet) < kMinFromPlayer;
+  };
+
+  auto too_near_friendly_base = [&](const glm::vec3& p) {
+    for (const auto& cp : state_.control_points) {
+      if (cp.owner == player && xz_dist(p, cp.pos) < kMinFromFriendlyBase) return true;
+    }
+    for (const auto& sp : params_.map_layout.soldier_spawns) {
+      bool friendly = false;
+      for (const auto& cp : state_.control_points) {
+        if (cp.bf2_cp_id != 0 && cp.bf2_cp_id == sp.bf2_cp_id && cp.owner == player) {
+          friendly = true;
+          break;
+        }
+      }
+      if (!friendly) {
+        for (const auto& pcp : params_.map_layout.control_points) {
+          if (pcp.bf2_id != 0 && pcp.bf2_id == sp.bf2_cp_id && pcp.initial_team == player) {
+            friendly = true;
+            break;
+          }
+        }
+      }
+      if (friendly && xz_dist(p, sp.pos) < kMinFromFriendlyBase) return true;
+    }
+    return false;
+  };
+
+  auto valid_defender_post = [&](const glm::vec3& pos) {
+    if (too_near_player(pos)) return false;
+    if (too_near_friendly_base(pos)) return false;
+    if (ground_surface(pos.x, pos.z, pos.y) < params_.water_y - 0.3f) return false;
+    return true;
+  };
+
+  auto cp_ok_for_defenders = [&](const ControlPoint& cp) {
+    if (cp.owner == player) return false;
+    if (cp.owner != opfor && cp.owner != TeamId::Neutral) return false;
+    if (!cp.capturable && cp.owner == TeamId::Neutral) return false;
+    return valid_defender_post(cp.pos);
+  };
+
   std::vector<glm::vec3> candidates;
-  for (const auto& cp : params_.control_points) {
-    if (glm::distance(glm::vec2(cp.x, cp.z), glm::vec2(params_.spawn.x, params_.spawn.z)) <
-        min_from_spawn)
-      continue;
-    if (ground_surface(cp.x, cp.z, cp.y) < params_.water_y - 0.3f) continue;
-    candidates.push_back(cp);
+  for (const auto& cp : state_.control_points) {
+    if (cp_ok_for_defenders(cp)) candidates.push_back(cp.pos);
   }
+  if (candidates.empty()) {
+    for (const auto& cp : params_.control_points) {
+      if (valid_defender_post(cp)) candidates.push_back(cp);
+    }
+  }
+
   std::shuffle(candidates.begin(), candidates.end(), std::mt19937{std::random_device{}()});
   std::vector<glm::vec3> posts;
   for (const auto& cp : candidates) {
     bool too_close = false;
     for (const auto& p : posts) {
-      if (glm::distance(glm::vec2(cp.x, cp.z), glm::vec2(p.x, p.z)) < kMinPostSpacing) {
+      if (xz_dist(cp, p) < kMinPostSpacing) {
         too_close = true;
         break;
       }
@@ -217,9 +286,10 @@ void GameSim::spawn_defenders() {
   if (posts.empty()) {
     for (int i = 0; i < 5; ++i) {
       const float ang = frand() * 6.2831853f;
-      const float r = 80.f + frand() * 80.f;
-      posts.push_back(
-          glm::vec3(params_.spawn.x + std::cos(ang) * r, 0.f, params_.spawn.z + std::sin(ang) * r));
+      const float r = kMinFromPlayer + 20.f + frand() * 80.f;
+      const glm::vec3 guess(player_feet.x + std::cos(ang) * r, 0.f,
+                            player_feet.z + std::sin(ang) * r);
+      if (valid_defender_post(guess)) posts.push_back(guess);
     }
   }
   for (const auto& post : posts) {
@@ -228,6 +298,7 @@ void GameSim::spawn_defenders() {
     for (int i = 0; i < squad; ++i) {
       if (state_.enemies.size() >= kMaxEnemies) break;
       Enemy en;
+      en.team = opfor;
       const float ang = frand() * 6.2831853f;
       const float r = 4.f + frand() * 14.f;
       en.home = post;
@@ -237,6 +308,11 @@ void GameSim::spawn_defenders() {
       en.patrol_wait = 1.f + frand() * 2.f;
       en.yaw = frand() * 6.2831853f;
       en.burst_cooldown = 0.5f + frand();
+      if (params_.enemy_weapon.valid) {
+        en.fire_rate = params_.enemy_weapon.fire_rate;
+        en.damage = params_.enemy_weapon.damage;
+        en.spread = params_.enemy_weapon.spread;
+      }
       state_.enemies.push_back(en);
     }
   }
@@ -375,9 +451,19 @@ EnemyHit GameSim::shoot_enemies(const glm::vec3& o, const glm::vec3& dir, float 
 }
 
 void GameSim::damage_enemy(int idx, int zone) {
+  damage_enemy(idx, zone, -1.f);
+}
+
+void GameSim::damage_enemy(int idx, int zone, float weapon_damage_override) {
   if (idx < 0 || idx >= static_cast<int>(state_.enemies.size())) return;
   Enemy& en = state_.enemies[idx];
-  const float dmg = zone == 2 ? 100.f : (zone == 1 ? 42.f : 20.f);
+  const float weapon_dmg = weapon_damage_override > 0.f
+                               ? weapon_damage_override
+                               : (params_.weapon.valid ? params_.weapon.damage : 28.f);
+  const float base = zone == 2 ? weapon_dmg * 1.45f : (zone == 1 ? weapon_dmg : weapon_dmg * 0.65f);
+  const HitboxZone hz =
+      zone == 2 ? HitboxZone::Head : (zone == 1 ? HitboxZone::Torso : HitboxZone::Limb);
+  const float dmg = apply_hitbox_multiplier(hz, base);
   en.health -= dmg;
   en.hit_flash = 0.12f;
   en.alert = 1.f;
@@ -388,7 +474,20 @@ void GameSim::damage_enemy(int idx, int zone) {
   }
 }
 
+void GameSim::hurt_player(float damage) {
+  if (state_.match_over || damage <= 0.f) return;
+  state_.player_health -= damage;
+  state_.player_regen_delay = 3.f;
+  if (state_.player_health <= 0.f) {
+    ++state_.player_deaths;
+    apply_death_ticket(state_.tickets, state_.player_team, conquest_cfg_);
+    state_.player_health = 100.f;
+    events_.open_deploy = true;
+  }
+}
+
 void GameSim::explode_at(const glm::vec3& center, float radius, float max_damage) {
+  spawn_missile_detonation_fx(state_.smoke, state_.explosions, center, glm::clamp(radius / 9.f, 0.5f, 2.f));
   for (auto& en : state_.enemies) {
     if (!en.alive) continue;
     const glm::vec3 chest(en.pos.x, en.pos.y + 1.0f, en.pos.z);
@@ -404,25 +503,110 @@ void GameSim::explode_at(const glm::vec3& center, float radius, float max_damage
       ++state_.player_kills;
     }
   }
+  const glm::vec3 player_chest(state_.player.position.x, state_.player.position.y + 0.4f,
+                               state_.player.position.z);
+  const float pd = glm::length(player_chest - center);
+  if (pd <= radius) {
+    const float falloff = 1.f - (pd / radius);
+    float dmg = max_damage * falloff * falloff;
+    if (state_.in_vehicle >= 0) dmg *= 0.55f;
+    hurt_player(dmg);
+  }
 }
 
-void GameSim::fire_heli_rocket(const glm::vec3& origin, const glm::vec3& dir) {
+void GameSim::spawn_missile_from_profile(const glm::vec3& origin, const glm::vec3& dir,
+                                         const ProjectileProfile& profile, bool homing_target) {
   ActiveMissile am;
-  am.m.guided = false;
-  am.m.has_target = false;
   am.m.position = origin;
-  am.m.velocity = dir * 60.f;
-  am.m.boost_accel = 190.f;
-  am.m.boost_time = 1.1f;
-  am.m.max_speed = 240.f;
-  am.m.turn_rate = 0.f;
-  am.m.life = 6.f;
-  am.m.gravity = 3.0f;
-  am.m.mass = 8.f;
+  am.m.guided = profile.guided && homing_target;
+  am.m.has_target = am.m.guided;
+  am.m.velocity = glm::normalize(dir) * std::max(10.f, profile.launch_velocity);
+  am.m.boost_accel = std::max(50.f, profile.acceleration);
+  am.m.boost_time = profile.guided ? 1.7f : 1.1f;
+  am.m.max_speed = std::max(40.f, profile.max_speed);
+  am.m.turn_rate = profile.guided ? std::max(0.5f, profile.turn_rate) : 0.f;
+  am.m.life = std::max(3.f, profile.life);
+  am.m.gravity = 9.81f * std::max(0.f, profile.gravity_modifier);
+  am.m.mass = std::max(1.f, profile.mass);
+  am.m.drag = std::max(0.0001f, profile.drag * 0.00055f);
+  am.explosion_radius = std::max(1.f, profile.explosion_radius);
+  am.explosion_damage = std::max(10.f, profile.explosion_damage);
   am.prev_pos = origin;
   state_.missiles.push_back(am);
-  state_.explosions.push_back({origin, 0.f, 0.15f});
-  state_.smoke.push_back({origin, 0.f, 0.9f});
+  spawn_rocket_launch_fx(state_.smoke, origin, dir);
+}
+
+void GameSim::fire_vehicle_projectile(const glm::vec3& origin, const glm::vec3& dir,
+                                      const VehicleWeaponSlot& weapon_slot) {
+  ProjectileProfile p = weapon_slot.projectile;
+  if (!p.valid) {
+    p.damage = weapon_slot.damage;
+    p.launch_velocity = 60.f;
+    p.acceleration = 190.f;
+    p.max_speed = 240.f;
+    p.explosion_radius = 6.f;
+    p.explosion_damage = 150.f;
+    p.life = 6.f;
+    p.valid = true;
+  }
+  spawn_missile_from_profile(origin, dir, p, false);
+}
+
+void GameSim::fire_heli_rocket(const glm::vec3& origin, const glm::vec3& dir,
+                               const VehicleWeaponSlot* weapon_slot) {
+  if (weapon_slot && weapon_slot->valid) {
+    fire_vehicle_projectile(origin, dir, *weapon_slot);
+    return;
+  }
+  VehicleWeaponSlot fallback;
+  fallback.valid = true;
+  fallback.damage = 150.f;
+  fallback.projectile.damage = 150.f;
+  fallback.projectile.launch_velocity = 60.f;
+  fallback.projectile.acceleration = 190.f;
+  fallback.projectile.max_speed = 240.f;
+  fallback.projectile.explosion_radius = 6.f;
+  fallback.projectile.explosion_damage = 150.f;
+  fallback.projectile.life = 6.f;
+  fallback.projectile.valid = true;
+  fire_vehicle_projectile(origin, dir, fallback);
+}
+
+void GameSim::step_vehicle_fatal_collisions() {
+  if (!params_.world) return;
+  const glm::vec3 player_feet(state_.player.position.x, state_.player.position.y,
+                              state_.player.position.z);
+  for (std::size_t vi = 0; vi < state_.vehicles.size(); ++vi) {
+    const Vehicle& veh = state_.vehicles[vi];
+    if (veh.mesh_key.find("vehicles/") == std::string::npos) continue;
+    float spd = std::fabs(veh.speed);
+    if (veh.is_air) spd = glm::length(glm::vec3(veh.vel.x, 0.f, veh.vel.z));
+    if (veh.is_air && !veh.is_heli) spd = glm::length(veh.vel);
+    if (spd < 9.f) continue;
+    const float kill_r = std::max(veh.col_half.x, veh.col_half.z) + 1.2f;
+    const float crush_dmg = 120.f + spd * 4.f;
+
+    for (auto& en : state_.enemies) {
+      if (!en.alive) continue;
+      const glm::vec2 d(en.pos.x - veh.pos.x, en.pos.z - veh.pos.z);
+      if (glm::dot(d, d) > kill_r * kill_r) continue;
+      if (std::fabs(en.pos.y - veh.pos.y) > veh.col_half.y + 2.5f) continue;
+      en.alive = false;
+      en.health = 0.f;
+      en.death_time = 0.f;
+      ++state_.player_kills;
+      spawn_missile_detonation_fx(state_.smoke, state_.explosions,
+                                  glm::vec3(en.pos.x, en.pos.y + 1.f, en.pos.z), 0.35f);
+    }
+
+    if (state_.in_vehicle < 0) {
+      const glm::vec2 d(player_feet.x - veh.pos.x, player_feet.z - veh.pos.z);
+      if (glm::dot(d, d) <= kill_r * kill_r &&
+          std::fabs(player_feet.y - veh.pos.y) <= veh.col_half.y + 2.5f) {
+        hurt_player(crush_dmg);
+      }
+    }
+  }
 }
 
 bool GameSim::push_out_of_vehicles(float& x, float& z, float feet_y, int ignore) const {
@@ -518,7 +702,9 @@ void GameSim::decay_sticks(float dt, const PlayerInput& input) {
       state_.air_roll_stick *= decay;
     }
   }
-  state_.air_pitch_stick = input.air_pitch_stick;
+  float pitch_stick = input.air_pitch_stick;
+  if (input.pitch_up) pitch_stick = std::max(pitch_stick, 1.f);
+  state_.air_pitch_stick = pitch_stick;
   state_.air_roll_stick = input.air_roll_stick;
 }
 
@@ -529,13 +715,13 @@ void GameSim::step_rotor_spool(float dt, const PlayerInput& input) {
     if (!av.is_air) continue;
     const bool occupied = static_cast<int>(i) == state_.in_vehicle;
     float target = occupied ? 1.f : 0.f;
-    float rate = target > av.rotor_rpm ? 1.f / 6.f : 1.f / 4.f;
-    if (occupied && av.is_heli && (input.throttle_up || input.throttle_down || input.jump)) {
-      rate = 1.f / 1.8f;  // spool up quickly when pilot requests collective
+    float rate = target > av.rotor_rpm ? 1.f / av.rotor_spool_up : 1.f / av.rotor_spool_down;
+    if (occupied && av.is_heli && (input.throttle_up || input.throttle_down || input.pitch_up)) {
+      rate = 1.f / av.rotor_spool_collective;
     }
     av.rotor_rpm =
         glm::clamp(av.rotor_rpm + glm::clamp(target - av.rotor_rpm, -rate * fdt, rate * fdt), 0.f, 1.f);
-    av.rotor_spin += fdt * 62.f * av.rotor_rpm;
+    av.rotor_spin += fdt * av.rotor_spin_rate * av.rotor_rpm;
   }
   for (auto& gv : state_.vehicles) {
     if (gv.wheels.empty()) continue;
@@ -571,13 +757,38 @@ void GameSim::step_player_on_foot(float dt, const PlayerInput& input) {
   params_.world->step_character(state_.player, dt > 0.f ? dt : 1.f / 60.f);
 }
 
+void GameSim::set_weapon_profile(const WeaponProfile& weapon, bool refill_ammo) {
+  params_.weapon = weapon;
+  if (!refill_ammo) return;
+  const int mag = weapon.magazine_size > 0 ? weapon.magazine_size : kMagSize;
+  state_.mag_ammo = mag;
+  state_.reserve_ammo = weapon.reserve_ammo > 0 ? weapon.reserve_ammo : mag * 5;
+  state_.reloading = false;
+  state_.reload_timer = 0.f;
+  state_.fire_deviation = weapon.spread;
+  state_.shots_fired = 0;
+  state_.burst_shots_left = 0;
+  state_.burst_pause_timer = 0.f;
+}
+
+void GameSim::set_at_missile_profile(const ProjectileProfile& profile) {
+  params_.at_missile = profile;
+}
+
 void GameSim::step_combat(float dt, const PlayerInput& input) {
   state_.fire_cooldown = std::max(0.f, state_.fire_cooldown - dt);
   state_.muzzle_flash = std::max(0.f, state_.muzzle_flash - dt);
   state_.recoil = std::max(0.f, state_.recoil - dt * 6.f);
+  state_.fire_deviation = std::max(params_.weapon.spread,
+                                   state_.fire_deviation - dt * params_.weapon.deviation_decay);
   state_.reload_timer = std::max(0.f, state_.reload_timer - dt);
+  state_.burst_pause_timer = std::max(0.f, state_.burst_pause_timer - dt);
+  const bool fire_edge = input.fire && !state_.fire_was_down;
+  state_.fire_was_down = input.fire;
+  const int mag_cap =
+      params_.weapon.magazine_size > 0 ? params_.weapon.magazine_size : kMagSize;
   if (state_.reloading && state_.reload_timer <= 0.f) {
-    const int need = kMagSize - state_.mag_ammo;
+    const int need = mag_cap - state_.mag_ammo;
     const int take = std::min(need, state_.reserve_ammo);
     state_.mag_ammo += take;
     state_.reserve_ammo -= take;
@@ -585,32 +796,65 @@ void GameSim::step_combat(float dt, const PlayerInput& input) {
     events_.play_reload = true;
   }
 
+  const int burst_sz = std::max(1, params_.weapon.burst_size);
+  const bool burst_weapon = burst_sz > 1;
+  if (burst_weapon && fire_edge && state_.burst_shots_left <= 0 && state_.burst_pause_timer <= 0.f &&
+      !state_.reloading && state_.mag_ammo > 0) {
+    state_.burst_shots_left = burst_sz;
+  }
+
   if (input.fire && input.mouse_look && !input.drone_mode && state_.in_vehicle < 0 &&
       !input.deploy_open && !state_.reloading && state_.mag_ammo <= 0) {
     events_.out_of_ammo_voice = true;
   }
 
-  if (input.fire && input.mouse_look && !input.drone_mode && state_.in_vehicle < 0 &&
-      !input.deploy_open && !state_.reloading && state_.mag_ammo > 0 &&
-      state_.fire_cooldown <= 0.f) {
+  const bool want_shoot =
+      input.mouse_look && !input.drone_mode && state_.in_vehicle < 0 && !input.deploy_open &&
+      !state_.reloading && state_.mag_ammo > 0 && state_.fire_cooldown <= 0.f &&
+      (burst_weapon ? state_.burst_shots_left > 0 : input.fire);
+
+  if (want_shoot) {
     --state_.mag_ammo;
+    if (burst_weapon) {
+      --state_.burst_shots_left;
+      if (state_.burst_shots_left <= 0) state_.burst_pause_timer = params_.weapon.burst_pause;
+    }
     if (state_.mag_ammo == 0 && state_.reserve_ammo > 0) {
       state_.reloading = true;
-      state_.reload_timer = 2.0f;
+      state_.reload_timer =
+          params_.weapon.reload_time > 0.f ? params_.weapon.reload_time : 2.0f;
       events_.play_reload = true;
     }
-    state_.fire_cooldown = 0.1f;
+    const float shot_rate = burst_weapon && params_.weapon.burst_shot_rate > 0.f
+                                ? params_.weapon.burst_shot_rate
+                                : (params_.weapon.valid ? params_.weapon.fire_rate : 0.1f);
+    state_.fire_cooldown = shot_rate;
     state_.muzzle_flash = 0.045f;
     state_.recoil = std::min(1.f, state_.recoil + 0.6f);
     events_.fired_shot = true;
-    const glm::vec3& front = input.look_forward;
+    ++state_.shots_fired;
+    const float dev = glm::clamp(state_.fire_deviation + state_.recoil * 0.05f,
+                                 params_.weapon.min_deviation, params_.weapon.max_deviation);
+    state_.fire_deviation =
+        std::min(params_.weapon.max_deviation, dev + params_.weapon.spread_per_shot);
+    glm::vec3 front = input.look_forward;
+    if (dev > 1e-5f) {
+      const glm::vec3 up = glm::normalize(glm::cross(input.look_right, front));
+      front = glm::normalize(front + input.look_right * ((frand() - 0.5f) * 2.f * dev) +
+                             up * ((frand() - 0.5f) * 2.f * dev));
+    }
     const glm::vec3& right = input.look_right;
     const glm::vec3 muzzle =
         input.eye + front * 0.6f + right * 0.18f - glm::vec3(0, 1, 0) * 0.12f;
     events_.fire_origin = muzzle;
     events_.fire_dir = front;
+    spawn_muzzle_smoke_fx(state_.smoke, muzzle, front);
+    const bool emit_tracer =
+        params_.weapon.tracer_count <= 0 ||
+        (state_.shots_fired % std::max(1, params_.weapon.tracer_count) == 0);
     if (state_.ballistic) {
-      state_.projectiles.push_back({muzzle, front * kMuzzleSpeed, kBulletLife});
+      const float spd = params_.weapon.tracer_speed > 1.f ? params_.weapon.tracer_speed : kMuzzleSpeed;
+      state_.projectiles.push_back({muzzle, front * spd, kBulletLife});
     } else if (params_.world) {
       const auto hit = params_.world->raycast({input.eye.x, input.eye.y, input.eye.z},
                                               {front.x, front.y, front.z}, 400.f);
@@ -618,13 +862,17 @@ void GameSim::step_combat(float dt, const PlayerInput& input) {
       const auto eh = shoot_enemies(input.eye, front, terr);
       if (eh.idx >= 0) {
         damage_enemy(eh.idx, eh.zone);
-        state_.tracers.push_back({muzzle, eh.point, 0.06f});
+        if (emit_tracer) state_.tracers.push_back({muzzle, eh.point, 0.06f});
         state_.impacts.push_back({eh.point, 0.4f});
+        spawn_bullet_impact_fx(state_.smoke, eh.point, -front, "grass");
       } else {
         const glm::vec3 end =
             hit.hit ? glm::vec3(hit.point.x, hit.point.y, hit.point.z) : input.eye + front * 400.f;
-        state_.tracers.push_back({muzzle, end, 0.06f});
-        if (hit.hit) state_.impacts.push_back({end, 0.6f});
+        if (emit_tracer) state_.tracers.push_back({muzzle, end, 0.06f});
+        if (hit.hit) {
+          state_.impacts.push_back({end, 0.6f});
+          spawn_bullet_impact_fx(state_.smoke, end, -front, "grass");
+        }
       }
     }
   }
@@ -653,14 +901,16 @@ void GameSim::step_projectiles(float dt) {
       if (eh.idx >= 0 && eh.dist < terr) {
         damage_enemy(eh.idx, eh.zone);
         state_.impacts.push_back({eh.point, 0.4f});
+        spawn_bullet_impact_fx(state_.smoke, eh.point, -sd, "grass");
         state_.tracers.push_back({pr.pos, eh.point, 0.05f});
         pr.life = 0.f;
         continue;
       }
       if (hit.hit) {
-        state_.impacts.push_back({glm::vec3(hit.point.x, hit.point.y, hit.point.z), 0.6f});
-        state_.tracers.push_back(
-            {pr.pos, glm::vec3(hit.point.x, hit.point.y, hit.point.z), 0.05f});
+        const glm::vec3 hp(hit.point.x, hit.point.y, hit.point.z);
+        state_.impacts.push_back({hp, 0.6f});
+        spawn_bullet_impact_fx(state_.smoke, hp, -sd, "grass");
+        state_.tracers.push_back({pr.pos, hp, 0.05f});
         pr.life = 0.f;
         continue;
       }
@@ -701,6 +951,33 @@ void GameSim::step_enemies(float dt, const PlayerInput& input) {
       continue;
     }
     en.hit_flash = std::max(0.f, en.hit_flash - dt);
+    const bool hostile_to_player =
+        en.team != state_.player_team && en.team != TeamId::Neutral;
+    float move_speed = 0.f;
+    const auto try_step = [&](const glm::vec3& step) {
+      if (!params_.world) {
+        en.pos.x += step.x;
+        en.pos.z += step.z;
+        return;
+      }
+      const glm::vec3 chest = en.pos + glm::vec3(0.f, 1.2f, 0.f);
+      const float len = glm::length(glm::vec2(step.x, step.z));
+      if (len < 1e-4f) return;
+      const glm::vec3 dir(step.x / len, 0.f, step.z / len);
+      const auto hit = params_.world->raycast({chest.x, chest.y, chest.z}, {dir.x, dir.y, dir.z},
+                                              len + 0.35f);
+      if (hit.hit && std::fabs(hit.normal.y) < 0.45f && hit.distance < len + 0.1f) {
+        const glm::vec3 slide = glm::vec3(hit.normal.x, 0.f, hit.normal.z);
+        if (glm::length(slide) > 0.01f) {
+          const glm::vec3 sdir = glm::normalize(slide);
+          en.pos.x += sdir.x * len * 0.35f;
+          en.pos.z += sdir.z * len * 0.35f;
+        }
+        return;
+      }
+      en.pos.x += step.x;
+      en.pos.z += step.z;
+    };
     en.anim_time += dt;
     const glm::vec3 chest = en.pos + glm::vec3(0.f, 1.35f, 0.f);
     const glm::vec3 to_player = eye - chest;
@@ -711,26 +988,41 @@ void GameSim::step_enemies(float dt, const PlayerInput& input) {
       const auto hit = params_.world->raycast({chest.x, chest.y, chest.z}, {dir.x, dir.y, dir.z}, dist);
       los = !hit.hit || hit.distance >= dist - 1.5f;
     }
-    en.alert = std::clamp(en.alert + (los ? dt / 1.6f : -dt / 2.5f), 0.f, 1.f);
+    en.alert = std::clamp(en.alert + (hostile_to_player && los ? dt / 1.6f : -dt / 2.5f), 0.f, 1.f);
     en.moving = false;
-    if (los && dist < kEngageRange) {
+    if (hostile_to_player && los && dist < kEngageRange) {
       en.yaw = std::atan2(to_player.x, to_player.z);
       if (dist > 35.f) {
-        const glm::vec3 step =
-            glm::normalize(glm::vec3(to_player.x, 0.f, to_player.z)) * 3.0f * dt;
-        en.pos.x += step.x;
-        en.pos.z += step.z;
+        glm::vec3 goal = glm::vec3(eye.x, en.pos.y, eye.z);
+        if (params_.nav_mesh && params_.nav_mesh->valid()) {
+          goal = params_.nav_mesh->waypoint_along_path(en.pos, goal, 3.0f * dt);
+        } else {
+          goal = en.pos + glm::normalize(glm::vec3(to_player.x, 0.f, to_player.z)) * 3.0f * dt;
+        }
+        const glm::vec3 step = goal - en.pos;
+        try_step(step);
+        move_speed = 3.0f;
         en.moving = true;
       }
       contacts.push_back({static_cast<int>(i), dist});
-    } else if (los) {
+    } else if (hostile_to_player && los) {
       en.yaw = std::atan2(to_player.x, to_player.z);
-      const glm::vec3 step = glm::normalize(glm::vec3(to_player.x, 0.f, to_player.z)) * 2.4f * dt;
-      en.pos.x += step.x;
-      en.pos.z += step.z;
+      glm::vec3 goal = glm::vec3(eye.x, en.pos.y, eye.z);
+      if (params_.nav_mesh && params_.nav_mesh->valid()) {
+        goal = params_.nav_mesh->waypoint_along_path(en.pos, goal, 2.4f * dt);
+      } else {
+        goal = en.pos + glm::normalize(glm::vec3(to_player.x, 0.f, to_player.z)) * 2.4f * dt;
+      }
+      const glm::vec3 step = goal - en.pos;
+      try_step(step);
+      move_speed = 2.4f;
       en.moving = true;
-    } else {
-      const glm::vec2 to_wp(en.patrol_target.x - en.pos.x, en.patrol_target.z - en.pos.z);
+      } else {
+        glm::vec3 goal = en.patrol_target;
+        if (params_.nav_mesh && params_.nav_mesh->valid()) {
+          goal = params_.nav_mesh->waypoint_along_path(en.pos, goal, 1.5f * dt);
+        }
+        const glm::vec2 to_wp(goal.x - en.pos.x, goal.z - en.pos.z);
       const float wp_dist = glm::length(to_wp);
       if (wp_dist < 1.2f) {
         en.patrol_wait -= dt;
@@ -743,19 +1035,29 @@ void GameSim::step_enemies(float dt, const PlayerInput& input) {
         }
       } else {
         const glm::vec3 step = glm::normalize(glm::vec3(to_wp.x, 0.f, to_wp.y)) * 1.5f * dt;
-        en.pos.x += step.x;
-        en.pos.z += step.z;
+        try_step(step);
+        move_speed = 1.5f;
         en.yaw = std::atan2(to_wp.x, to_wp.y);
         en.moving = true;
       }
     }
     snap_enemy_feet(en);
-    const bf2::AnimationClip* clip =
-        (en.moving && params_.have_clip_walk)
-            ? params_.clip_walk
-            : (params_.have_clip_stand ? params_.clip_stand : nullptr);
+    const bf2::AnimationClip* clip = nullptr;
+    float anim_rate = 1.f;
+    if (en.moving) {
+      if (move_speed > 2.2f && params_.have_clip_run)
+        clip = params_.clip_run;
+      else if (params_.have_clip_walk)
+        clip = params_.clip_walk;
+      const float ref = (clip == params_.clip_run) ? 5.5f : 1.5f;
+      anim_rate = glm::clamp(move_speed / ref, 0.6f, 1.8f);
+    } else if (params_.have_clip_stand) {
+      clip = params_.clip_stand;
+    }
+    en.anim_time += dt * anim_rate;
     int frame = 0;
-    if (clip && clip->frame_count > 0) frame = static_cast<int>(en.anim_time * 30.f) % clip->frame_count;
+    if (clip && clip->frame_count > 0)
+      frame = static_cast<int>(en.anim_time * 30.f) % clip->frame_count;
     update_capsules(en, clip, frame);
   }
   std::sort(contacts.begin(), contacts.end(),
@@ -775,19 +1077,41 @@ void GameSim::step_enemies(float dt, const PlayerInput& input) {
     }
     en.shot_timer -= dt;
     if (en.shot_timer > 0.f) continue;
-    en.shot_timer = 0.14f;
+    en.shot_timer = std::max(0.05f, en.fire_rate);
     if (--en.burst_left <= 0) en.burst_cooldown = 2.4f + frand() * 2.4f;
     const glm::vec3 chest = en.pos + glm::vec3(0.f, 1.35f, 0.f);
     const glm::vec3 dir = glm::normalize(eye - chest);
     const glm::vec3 muz = chest + dir * 0.3f;
-    const float sp = 0.7f + dist * 0.09f;
+    const float sp = en.spread + dist * 0.0015f;
     const glm::vec3 aim =
         eye + glm::vec3((frand() - 0.5f), (frand() - 0.5f), (frand() - 0.5f)) * sp;
-    state_.tracers.push_back({muz, aim, 0.05f});
-    const float phit = std::clamp(0.42f - dist / 70.f, 0.02f, 0.3f);
-    if (frand() < phit && !input.deploy_open) {
-      state_.player_health -= 4.f + frand() * 4.f;
-      state_.player_regen_delay = 3.f;
+    const glm::vec3 shot_dir = glm::normalize(aim - muz);
+    state_.tracers.push_back({muz, aim, 0.08f});
+    spawn_muzzle_smoke_fx(state_.smoke, muz, shot_dir);
+    bool hit_player = false;
+    if (!input.deploy_open && state_.in_vehicle < 0) {
+      const glm::vec3 to_eye = eye - muz;
+      const float along = glm::dot(to_eye, shot_dir);
+      if (along > 0.5f && along < dist + 1.5f) {
+        const glm::vec3 closest = muz + shot_dir * along;
+        if (glm::length(closest - eye) < 0.55f) hit_player = true;
+      }
+      if (!hit_player && params_.world) {
+        const auto los = params_.world->raycast({muz.x, muz.y, muz.z},
+                                                {shot_dir.x, shot_dir.y, shot_dir.z}, dist + 2.f);
+        if (!los.hit || los.distance >= dist - 0.8f) {
+          const glm::vec3 to_eye2 = eye - muz;
+          const float along2 = glm::dot(to_eye2, shot_dir);
+          if (along2 > 0.f && along2 < dist + 1.f) {
+            const glm::vec3 closest2 = muz + shot_dir * along2;
+            if (glm::length(closest2 - eye) < 0.65f) hit_player = true;
+          }
+        }
+      }
+    }
+    if (hit_player) {
+      const float base_dmg = en.damage > 1.f ? en.damage : 12.f;
+      hurt_player(base_dmg * (0.75f + frand() * 0.35f));
     }
   }
   if (state_.player_health <= 0.f && !input.deploy_open && !state_.match_over) {
@@ -820,7 +1144,18 @@ void GameSim::decay_effects(float dt) {
   state_.flares.erase(std::remove_if(state_.flares.begin(), state_.flares.end(),
                                      [](const Flare& f) { return f.life <= 0.f; }),
                       state_.flares.end());
-  for (auto& s : state_.smoke) s.age += dt;
+  for (auto& s : state_.smoke) {
+    s.age += dt;
+    s.p += s.vel * dt;
+    s.vel.y -= 1.8f * dt;
+    s.vel *= 1.f - 0.8f * dt;
+    if (s.use_graphs) {
+      const float t = s.life > 0.f ? glm::clamp(s.age / s.life, 0.f, 1.f) : 1.f;
+      s.size = s.birth_size * std::max(0.05f, s.size_graph.eval(t));
+    } else {
+      s.size += dt * (s.kind == 2 ? 1.6f : 0.45f);
+    }
+  }
   for (auto& ex : state_.explosions) ex.age += dt;
   state_.smoke.erase(std::remove_if(state_.smoke.begin(), state_.smoke.end(),
                                     [](const Smoke& s) { return s.age >= s.life; }),
@@ -880,6 +1215,7 @@ void GameSim::tick_fixed(float dt, const PlayerInput& input) {
   step_vehicle_interaction(input);
   step_rotor_spool(dt, input);
   step_vehicles(dt, input);
+  step_vehicle_fatal_collisions();
   if (state_.in_vehicle < 0) {
     step_player_on_foot(dt, input);
     step_push_player_from_hulls();

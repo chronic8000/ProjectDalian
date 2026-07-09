@@ -97,6 +97,14 @@ MapConquestLayout parse_map_conquest(const std::string& gameplay_script) {
           ls >> it->second.bf2_id;
         } else if (lc == "objecttemplate.radius") {
           ls >> it->second.radius;
+        } else if (lc == "objecttemplate.areavalueteam1") {
+          ls >> it->second.area_value_team1;
+        } else if (lc == "objecttemplate.areavalueteam2") {
+          ls >> it->second.area_value_team2;
+        } else if (lc == "objecttemplate.unabletochangeteam") {
+          int v = 0;
+          ls >> v;
+          it->second.unable_to_change_team = v != 0;
         }
       }
     }
@@ -156,6 +164,7 @@ ObjectTemplate.create ControlPoint CPNAME_DP_16_powerplant
 ObjectTemplate.team 1
 ObjectTemplate.controlPointId 401
 ObjectTemplate.radius 15
+ObjectTemplate.areaValueTeam1 25
 Object.create CPNAME_DP_16_powerplant
 Object.absolutePosition 0/10/0
 ObjectTemplate.create ControlPoint CPNAME_DP_16_constructionsite
@@ -172,6 +181,8 @@ Object.absolutePosition 1/11/1
   const MapConquestLayout layout = parse_map_conquest(sample);
   if (layout.control_points.size() != 2) return false;
   if (layout.control_points[0].initial_team != TeamId::Team1) return false;
+  if (layout.control_points[0].area_value_team1 != 25) return false;
+  if (layout.control_points[0].unable_to_change_team) return false;
   if (layout.control_points[1].initial_team != TeamId::Team2) return false;
   if (layout.soldier_spawns.size() != 1) return false;
   return layout.soldier_spawns[0].bf2_cp_id == 401;

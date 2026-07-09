@@ -144,6 +144,17 @@ public:
   void draw_lines(const float* mvp, const float* xyz, int vertex_count, float r, float g, float b,
                   float width, bool depth_test);
 
+  // Camera-facing additive/textured sprites (smoke, fire, tracers).
+  struct BillboardParticle {
+    float x, y, z;
+    float size;
+    float r, g, b, a;
+    float kind;  // 0=smoke, 1=exhaust, 2=afterburner, 3=explosion_fire
+  };
+  void draw_billboards(const float* view_proj, const float* cam_pos, const BillboardParticle* parts,
+                       int count, std::uint32_t smoke_tex, std::uint32_t fire_tex,
+                       bool additive = true);
+
   // ---- 2D UI (menus / HUD) --------------------------------------------------
   // Screen-space, top-left origin (y grows downward), alpha-blended, no depth.
   // Call begin_ui() once, issue ui_rect/ui_text, then end_ui() to restore state.
@@ -202,7 +213,8 @@ public:
   // Full-screen gradient sky. inv_view_proj reconstructs world ray directions;
   // the gradient runs from horizon_color (at the horizon) to sky_color (zenith).
   void draw_sky(const float* inv_view_proj, const float* cam_pos3, const float* sky_color3,
-                const float* horizon_color3);
+                const float* horizon_color3, std::uint32_t cloud_tex = 0, float cloud_scroll_u = 0.f,
+                float cloud_scroll_v = 0.f, float cloud_strength = 0.55f);
 
   // Translucent animated water plane at world height level_y, centred on the
   // camera's XZ and extending half_extent metres in every direction.
@@ -230,6 +242,9 @@ private:
     std::uint32_t grass_program_ = 0;
     std::uint32_t line_vao_ = 0;
     std::uint32_t line_vbo_ = 0;
+    std::uint32_t particle_program_ = 0;
+    std::uint32_t particle_vao_ = 0;
+    std::uint32_t particle_vbo_ = 0;
     std::uint32_t ui_program_ = 0;
     std::uint32_t ui_tex_program_ = 0;
     std::uint32_t ui_vao_ = 0;

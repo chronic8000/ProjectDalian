@@ -16,6 +16,9 @@ struct ParsedControlPoint {
   TeamId initial_team = TeamId::Neutral;
   float radius = 15.f;
   glm::vec3 pos{};
+  int area_value_team1 = 0;
+  int area_value_team2 = 0;
+  bool unable_to_change_team = false;
 };
 
 struct ParsedSoldierSpawn {

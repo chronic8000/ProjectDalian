@@ -50,30 +50,32 @@ void step_control_point_capture(ControlPoint& cp, const ConquestPresence& presen
 
 void step_ticket_bleed(TicketState& tickets, const ControlPoint* points, std::size_t count,
                        float dt, const ConquestConfig& cfg) {
-  int t1_owned = 0;
-  int t2_owned = 0;
+  int area_team1 = 0;
+  int area_team2 = 0;
   for (std::size_t i = 0; i < count; ++i) {
-    if (!points[i].capturable) continue;
-    if (points[i].owner == TeamId::Team1) ++t1_owned;
-    else if (points[i].owner == TeamId::Team2) ++t2_owned;
+    if (points[i].owner == TeamId::Team1) area_team1 += points[i].area_value_team1;
+    else if (points[i].owner == TeamId::Team2) area_team2 += points[i].area_value_team2;
   }
 
-  const float bleed = cfg.bleed_per_flag * dt;
-  if (t1_owned > t2_owned) {
-    tickets.team2_bleed_accum += (t1_owned - t2_owned) * bleed;
-    const int whole = static_cast<int>(tickets.team2_bleed_accum);
+  const int overweight = area_team1 - area_team2;
+  auto drain_loser = [&](int loser_area, int winner_area, int winner_overweight, int& loser_tickets,
+                         float& loser_accum) {
+    if (winner_area < 100 || winner_overweight <= 0) return;
+    const float rate =
+        (cfg.ticket_loss_per_min / 60.f) * (static_cast<float>(winner_overweight) / 100.f);
+    loser_accum += rate * dt;
+    const int whole = static_cast<int>(loser_accum);
     if (whole > 0) {
-      tickets.team2_tickets -= whole;
-      tickets.team2_bleed_accum -= static_cast<float>(whole);
+      loser_tickets -= whole;
+      loser_accum -= static_cast<float>(whole);
     }
-  } else if (t2_owned > t1_owned) {
-    tickets.team1_bleed_accum += (t2_owned - t1_owned) * bleed;
-    const int whole = static_cast<int>(tickets.team1_bleed_accum);
-    if (whole > 0) {
-      tickets.team1_tickets -= whole;
-      tickets.team1_bleed_accum -= static_cast<float>(whole);
-    }
-  }
+  };
+
+  drain_loser(area_team2, area_team1, overweight, tickets.team2_tickets,
+              tickets.team2_bleed_accum);
+  drain_loser(area_team1, area_team2, -overweight, tickets.team1_tickets,
+              tickets.team1_bleed_accum);
+
   tickets.team1_tickets = std::max(0, tickets.team1_tickets);
   tickets.team2_tickets = std::max(0, tickets.team2_tickets);
 }
@@ -114,23 +116,36 @@ bool conquest_sim_self_test() {
 
   TicketState t{100, 100};
   ControlPoint owned[2];
-  owned[0].capturable = true;
   owned[0].owner = TeamId::Team1;
-  owned[1].capturable = true;
-  owned[1].owner = TeamId::Team1;
-  for (int i = 0; i < 50; ++i) step_ticket_bleed(t, owned, 2, 1.f, cfg);
+  owned[0].area_value_team1 = 100;
+  owned[1].owner = TeamId::Team2;
+  owned[1].area_value_team2 = 50;
+  for (int i = 0; i < 300; ++i) step_ticket_bleed(t, owned, 2, 1.f, cfg);
   if (t.team2_tickets >= 100) return false;
   if (check_ticket_victory(t) != TeamId::Neutral) return false;
 
-  // High-frequency bleed must not drain a ticket every frame (old ceil bug).
+  // Balanced area ownership must not bleed (retail gpm_cq threshold).
+  TicketState balanced{100, 100};
+  ControlPoint even[4];
+  even[0].owner = TeamId::Team1;
+  even[0].area_value_team1 = 50;
+  even[1].owner = TeamId::Team1;
+  even[1].area_value_team1 = 50;
+  even[2].owner = TeamId::Team2;
+  even[2].area_value_team2 = 50;
+  even[3].owner = TeamId::Team2;
+  even[3].area_value_team2 = 50;
+  for (int i = 0; i < 600; ++i) step_ticket_bleed(balanced, even, 4, 1.f / 60.f, cfg);
+  if (balanced.team1_tickets != 100 || balanced.team2_tickets != 100) return false;
+
   TicketState fast{100, 100};
   ControlPoint adv[3];
-  adv[0].capturable = true;
   adv[0].owner = TeamId::Team2;
-  adv[1].capturable = true;
+  adv[0].area_value_team2 = 100;
   adv[1].owner = TeamId::Team2;
-  adv[2].capturable = true;
+  adv[1].area_value_team2 = 50;
   adv[2].owner = TeamId::Team1;
+  adv[2].area_value_team1 = 25;
   for (int i = 0; i < 120; ++i) step_ticket_bleed(fast, adv, 3, 1.f / 60.f, cfg);
   if (fast.team1_tickets <= 50) return false;
 

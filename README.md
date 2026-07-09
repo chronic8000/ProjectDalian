@@ -118,6 +118,16 @@ its respective owner.
 - **Boat buoyancy** — sea vehicles float at the water plane instead of driving the
   seabed
 
+**Combat & vehicles (v0.5.0-alpha):**
+- **Vehicle weapon profiles** — heli minigun/rockets, tank main gun from retail vehicle `.tweak`
+- **Distinct missiles** — SAM vs AT/RPG projectile templates (`igla`, `at_predator`, `insgr_rpg`)
+- **Handheld depth** — deviation ramp, burst fire, `e_bhit_*` impacts, tweak `addTemplate` chains
+- **AI kit weapons** — defenders use retail rifle fire rate/damage/spread
+- **Placement audit** — `placement_audit` tool flags floating/embedded props (`docs/PARITY.md`)
+
+See **[docs/PARITY.md](docs/PARITY.md)** for the full gap list (afterburner particles, jet tuning,
+multiplayer, conquest, static prop heights, etc.).
+
 **Audio (SDL_mixer, reads retail BF2 archives):**
 - Weapon fire / reload / deploy sounds parsed from weapon `.tweak` files
 - Voice lines from `VoiceMessages*.con` (reload, grenade, out-of-ammo, etc.)

@@ -16,8 +16,8 @@ for (auto& cp : state_.control_points) {
   for (const auto& en : state_.enemies) {
     if (!en.alive) continue;
     if (xz_distance_sq(en.pos, cp.pos) <= cp.radius * cp.radius) {
-      presence.team2 = true;
-      break;
+      if (en.team == TeamId::Team1) presence.team1 = true;
+      else if (en.team == TeamId::Team2) presence.team2 = true;
     }
   }
 

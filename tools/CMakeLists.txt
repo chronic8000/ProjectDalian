@@ -1,3 +1,5 @@
 add_subdirectory(meshinfo)
 add_subdirectory(assetprobe)
 add_subdirectory(snapshot)
+add_subdirectory(level_validator)
+add_subdirectory(placement_audit)

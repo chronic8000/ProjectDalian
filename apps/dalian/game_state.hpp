@@ -53,6 +53,11 @@ struct GameState {
   int reserve_ammo = 90;
   bool reloading = false;
   float reload_timer = 0.f;
+  float fire_deviation = 0.02f;
+  int shots_fired = 0;
+  int burst_shots_left = 0;
+  float burst_pause_timer = 0.f;
+  bool fire_was_down = false;
 
   glm::vec3 wind_base{2.6f, 0.f, 1.4f};
   glm::vec3 wind{2.6f, 0.f, 1.4f};

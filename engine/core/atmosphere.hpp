@@ -14,21 +14,36 @@
 namespace bf2 {
 
 struct Atmosphere {
-  // Sun.
-  glm::vec3 sun_dir{0.4f, -0.82f, -0.4f};  // direction the light travels (down)
+  // Sun / moon (night maps use dim sunColor).
+  glm::vec3 sun_dir{0.4f, -0.82f, -0.4f};
   glm::vec3 sun_color{1.3f, 1.2f, 1.05f};
+  glm::vec3 sun_spec_color{0.9f, 0.88f, 0.82f};
 
   // Sky gradient.
-  glm::vec3 sky_color{0.35f, 0.55f, 0.85f};      // zenith
-  glm::vec3 horizon_color{0.78f, 0.82f, 0.88f};  // horizon / fog colour
+  glm::vec3 sky_color{0.35f, 0.55f, 0.85f};
+  glm::vec3 horizon_color{0.78f, 0.82f, 0.88f};
+  glm::vec3 terrain_sun_color{1.f, 0.95f, 0.85f};
+  glm::vec3 terrain_sky_color{0.5f, 0.6f, 0.75f};
 
-  // Distance fog (world metres). fog_end <= 0 disables fog.
+  // Fog.
   float fog_start = 350.f;
   float fog_end = 1600.f;
+  glm::vec3 fog_color{0.78f, 0.82f, 0.88f};
+
+  // Skydome / clouds (texture vpaths without extension).
+  std::string sky_texture;
+  std::string cloud_texture;
+  glm::vec2 cloud_scroll{0.002f, 0.f};
+  float cloud_fade_start = 800.f;
+  float cloud_fade_end = 4000.f;
+  bool has_cloud_layer = false;
+
+  bool is_night = false;
+  float water_sun_intensity = 1.f;
 
   // Water plane.
   bool has_water = false;
-  float water_level = 0.f;  // world Y
+  float water_level = 0.f;
   glm::vec3 water_color{0.10f, 0.13f, 0.16f};
 };
 
@@ -95,8 +110,58 @@ inline Atmosphere parse_atmosphere(const std::string& water_con, const std::stri
       detail::parse_triple(args, v) == 3) {
     a.sky_color = glm::vec3(v[0], v[1], v[2]);
   }
-  // Horizon/fog colour: a paler version of the zenith sky for an atmospheric haze.
-  a.horizon_color = glm::mix(a.sky_color, glm::vec3(0.9f, 0.92f, 0.95f), 0.55f);
+  if (detail::find_command(sky_con, "Lightmanager.sunSpecColor", args) &&
+      detail::parse_triple(args, v) == 3) {
+    a.sun_spec_color = glm::vec3(v[0], v[1], v[2]);
+  }
+  if (detail::find_command(sky_con, "LightSettings.TerrainSunColor", args) &&
+      detail::parse_triple(args, v) == 3) {
+    a.terrain_sun_color = glm::vec3(v[0], v[1], v[2]);
+  }
+  if (detail::find_command(sky_con, "LightSettings.TerrainSkyColor", args) &&
+      detail::parse_triple(args, v) == 3) {
+    a.terrain_sky_color = glm::vec3(v[0], v[1], v[2]);
+  }
+  if (detail::find_command(sky_con, "Renderer.fogColor", args) &&
+      detail::parse_triple(args, v) == 3) {
+    a.fog_color = glm::vec3(v[0], v[1], v[2]);
+    a.horizon_color = a.fog_color;
+  }
+  if (detail::find_command(sky_con, "Renderer.fogStartEndAndBase", args)) {
+    float fs = 0.f, fe = 0.f, fb = 0.f;
+    std::istringstream is(args);
+    if (is >> fs >> fe >> fb) {
+      a.fog_start = fs;
+      a.fog_end = fe;
+    }
+  }
+  if (detail::find_command(sky_con, "LightmapSettings.waterSunIntensity", args)) {
+    std::istringstream is(args);
+    is >> a.water_sun_intensity;
+  }
+  if (detail::find_command(sky_con, "Skydome.skyTexture", args)) {
+    a.sky_texture = args;
+    for (char& c : a.sky_texture) {
+      if (c == '\\') c = '/';
+    }
+  }
+  if (detail::find_command(sky_con, "Skydome.cloudTexture(2)", args) ||
+      detail::find_command(sky_con, "Skydome.cloudTexture", args)) {
+    a.cloud_texture = args;
+    for (char& c : a.cloud_texture) {
+      if (c == '\\') c = '/';
+    }
+    a.has_cloud_layer = !a.cloud_texture.empty();
+  }
+  if (detail::find_command(sky_con, "Skydome.scrolldirection(2)", args) &&
+      detail::parse_triple(args, v) >= 2) {
+    a.cloud_scroll = glm::vec2(v[0], v[1]);
+  }
+  const float sun_avg = (a.sun_color.r + a.sun_color.g + a.sun_color.b) / 3.f;
+  const float sky_avg = (a.sky_color.r + a.sky_color.g + a.sky_color.b) / 3.f;
+  a.is_night = sun_avg < 0.45f && sky_avg < 0.35f;
+  if (!a.is_night && sky_avg < 0.25f) a.is_night = true;
+  a.horizon_color = glm::mix(a.sky_color, a.fog_color, 0.55f);
 
   // --- Water.con: water tint (0-1). ---
   if (detail::find_command(water_con, "renderer.waterColor", args) &&

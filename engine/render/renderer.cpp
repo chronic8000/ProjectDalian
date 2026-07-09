@@ -9,6 +9,8 @@
 #include <stdexcept>
 #include <vector>
 
+#include <glm/glm.hpp>
+
 #include "stb_easy_font.h"
 
 namespace bf2 {
@@ -654,12 +656,23 @@ std::uint32_t create_sky_program() {
     uniform vec3 uHorizonColor;
     uniform vec3 uSunDir;
     uniform vec3 uSunColor;
+    uniform sampler2D uCloudTex;
+    uniform float uCloudStrength;
+    uniform vec2 uCloudScroll;
+    uniform bool uHasCloud;
     out vec4 FragColor;
     void main() {
       vec4 world = uInvViewProj * vec4(vNdc, 1.0, 1.0);
       vec3 dir = normalize(world.xyz / world.w - uCamPos);
       float t = clamp(dir.y, 0.0, 1.0);
       vec3 col = mix(uHorizonColor, uSkyColor, pow(t, 0.55));
+      if (uHasCloud && t > 0.02) {
+        vec2 uv = vec2(atan(dir.z, dir.x) * 0.15915 + 0.5 + uCloudScroll.x,
+                       t + uCloudScroll.y);
+        vec4 cld = texture(uCloudTex, uv * vec2(2.0, 1.0));
+        float cloudA = cld.a * uCloudStrength * smoothstep(0.05, 0.35, t);
+        col = mix(col, cld.rgb, cloudA);
+      }
       // Soft sun glow toward the sun (light comes from -uSunDir).
       if (length(uSunDir) > 0.001) {
         float s = max(dot(dir, normalize(-uSunDir)), 0.0);
@@ -759,6 +772,51 @@ std::uint32_t create_water_program() {
     }
   )";
 
+  const auto vs = compile_shader(GL_VERTEX_SHADER, vertex_src);
+  const auto fs = compile_shader(GL_FRAGMENT_SHADER, fragment_src);
+  const auto program = glCreateProgram();
+  glAttachShader(program, vs);
+  glAttachShader(program, fs);
+  glLinkProgram(program);
+  glDeleteShader(vs);
+  glDeleteShader(fs);
+  return program;
+}
+
+std::uint32_t create_particle_program() {
+  const char* vertex_src = R"(
+    #version 330 core
+    layout(location = 0) in vec3 aCenter;
+    layout(location = 1) in vec2 aCorner;
+    layout(location = 2) in float aSize;
+    layout(location = 3) in vec4 aColor;
+    uniform mat4 uViewProj;
+    uniform vec3 uCamRight;
+    uniform vec3 uCamUp;
+    out vec2 vUv;
+    out vec4 vColor;
+    void main() {
+      vec3 world = aCenter + (uCamRight * aCorner.x + uCamUp * aCorner.y) * aSize;
+      vUv = aCorner * 0.5 + 0.5;
+      vColor = aColor;
+      gl_Position = uViewProj * vec4(world, 1.0);
+    }
+  )";
+  const char* fragment_src = R"(
+    #version 330 core
+    in vec2 vUv;
+    in vec4 vColor;
+    uniform sampler2D uTex;
+    uniform float uUseFire;
+    out vec4 FragColor;
+    void main() {
+      vec4 t = texture(uTex, vUv);
+      float a = t.a * vColor.a;
+      if (uUseFire > 0.5) a = max(a, (t.r + t.g + t.b) * 0.35) * vColor.a;
+      if (a < 0.02) discard;
+      FragColor = vec4(t.rgb * vColor.rgb, a);
+    }
+  )";
   const auto vs = compile_shader(GL_VERTEX_SHADER, vertex_src);
   const auto fs = compile_shader(GL_FRAGMENT_SHADER, fragment_src);
   const auto program = glCreateProgram();
@@ -1020,6 +1078,7 @@ bool Renderer::initialize(void* sdl_window) {
   glGenBuffers(1, &ui_tex_vbo_);
   sky_program_ = create_sky_program();
   water_program_ = create_water_program();
+  particle_program_ = create_particle_program();
   grass_program_ = create_grass_program();
   shadow_depth_program_ = create_depth_program();
   post_program_ = create_post_program();
@@ -1133,6 +1192,18 @@ void Renderer::shutdown() {
   if (water_program_ != 0) {
     glDeleteProgram(water_program_);
     water_program_ = 0;
+  }
+  if (particle_program_ != 0) {
+    glDeleteProgram(particle_program_);
+    particle_program_ = 0;
+  }
+  if (particle_vao_ != 0) {
+    glDeleteVertexArrays(1, &particle_vao_);
+    particle_vao_ = 0;
+  }
+  if (particle_vbo_ != 0) {
+    glDeleteBuffers(1, &particle_vbo_);
+    particle_vbo_ = 0;
   }
   if (grass_program_ != 0) {
     glDeleteProgram(grass_program_);
@@ -1811,6 +1882,73 @@ void Renderer::draw_lines(const float* mvp, const float* xyz, int vertex_count, 
   }
 }
 
+void Renderer::draw_billboards(const float* view_proj, const float* cam_pos,
+                               const BillboardParticle* parts, int count,
+                               std::uint32_t smoke_tex, std::uint32_t fire_tex, bool additive) {
+  if (!initialized_ || particle_program_ == 0 || parts == nullptr || count <= 0) return;
+  const std::uint32_t tex = smoke_tex ? smoke_tex : fire_tex;
+  if (tex == 0) return;
+
+  if (particle_vao_ == 0) {
+    glGenVertexArrays(1, &particle_vao_);
+    glGenBuffers(1, &particle_vbo_);
+  }
+
+  // World-aligned billboards (good enough for smoke/exhaust columns).
+  const glm::vec3 cam_right(1.f, 0.f, 0.f);
+  const glm::vec3 cam_up(0.f, 1.f, 0.f);
+  (void)cam_pos;
+
+  struct Vtx {
+    float cx, cy, cz, crx, cry, sz, r, g, b, a;
+  };
+  std::vector<Vtx> verts;
+  verts.reserve(static_cast<std::size_t>(count) * 6);
+  static const float kQuad[4][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
+  static const int kIdx[6] = {0, 1, 2, 0, 2, 3};
+  for (int i = 0; i < count; ++i) {
+    const auto& p = parts[i];
+    const bool fire = p.kind >= 2.f;
+    (void)fire;
+    for (int t = 0; t < 6; ++t) {
+      const int q = kIdx[t];
+      verts.push_back({p.x, p.y, p.z, kQuad[q][0], kQuad[q][1], p.size, p.r, p.g, p.b, p.a});
+    }
+  }
+
+  glBindVertexArray(particle_vao_);
+  glBindBuffer(GL_ARRAY_BUFFER, particle_vbo_);
+  glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts.size() * sizeof(Vtx)), verts.data(),
+               GL_DYNAMIC_DRAW);
+  glEnableVertexAttribArray(0);
+  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vtx), reinterpret_cast<void*>(0));
+  glEnableVertexAttribArray(1);
+  glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vtx),
+                        reinterpret_cast<void*>(3 * sizeof(float)));
+  glEnableVertexAttribArray(2);
+  glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, sizeof(Vtx),
+                        reinterpret_cast<void*>(5 * sizeof(float)));
+  glEnableVertexAttribArray(3);
+  glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, sizeof(Vtx),
+                        reinterpret_cast<void*>(6 * sizeof(float)));
+
+  glUseProgram(particle_program_);
+  glUniformMatrix4fv(glGetUniformLocation(particle_program_, "uViewProj"), 1, GL_FALSE, view_proj);
+  glUniform3f(glGetUniformLocation(particle_program_, "uCamRight"), cam_right.x, cam_right.y,
+              cam_right.z);
+  glUniform3f(glGetUniformLocation(particle_program_, "uCamUp"), cam_up.x, cam_up.y, cam_up.z);
+  glUniform1i(glGetUniformLocation(particle_program_, "uTex"), 0);
+  glActiveTexture(GL_TEXTURE0);
+  glBindTexture(GL_TEXTURE_2D, tex);
+  glEnable(GL_BLEND);
+  glBlendFunc(additive ? GL_SRC_ALPHA : GL_SRC_ALPHA, additive ? GL_ONE : GL_ONE_MINUS_SRC_ALPHA);
+  glDepthMask(GL_FALSE);
+  glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(verts.size()));
+  glDepthMask(GL_TRUE);
+  glDisable(GL_BLEND);
+  glBindVertexArray(0);
+}
+
 // ---- 2D UI ----------------------------------------------------------------
 
 namespace {
@@ -2229,7 +2367,8 @@ void Renderer::present_scene(float degrade, float time_seconds) {
 }
 
 void Renderer::draw_sky(const float* inv_view_proj, const float* cam_pos3, const float* sky_color3,
-                        const float* horizon_color3) {
+                        const float* horizon_color3, std::uint32_t cloud_tex, float cloud_scroll_u,
+                        float cloud_scroll_v, float cloud_strength) {
   if (!initialized_ || sky_program_ == 0) {
     return;
   }
@@ -2241,6 +2380,15 @@ void Renderer::draw_sky(const float* inv_view_proj, const float* cam_pos3, const
   glUniform3fv(glGetUniformLocation(sky_program_, "uSunDir"), 1, env_sun_);
   static const float kSun[3] = {1.3f, 1.2f, 1.0f};
   glUniform3fv(glGetUniformLocation(sky_program_, "uSunColor"), 1, kSun);
+  const bool has_cloud = cloud_tex != 0;
+  glUniform1i(glGetUniformLocation(sky_program_, "uHasCloud"), has_cloud ? 1 : 0);
+  glUniform1f(glGetUniformLocation(sky_program_, "uCloudStrength"), cloud_strength);
+  glUniform2f(glGetUniformLocation(sky_program_, "uCloudScroll"), cloud_scroll_u, cloud_scroll_v);
+  glUniform1i(glGetUniformLocation(sky_program_, "uCloudTex"), 0);
+  if (has_cloud) {
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, cloud_tex);
+  }
   // The sky is a background: draw it without disturbing the depth buffer.
   glDepthMask(GL_FALSE);
   glDisable(GL_DEPTH_TEST);

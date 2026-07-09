@@ -54,6 +54,8 @@ add_library(bf2engine STATIC
   formats/dds/dds_loader.cpp
   formats/animation/bf2_animation.cpp
   formats/collision/bf2_collision.cpp
+  formats/effects/effect_bundle.cpp
+  formats/nav/bf2_nav_mesh.cpp
   formats/terrain/terrain_loader.cpp
   formats/terrain/terrain_colormap.cpp
   formats/terrain/terrain_con_parser.cpp
@@ -68,6 +70,9 @@ add_library(bf2engine STATIC
   core/overgrowth_instances.cpp
   core/compiled_roads_parser.cpp
   core/asset_audit.cpp
+  core/level_validator.cpp
+  core/mesh_bounds.cpp
+  core/placement_audit.cpp
   core/template_resolver.cpp
   render/renderer.cpp
   render/texture_cache.cpp
