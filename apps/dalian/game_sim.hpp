@@ -80,6 +80,7 @@ public:
   void hurt_player(float damage, int killer_enemy_idx = -1, const char* killer_override = nullptr);
   bool can_team_spawn_at(const glm::vec3& pos, TeamId team, float epsilon = 2.5f) const;
   bool can_team_spawn_at_cp(int bf2_cp_id, TeamId team) const;
+  void sync_vehicle_transform(Vehicle& v) const { rebuild_vehicle_model(v); }
   snapshot::GameState build_snapshot(std::uint32_t local_player_id = 1,
                                      float player_yaw_deg = 0.f) const;
 

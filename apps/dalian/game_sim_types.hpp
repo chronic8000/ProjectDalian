@@ -137,6 +137,12 @@ struct VehicleGearSlot {
 struct Vehicle {
   std::string mesh_key;
   glm::mat4 model{1.f};
+  glm::vec3 spawn_pos{};
+  float spawn_heading = 0.f;
+  float spawn_pitch = 0.f;
+  float spawn_roll = 0.f;
+  float health = 1000.f;
+  bool destroyed = false;
   glm::vec3 origin{};
   std::vector<VehiclePart> parts;
   glm::vec3 pos{};

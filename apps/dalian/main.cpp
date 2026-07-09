@@ -18,6 +18,7 @@
 #include "loading_screen.hpp"
 #include "bot_names.hpp"
 #include "hud_feed.hpp"
+#include "mp_sync.hpp"
 #include "ui_layout.hpp"
 #include "factions.hpp"
 #include "game_audio.hpp"
@@ -1780,6 +1781,10 @@ int main(int argc, char** argv) {
       place.y = surfY + v.clearance;
       v.origin = place;
       v.pos = place;
+      v.spawn_pos = place;
+      v.spawn_heading = vs.rot.x;
+      v.spawn_pitch = vs.rot.y;
+      v.spawn_roll = vs.rot.z;
       v.heading = vs.rot.x;
       glm::mat4 m = glm::translate(glm::mat4(1.0f), place);
       m = glm::rotate(m, glm::radians(vs.rot.x), glm::vec3(0, 1, 0));
@@ -3286,6 +3291,7 @@ int main(int argc, char** argv) {
     float dt = static_cast<float>(now - prev) / static_cast<float>(SDL_GetPerformanceFrequency());
     prev = now;
     dt = std::clamp(dt, 0.f, 0.05f);
+    if (!deploy_open && !drone_mode) anim_time += dt;
 
     // Pump the network early so this frame renders the freshest remote states.
     // `net_fired` / `net_fire_*` capture a shot taken this frame for replication.
@@ -3643,18 +3649,10 @@ int main(int argc, char** argv) {
     if (net.active()) {
       bf2::NetPlayer me;
       me.id = net.local_id();
-      me.x = player.position.x;
-      me.y = player.position.y - player.eye_height;  // feet, matching body render
-      me.z = player.position.z;
-      me.yaw = yaw;
-      me.pitch = pitch;
-      const float spd = std::sqrt(player.desired_velocity.x * player.desired_velocity.x +
-                                  player.desired_velocity.z * player.desired_velocity.z);
-      me.anim = spd > 8.f ? 2 : (spd > 0.3f ? 1 : 0);
-      me.flags = net_fired ? 1 : 0;
-      me.health = static_cast<std::int16_t>(std::clamp(player_health, -32000.f, 32000.f));
-      me.faction_id = static_cast<std::uint16_t>(player_faction_id);
       me.active = true;
+      dalian::fill_net_player(me, player, yaw, pitch, anim_time, game_sim.state().infantry_pose,
+                              in_vehicle, vehicles, player_health,
+                              static_cast<std::uint16_t>(player_faction_id), net_fired);
       bf2::NetShot sh;
       if (net_fired) {
         sh.shooter = net.local_id();
@@ -3662,6 +3660,7 @@ int main(int argc, char** argv) {
         sh.dx = net_fire_d.x; sh.dy = net_fire_d.y; sh.dz = net_fire_d.z;
       }
       net.send_local(me, net_fired ? &sh : nullptr);
+      dalian::apply_mp_vehicle_sync(vehicles, net, in_vehicle, game_sim);
       // Remote shots: draw the tracer + impact locally so gunfire is visible.
       for (const auto& s : net.take_shots()) {
         const glm::vec3 o(s.ox, s.oy, s.oz), d(s.dx, s.dy, s.dz);
@@ -3858,7 +3857,7 @@ int main(int argc, char** argv) {
       return rest * tuck;
     };
     for (const auto& v : vehicles) {
-      const glm::vec3 d = v.origin - cam;
+      const glm::vec3 d = v.pos - cam;
       if (glm::dot(d, d) > draw_dist2) continue;
       const auto vit = vehicle_cache.find(v.mesh_key);
       if (vit != vehicle_cache.end() && vit->second.vao != 0) {
@@ -3951,7 +3950,6 @@ int main(int argc, char** argv) {
       }
 
       constexpr float kAnimFps = 30.f;
-      anim_time += dt;
       int frame = 0;
       if (clip && clip->frame_count > 0) {
         frame = static_cast<int>(anim_time * kAnimFps) % clip->frame_count;
@@ -4036,21 +4034,39 @@ int main(int argc, char** argv) {
     if (have_soldier && net.active()) {
       for (const auto& rp : net.players()) {
         if (!rp.active || rp.id == net.local_id()) continue;
+        if (rp.vehicle_id >= 0) continue;  // body hidden while driving; vehicle mesh shows instead
         const glm::vec3 rpos(rp.rx, rp.ry, rp.rz);
         if (glm::dot(rpos - cam, rpos - cam) > draw_dist2) continue;
+
+        const float rspd = std::sqrt(rp.vx * rp.vx + rp.vz * rp.vz);
+        dalian::SoldierAnimState ast;
+        ast.alive = rp.health > 0;
+        ast.pose = static_cast<dalian::SoldierPose>(rp.pose);
+        ast.moving = rspd > 0.3f || rp.anim > 0;
+        ast.move_speed = rspd;
+        ast.time = rp.anim_time;
+        float anim_rate = 1.f;
         const bf2::AnimationClip* clip =
-            (rp.anim == 2 && soldier_anims.run)    ? soldier_anims.run
-            : (rp.anim == 1 && soldier_anims.walk) ? soldier_anims.walk
-            : soldier_anims.stand                  ? soldier_anims.stand
-                                               : nullptr;
+            dalian::select_soldier_clip(soldier_anims, ast, anim_rate);
+        if (!clip && rp.anim == 2 && soldier_anims.run)
+          clip = soldier_anims.run;
+        else if (!clip && rp.anim == 1 && soldier_anims.walk)
+          clip = soldier_anims.walk;
+        else if (!clip && soldier_anims.stand)
+          clip = soldier_anims.stand;
+
         int frame = 0;
         if (clip && clip->frame_count > 0) {
-          frame = static_cast<int>(anim_time * 30.f) % clip->frame_count;
+          frame = static_cast<int>(rp.anim_time * 30.f * anim_rate) % clip->frame_count;
         }
         const auto palette = bf2::compute_skin_palette(soldier_src, soldier_ske, clip, frame, 1, 0);
         if (palette.empty()) continue;
+
+        float facing = glm::radians(rp.ryaw);
+        if (rspd > 0.35f) facing = std::atan2(rp.vx, rp.vz);
+
         glm::mat4 body = glm::translate(glm::mat4(1.0f), rpos);
-        body = glm::rotate(body, glm::radians(rp.ryaw), glm::vec3(0, 1, 0));
+        body = glm::rotate(body, facing, glm::vec3(0, 1, 0));
         const glm::mat4 body_mvp = view_proj * body;
         const std::uint16_t rfid =
             rp.faction_id ? rp.faction_id : net.lobby_player_faction(rp.id);

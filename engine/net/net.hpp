@@ -41,17 +41,27 @@ struct NetLobbyState {
 // Replicated per-player state. Kept flat and POD-friendly for cheap (de)serial.
 struct NetPlayer {
   std::uint32_t id = 0;
-  float x = 0.f, y = 0.f, z = 0.f;  // feet position (world)
+  float x = 0.f, y = 0.f, z = 0.f;  // feet position (world); vehicle center when driving
   float yaw = 0.f, pitch = 0.f;     // look angles (degrees)
-  std::uint8_t anim = 0;            // 0 idle, 1 walk, 2 run
+  std::uint8_t anim = 0;            // 0 idle, 1 walk, 2 run (legacy coarse bucket)
   std::uint8_t flags = 0;           // bit0: firing this tick
   std::int16_t health = 100;
   std::uint16_t faction_id = 0;
   bool active = false;  // slot currently occupied
 
+  // Extended replication (v2 wire tail — older clients ignore if packet ends early).
+  float vx = 0.f, vy = 0.f, vz = 0.f;
+  float anim_time = 0.f;
+  std::uint8_t pose = 0;  // dalian::SoldierPose as uint8
+  std::int16_t vehicle_id = -1;  // -1 on foot
+  float veh_heading = 0.f, veh_pitch = 0.f, veh_roll = 0.f;
+  float veh_rotor_rpm = 0.f, veh_rotor_spin = 0.f;
+
   // Client render-smoothing state (not serialized): the position we currently
   // draw the remote at, eased toward the latest received target each frame.
   float rx = 0.f, ry = 0.f, rz = 0.f, ryaw = 0.f, rpitch = 0.f;
+  float rveh_heading = 0.f, rveh_pitch = 0.f, rveh_roll = 0.f;
+  float rveh_rotor_rpm = 0.f, rveh_rotor_spin = 0.f;
   bool have_render = false;
 };
 

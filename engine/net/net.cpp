@@ -96,6 +96,21 @@ void write_player(std::vector<std::uint8_t>& b, const NetPlayer& pl) {
   put_u8(b, pl.flags);
   put_u16(b, std::uint16_t(pl.health));
   put_u16(b, pl.faction_id);
+  // v2 tail
+  put_f32(b, pl.vx);
+  put_f32(b, pl.vy);
+  put_f32(b, pl.vz);
+  put_f32(b, pl.anim_time);
+  put_u8(b, pl.pose);
+  if (pl.vehicle_id < 0)
+    put_u16(b, 0xffff);
+  else
+    put_u16(b, static_cast<std::uint16_t>(pl.vehicle_id));
+  put_f32(b, pl.veh_heading);
+  put_f32(b, pl.veh_pitch);
+  put_f32(b, pl.veh_roll);
+  put_f32(b, pl.veh_rotor_rpm);
+  put_f32(b, pl.veh_rotor_spin);
 }
 NetPlayer read_player(Reader& r) {
   NetPlayer pl;
@@ -109,6 +124,20 @@ NetPlayer read_player(Reader& r) {
   pl.flags = r.u8();
   pl.health = std::int16_t(r.u16());
   if (r.o < r.n) pl.faction_id = r.u16();
+  if (r.o + 4 * 8 + 1 + 2 <= r.n) {
+    pl.vx = r.f32();
+    pl.vy = r.f32();
+    pl.vz = r.f32();
+    pl.anim_time = r.f32();
+    pl.pose = r.u8();
+    const std::uint16_t vid = r.u16();
+    pl.vehicle_id = vid == 0xffff ? std::int16_t(-1) : static_cast<std::int16_t>(vid);
+    pl.veh_heading = r.f32();
+    pl.veh_pitch = r.f32();
+    pl.veh_roll = r.f32();
+    pl.veh_rotor_rpm = r.f32();
+    pl.veh_rotor_spin = r.f32();
+  }
   pl.active = true;
   return pl;
 }
@@ -404,6 +433,9 @@ void Net::handle_packet(const std::uint8_t* data, std::size_t len, void* from_pe
         // it's a listen server, which smooths in poll()).
         in.rx = s->rx; in.ry = s->ry; in.rz = s->rz;
         in.ryaw = s->ryaw; in.rpitch = s->rpitch; in.have_render = s->have_render;
+        in.rveh_heading = s->rveh_heading; in.rveh_pitch = s->rveh_pitch;
+        in.rveh_roll = s->rveh_roll;
+        in.rveh_rotor_rpm = s->rveh_rotor_rpm; in.rveh_rotor_spin = s->rveh_rotor_spin;
         *s = in;
       }
       if (NetLobbyMember* m = lobby_member(pid, false)) m->faction_id = in.faction_id;
@@ -470,6 +502,9 @@ void Net::handle_packet(const std::uint8_t* data, std::size_t len, void* from_pe
         if (s) {
           in.rx = s->rx; in.ry = s->ry; in.rz = s->rz;
           in.ryaw = s->ryaw; in.rpitch = s->rpitch; in.have_render = s->have_render;
+          in.rveh_heading = s->rveh_heading; in.rveh_pitch = s->rveh_pitch;
+          in.rveh_roll = s->rveh_roll;
+          in.rveh_rotor_rpm = s->rveh_rotor_rpm; in.rveh_rotor_spin = s->rveh_rotor_spin;
           *s = in;
         }
       }
@@ -555,23 +590,42 @@ void Net::poll(float dt) {
   }
 
   // Ease each remote's rendered transform toward its latest received state so
-  // motion looks smooth between snapshots (basic interpolation/smoothing).
-  const float k = dt > 0.f ? 1.f - std::exp(-14.f * dt) : 1.f;
+  // motion looks smooth between snapshots (velocity-assisted extrapolation).
+  const float k = dt > 0.f ? 1.f - std::exp(-32.f * dt) : 1.f;
+  const float lead = dt > 0.f ? dt * 0.65f : 0.f;
   for (auto& p : players_) {
     if (!p.active) continue;
     if (!p.have_render) {
-      p.rx = p.x; p.ry = p.y; p.rz = p.z; p.ryaw = p.yaw; p.rpitch = p.pitch;
+      p.rx = p.x + p.vx * lead;
+      p.ry = p.y + p.vy * lead;
+      p.rz = p.z + p.vz * lead;
+      p.ryaw = p.yaw;
+      p.rpitch = p.pitch;
+      p.rveh_heading = p.veh_heading;
+      p.rveh_pitch = p.veh_pitch;
+      p.rveh_roll = p.veh_roll;
+      p.rveh_rotor_rpm = p.veh_rotor_rpm;
+      p.rveh_rotor_spin = p.veh_rotor_spin;
       p.have_render = true;
       continue;
     }
-    p.rx += (p.x - p.rx) * k;
-    p.ry += (p.y - p.ry) * k;
-    p.rz += (p.z - p.rz) * k;
+    const float tx = p.x + p.vx * lead;
+    const float ty = p.y + p.vy * lead;
+    const float tz = p.z + p.vz * lead;
+    p.rx += (tx - p.rx) * k;
+    p.ry += (ty - p.ry) * k;
+    p.rz += (tz - p.rz) * k;
     float dyaw = p.yaw - p.ryaw;
     while (dyaw > 180.f) dyaw -= 360.f;
     while (dyaw < -180.f) dyaw += 360.f;
     p.ryaw += dyaw * k;
     p.rpitch += (p.pitch - p.rpitch) * k;
+    auto smooth1 = [&](float& cur, float target) { cur += (target - cur) * k; };
+    smooth1(p.rveh_heading, p.veh_heading);
+    smooth1(p.rveh_pitch, p.veh_pitch);
+    smooth1(p.rveh_roll, p.veh_roll);
+    smooth1(p.rveh_rotor_rpm, p.veh_rotor_rpm);
+    smooth1(p.rveh_rotor_spin, p.veh_rotor_spin);
   }
 }
 
@@ -610,10 +664,14 @@ void Net::send_local(const NetPlayer& me, const NetShot* shot) {
       if (s) {
         const bool hr = s->have_render;
         const float rx = s->rx, ry = s->ry, rz = s->rz, ryaw = s->ryaw, rpitch = s->rpitch;
+        const float rvh = s->rveh_heading, rvp = s->rveh_pitch, rvr = s->rveh_roll;
+        const float rvrpm = s->rveh_rotor_rpm, rvspin = s->rveh_rotor_spin;
         *s = me;
         s->id = 0;
         s->active = true;
         s->rx = rx; s->ry = ry; s->rz = rz; s->ryaw = ryaw; s->rpitch = rpitch;
+        s->rveh_heading = rvh; s->rveh_pitch = rvp; s->rveh_roll = rvr;
+        s->rveh_rotor_rpm = rvrpm; s->rveh_rotor_spin = rvspin;
         s->have_render = hr;
       }
     }

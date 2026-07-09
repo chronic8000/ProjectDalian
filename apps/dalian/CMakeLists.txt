@@ -20,7 +20,7 @@ set(SDL2MIXER_MP3 ON CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(SDL_mixer)
 
-add_executable(project_dalian main.cpp menu.cpp controls_ui.cpp key_bindings.cpp loading_screen.cpp bot_names.cpp hud_feed.cpp ui_layout.cpp menu_background.cpp multiplayer_menu.cpp server_discovery.cpp menu_music.cpp audio_context.cpp game_audio.cpp game_sim.cpp conquest_sim.cpp game_snapshot.cpp map_conquest_parser.cpp game_logic_parser.cpp tweak_parser.cpp minimap_projector.cpp radial_menu.cpp hitbox_zones.cpp bf2_effects.cpp weapon_profile.cpp soldier_anim.cpp soldier_anim_library.cpp vehicle_tweak_profile.cpp vehicle_wing_profile.cpp vehicle_air_profile.cpp vehicle_weapon_profile.cpp projectile_profile.cpp ambient_emitter.cpp)
+add_executable(project_dalian main.cpp menu.cpp controls_ui.cpp key_bindings.cpp loading_screen.cpp bot_names.cpp hud_feed.cpp ui_layout.cpp mp_sync.cpp menu_background.cpp multiplayer_menu.cpp server_discovery.cpp menu_music.cpp audio_context.cpp game_audio.cpp game_sim.cpp conquest_sim.cpp game_snapshot.cpp map_conquest_parser.cpp game_logic_parser.cpp tweak_parser.cpp minimap_projector.cpp radial_menu.cpp hitbox_zones.cpp bf2_effects.cpp weapon_profile.cpp soldier_anim.cpp soldier_anim_library.cpp vehicle_tweak_profile.cpp vehicle_wing_profile.cpp vehicle_air_profile.cpp vehicle_weapon_profile.cpp projectile_profile.cpp ambient_emitter.cpp)
 target_include_directories(project_dalian PRIVATE ${CMAKE_SOURCE_DIR}/third_party/stb)
 target_link_libraries(project_dalian PRIVATE bf2engine SDL2_mixer::SDL2_mixer)
 
