@@ -35,8 +35,10 @@ for (auto& cp : state_.control_points) {
   }
 }
 
-step_ticket_bleed(state_.tickets, state_.control_points.data(), state_.control_points.size(), dt,
-                  conquest_cfg_);
+if (!params_.multiplayer || params_.connected_humans >= 2 || state_.round_time >= 90.f) {
+  step_ticket_bleed(state_.tickets, state_.control_points.data(), state_.control_points.size(), dt,
+                    conquest_cfg_);
+}
 
 if (!state_.team1_ticket_warned && state_.player_team == TeamId::Team1 &&
     state_.tickets.team1_tickets > 0 &&

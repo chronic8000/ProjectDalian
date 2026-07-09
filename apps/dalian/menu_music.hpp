@@ -11,7 +11,7 @@ class MenuMusic {
  public:
   bool init();
   void shutdown();
-  bool play_file(const std::string& path, float volume);
+  bool play_file(const std::string& path, float volume, int loops = -1);
   void set_volume(float volume);
   void stop();
   bool playing() const;
@@ -23,5 +23,6 @@ class MenuMusic {
 };
 
 std::string resolve_menu_music_path(const Settings& settings);
+std::string resolve_loading_music_path(const Settings& settings);
 
 }  // namespace dalian

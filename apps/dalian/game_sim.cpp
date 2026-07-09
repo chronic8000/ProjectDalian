@@ -176,12 +176,16 @@ void GameSim::begin_match() {
   state_.tickets.team2_bleed_accum = 0.f;
   state_.tickets.team1_tickets = conquest_cfg_.starting_tickets;
   state_.tickets.team2_tickets = conquest_cfg_.starting_tickets;
-  state_.tickets.team1_bleed_accum = 0.f;
-  state_.tickets.team2_bleed_accum = 0.f;
   if (!defenders_spawned_) {
     spawn_defenders();
     defenders_spawned_ = true;
   }
+}
+
+void GameSim::restart_round() { begin_match(); }
+
+void GameSim::set_connected_humans(int count) {
+  params_.connected_humans = std::max(1, count);
 }
 
 void GameSim::set_match_factions(int team1_faction, int team2_faction, TeamId player_team) {

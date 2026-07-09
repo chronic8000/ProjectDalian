@@ -451,6 +451,7 @@ void Net::handle_packet(const std::uint8_t* data, std::size_t len, void* from_pe
       local_id_ = r.u32();
       connected_ = true;
       if (!local_name_.empty()) send_join_info(local_name_, local_faction_);
+      std::printf("Net: welcomed as player id=%u\n", local_id_);
       if (std::getenv("BF2_NETDEBUG"))
         std::fprintf(stderr, "[net] client: welcomed as id=%u\n", local_id_);
     } else if (tag == MSG_LOBBY) {
@@ -505,8 +506,11 @@ void Net::poll(float dt) {
           }
           if (std::getenv("BF2_NETDEBUG"))
             std::fprintf(stderr, "[net] server: client connected, assigned id=%u\n", id);
+          std::printf("Net: player joined (id=%u, %d connected)\n", id,
+                      static_cast<int>(lobby_.members.size()));
         } else {
           connected_ = true;  // link established; await MSG_WELCOME for our id
+          std::printf("Net: connected to server, waiting for welcome...\n");
           if (std::getenv("BF2_NETDEBUG")) std::fprintf(stderr, "[net] client: link established\n");
         }
         break;
@@ -551,7 +555,6 @@ void Net::poll(float dt) {
     p.rx += (p.x - p.rx) * k;
     p.ry += (p.y - p.ry) * k;
     p.rz += (p.z - p.rz) * k;
-    // Wrap-safe yaw easing.
     float dyaw = p.yaw - p.ryaw;
     while (dyaw > 180.f) dyaw -= 360.f;
     while (dyaw < -180.f) dyaw += 360.f;

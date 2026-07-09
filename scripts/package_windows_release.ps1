@@ -1,7 +1,7 @@
 # Package a Windows x64 binary release (no EA/DICE assets — user supplies BF2 install).
 param(
     [string]$BuildDir = "C:\Projects\bf2respawn\build",
-    [string]$Version = "v0.5.1-alpha",
+    [string]$Version = "v0.5.5-alpha",
     [string]$OutDir = "C:\Projects\bf2respawn\dist"
 )
 
@@ -28,6 +28,10 @@ foreach ($dll in $runtimeDlls) {
     }
 }
 Copy-Item "$dalian\music" "$pkg\music" -Recurse
+$loadingTrack = Join-Path $env:USERPROFILE "Downloads\Before_the_First_Volley.mp3"
+if (Test-Path $loadingTrack) {
+    Copy-Item $loadingTrack (Join-Path $pkg "music\Before_the_First_Volley.mp3") -Force
+}
 Copy-Item "$dalian\menu" "$pkg\menu" -Recurse
 Copy-Item "C:\Projects\bf2respawn\LICENSE" $pkg
 Copy-Item "C:\Projects\bf2respawn\docs\PARITY.md" "$pkg\docs\"

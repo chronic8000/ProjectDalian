@@ -284,6 +284,7 @@ inline void apply_window_settings(SDL_Window* window, Settings& s) {
   }
 
   SDL_GL_SetSwapInterval(s.vsync ? 1 : 0);
+  SDL_PumpEvents();
   sync_drawable_size(window, s.width, s.height);
 }
 

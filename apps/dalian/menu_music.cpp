@@ -14,11 +14,19 @@
 namespace dalian {
 namespace {
 
-std::string user_downloads_path() {
+std::string user_downloads_path(const char* filename) {
   const char* home = std::getenv("USERPROFILE");
   if (!home) home = std::getenv("HOME");
   if (!home) return {};
-  return (std::filesystem::path(home) / "Downloads" / "The_Siege_of_Dalian.mp3").string();
+  return (std::filesystem::path(home) / "Downloads" / filename).string();
+}
+
+std::string user_downloads_dalian_menu() {
+  return user_downloads_path("The_Siege_of_Dalian.mp3");
+}
+
+std::string user_downloads_loading() {
+  return user_downloads_path("Before_the_First_Volley.mp3");
 }
 
 std::string exe_directory() {
@@ -39,7 +47,7 @@ std::string resolve_menu_music_path(const Settings& settings) {
     if (std::filesystem::exists(env)) return env;
   }
 
-  const std::string downloads = user_downloads_path();
+  const std::string downloads = user_downloads_dalian_menu();
   if (!downloads.empty() && std::filesystem::exists(downloads)) return downloads;
 
   const std::string exe = exe_directory();
@@ -52,6 +60,32 @@ std::string resolve_menu_music_path(const Settings& settings) {
   if (pref) {
     const std::string pref_music =
         (std::filesystem::path(pref) / "music" / "The_Siege_of_Dalian.mp3").string();
+    SDL_free(pref);
+    if (std::filesystem::exists(pref_music)) return pref_music;
+  }
+
+  return {};
+}
+
+std::string resolve_loading_music_path(const Settings& settings) {
+  if (const char* env = std::getenv("BF2_LOADING_MUSIC")) {
+    if (std::filesystem::exists(env)) return env;
+  }
+
+  const std::string downloads = user_downloads_loading();
+  if (!downloads.empty() && std::filesystem::exists(downloads)) return downloads;
+
+  const std::string exe = exe_directory();
+  if (!exe.empty()) {
+    const std::string next_to_exe =
+        (std::filesystem::path(exe) / "music" / "Before_the_First_Volley.mp3").string();
+    if (std::filesystem::exists(next_to_exe)) return next_to_exe;
+  }
+
+  char* pref = SDL_GetPrefPath("ProjectDalian", "ProjectDalian");
+  if (pref) {
+    const std::string pref_music =
+        (std::filesystem::path(pref) / "music" / "Before_the_First_Volley.mp3").string();
     SDL_free(pref);
     if (std::filesystem::exists(pref_music)) return pref_music;
   }
@@ -80,7 +114,7 @@ void MenuMusic::shutdown() {
   ready_ = false;
 }
 
-bool MenuMusic::play_file(const std::string& path, float volume) {
+bool MenuMusic::play_file(const std::string& path, float volume, int loops) {
   if (!ready_ || path.empty()) return false;
   stop();
   if (music_) {
@@ -93,13 +127,13 @@ bool MenuMusic::play_file(const std::string& path, float volume) {
     return false;
   }
   Mix_VolumeMusic(static_cast<int>(std::clamp(volume, 0.f, 1.f) * MIX_MAX_VOLUME));
-  if (Mix_PlayMusic(static_cast<Mix_Music*>(music_), -1) != 0) {
+  if (Mix_PlayMusic(static_cast<Mix_Music*>(music_), loops) != 0) {
     std::cerr << "MenuMusic: Mix_PlayMusic failed: " << Mix_GetError() << '\n';
     Mix_FreeMusic(static_cast<Mix_Music*>(music_));
     music_ = nullptr;
     return false;
   }
-  std::cout << "MenuMusic: playing " << path << '\n';
+  std::cout << "MenuMusic: playing " << path << (loops == 0 ? " (once)" : "") << '\n';
   return true;
 }
 

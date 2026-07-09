@@ -58,20 +58,29 @@ its respective owner.
 **Launcher & UI:**
 - **Main menu** with map browser (scans your BF2 install), options, multiplayer tab,
   and quit — no command-line args required to start
+- **BF2-style loading screen** — progress bar with phase text while archives load;
+  **Before the First Volley** plays during load only; **Ready** button lets you listen
+  to the full track before deployment opens
 - **Resolution-agnostic UI** — all menus/HUD layout in a fixed 1600×900 design
   space with uniform scaling and letterboxing (windowed, borderless, exclusive)
 - **Dynamic resolution list** from SDL (includes desktop ultrawide modes)
 - **Settings persistence** (`%APPDATA%\ProjectDalian\ProjectDalian\settings.cfg`):
-  video, graphics, audio, BF2 install path, player name
+  video, graphics, audio, BF2 install path, player name, rebindable controls
 - **Display recovery hotkeys:** `Alt+Enter` toggle windowed/borderless, `F11` cycle
   modes, `Ctrl+Shift+W` safe windowed 1920×1080; launch with `--windowed` or
   `BF2_WINDOWED=1` if stuck in bad fullscreen
+- **Resolution changes apply immediately** — Options → Video → Apply updates the GL
+  viewport without needing Alt+Enter
 
 **Multiplayer (alpha):**
 - Host/join flow with faction picker, ready states, and lobby start
+- **Tailscale server browser** — host advertises on create; joiners auto-scan `100.x/24`
 - LAN server browser + optional Tailscale subnet scan
 - Late-join support (configurable)
 - Session discovery/advertising over UDP
+- **MP ticket grace** — bleed paused until 2 humans deployed or 90s elapse
+- Remote player minimap blips + improved position/yaw sync
+- **Auto round restart** — 12s countdown after victory, then deploy again
 
 **Asset pipeline (verified byte-for-byte against retail BF2 assets):**
 - `.staticmesh`, `.bundledmesh`, `.skinnedmesh` loaders (multi-geometry / multi-LOD)
@@ -133,7 +142,8 @@ multiplayer, conquest, static prop heights, etc.).
 - Weapon fire / reload / deploy sounds parsed from weapon `.tweak` files
 - Voice lines from `VoiceMessages*.con` (reload, grenade, out-of-ammo, etc.)
 - Level ambient loop from `AmbientObjects.con`
-- Menu music (bundled OGG assets under `apps/dalian/assets/music/`)
+- Menu music: **The Siege of Dalian** (main menu); **Before the First Volley** (loading only)
+- Bundled OGG/MP3 under `apps/dalian/assets/music/` or your `Downloads/` folder
 - **Vehicle engine / tire sounds** parsed from vehicle `.tweak` (loops on enter,
   volume follows throttle/speed) — coverage depends on per-vehicle tweak data
 
@@ -232,6 +242,10 @@ Recovery if display settings break the UI:
 # or delete/edit %APPDATA%\ProjectDalian\ProjectDalian\settings.cfg
 ```
 
+Loading music: place `Before_the_First_Volley.mp3` in your Downloads folder, or set
+`BF2_LOADING_MUSIC=C:\path\to\track.mp3`. Skip the Ready gate in automation with
+`BF2_SKIP_LOADING_READY=1`.
+
 ### Direct map load (legacy / headless)
 
 Point the app at a BF2 level archive plus your `Objects_client.zip`:
@@ -255,6 +269,8 @@ Settings and the BF2 root path from the main menu are stored under
 | `Alt+Enter` | Toggle windowed / borderless |
 | `F11` | Cycle windowed → borderless → exclusive |
 | `Ctrl+Shift+W` | Safe windowed 1920×1080 (display recovery) |
+| **Loading** | |
+| `Ready` button / Enter / Space | Continue to deploy after map load |
 | **On foot** | |
 | `W` `A` `S` `D` | Move |
 | `Shift` | Sprint |
@@ -368,10 +384,13 @@ docs/        file-format reverse-engineering notes
 
 | Area | Status |
 |------|--------|
+| Loading screen | Progress bar, loading music, Ready gate before deploy |
 | Main menu / options / pause | Working; UI scales to any resolution |
-| Display / fullscreen | Dynamic mode list; recovery hotkeys + `--windowed` |
+| Display / fullscreen | Dynamic mode list; resolution Apply refreshes viewport instantly |
 | Multiplayer lobby | Host/join/ready/start; LAN + Tailscale discovery |
+| Multiplayer in-match | Ticket grace, teammate minimap dots, round auto-restart |
 | Deploy UI | Faction, kit, spawn map |
+| BF2 controls | Retail defaults, rebindable Options tab, crouch/prone, scoreboard |
 | Map fidelity | Heightmap cluster, overgrowth, roads, texture resolve, asset audit |
 | Ground vehicles | Drive, terrain tilt, animated wheels (where meshed) |
 | Boats / RHIBs | Water-surface buoyancy |

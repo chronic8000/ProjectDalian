@@ -258,6 +258,8 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
         return false;
       }
       if (handle_display_hotkey(window, settings, e)) {
+        int dw = 0, dh = 0;
+        refresh_display(window, renderer, dw, dh);
       } else if (e.type == SDL_KEYDOWN) {
         text_field_handle_keydown(name_field, e.key);
         text_field_handle_keydown(ip_field, e.key);
@@ -274,7 +276,7 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
     SDL_GetMouseState(&mx, &my);
 
     int sw = 0, sh = 0;
-    sync_drawable_size(window, sw, sh);
+    refresh_display(window, renderer, sw, sh);
     constexpr float W = 1600.f, H = 900.f;
     lobby_anim += 0.05f;
 

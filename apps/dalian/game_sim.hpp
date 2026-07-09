@@ -43,6 +43,8 @@ struct SimInitParams {
   bool bots_enabled = true;
   int bot_count = 28;
   int bot_difficulty = 3;  // 1..5
+  bool multiplayer = false;
+  int connected_humans = 1;
 };
 
 struct EnemyHit {
@@ -60,7 +62,9 @@ public:
   void init(const SimInitParams& params);
   void tick(float frame_dt, const PlayerInput& input);
   void begin_match();
+  void restart_round();
   void set_match_factions(int team1_faction, int team2_faction, TeamId player_team);
+  void set_connected_humans(int count);
   void set_weapon_profile(const WeaponProfile& weapon, bool refill_ammo = true);
   void set_at_missile_profile(const ProjectileProfile& profile);
 

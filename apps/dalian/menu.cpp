@@ -469,6 +469,7 @@ bool run_options_panel(SDL_Window* window, bf2::Renderer& renderer, Settings& se
         done = true;
         result = false;
       } else if (handle_display_hotkey(window, settings, e)) {
+        refresh_display(window, renderer, screen_w, screen_h);
       } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE && !capture_key) {
         done = true;
       } else if (opt_tab == OptTab::Controls &&
@@ -483,13 +484,11 @@ bool run_options_panel(SDL_Window* window, bf2::Renderer& renderer, Settings& se
                   e.window.event == SDL_WINDOWEVENT_RESTORED ||
                   e.window.event == SDL_WINDOWEVENT_MAXIMIZED)) {
         display_modes = query_display_modes(window);
+        refresh_display(window, renderer, screen_w, screen_h);
       }
     }
     SDL_GetMouseState(&mx, &my);
-    int sw = 0, sh = 0;
-    sync_drawable_size(window, sw, sh);
-    screen_w = sw;
-    screen_h = sh;
+    refresh_display(window, renderer, screen_w, screen_h);
     renderer.begin_frame(UiTheme::kBgR, UiTheme::kBgG, UiTheme::kBgB);
     renderer.begin_ui(window);
     if (modal) renderer.ui_rect(0, 0, W, H, 0.f, 0.f, 0.f, 0.65f);
@@ -517,9 +516,7 @@ bool run_options_panel(SDL_Window* window, bf2::Renderer& renderer, Settings& se
       settings.save();
       apply_window_settings(window, settings);
       apply_graphics_settings(renderer, settings);
-      sync_drawable_size(window, sw, sh);
-      screen_w = sw;
-      screen_h = sh;
+      refresh_display(window, renderer, screen_w, screen_h);
       done = true;
       result = true;
     }
@@ -584,6 +581,8 @@ MenuResult run_main_menu(SDL_Window* window, bf2::Renderer& renderer, Settings& 
         result.action = MenuAction::Quit;
         running = false;
       } else if (handle_display_hotkey(window, settings, e)) {
+        int sw = 0, sh = 0;
+        refresh_display(window, renderer, sw, sh);
       } else if (tab == TopTab::Options && opt_tab == OptTab::Controls &&
                  handle_controls_key_capture(e, settings, rebind_action, capture_key)) {
       } else if (e.type == SDL_MOUSEWHEEL && tab == TopTab::Options && opt_tab == OptTab::Controls) {
@@ -599,12 +598,14 @@ MenuResult run_main_menu(SDL_Window* window, bf2::Renderer& renderer, Settings& 
                   e.window.event == SDL_WINDOWEVENT_RESTORED ||
                   e.window.event == SDL_WINDOWEVENT_MAXIMIZED)) {
         display_modes = query_display_modes(window);
+        int sw = 0, sh = 0;
+        refresh_display(window, renderer, sw, sh);
       }
     }
     SDL_GetMouseState(&mx, &my);
 
     int sw = 0, sh = 0;
-    sync_drawable_size(window, sw, sh);
+    refresh_display(window, renderer, sw, sh);
     constexpr float W = 1600.f, H = 900.f;
 
     renderer.begin_frame(UiTheme::kBgR, UiTheme::kBgG, UiTheme::kBgB);
@@ -735,7 +736,7 @@ MenuResult run_main_menu(SDL_Window* window, bf2::Renderer& renderer, Settings& 
         apply_graphics_settings(renderer, settings);
         bgm.set_volume(settings.master_volume);
         int sw = 0, sh = 0;
-        sync_drawable_size(window, sw, sh);
+        refresh_display(window, renderer, sw, sh);
       }
     }
 
@@ -764,7 +765,7 @@ PauseResult run_pause_overlay(SDL_Window* window, bf2::Renderer& renderer, Setti
   while (running) {
     if (show_options) {
       run_options_panel(window, renderer, settings, screen_w, screen_h, true);
-      sync_drawable_size(window, screen_w, screen_h);
+      refresh_display(window, renderer, screen_w, screen_h);
       if (options_open) *options_open = false;
       show_options = false;
       continue;
@@ -777,6 +778,7 @@ PauseResult run_pause_overlay(SDL_Window* window, bf2::Renderer& renderer, Setti
         pr.quit_app = true;
         running = false;
       } else if (handle_display_hotkey(window, settings, e)) {
+        refresh_display(window, renderer, screen_w, screen_h);
       } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) {
         pr.resume = true;
         running = false;
@@ -785,11 +787,11 @@ PauseResult run_pause_overlay(SDL_Window* window, bf2::Renderer& renderer, Setti
       } else if (e.type == SDL_WINDOWEVENT &&
                  (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
                   e.window.event == SDL_WINDOWEVENT_RESIZED)) {
-        sync_drawable_size(window, screen_w, screen_h);
+        refresh_display(window, renderer, screen_w, screen_h);
       }
     }
     SDL_GetMouseState(&mx, &my);
-    sync_drawable_size(window, screen_w, screen_h);
+    refresh_display(window, renderer, screen_w, screen_h);
     renderer.begin_frame(UiTheme::kBgR * 0.3f, UiTheme::kBgG * 0.3f, UiTheme::kBgB * 0.3f);
     renderer.begin_ui(window);
     renderer.ui_rect(0, 0, W, H, 0.f, 0.f, 0.f, 0.55f);

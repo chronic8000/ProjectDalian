@@ -15,6 +15,7 @@
 
 #include "app_settings.hpp"
 #include "key_bindings.hpp"
+#include "loading_screen.hpp"
 #include "ui_layout.hpp"
 #include "factions.hpp"
 #include "game_audio.hpp"
@@ -563,11 +564,10 @@ int main(int argc, char** argv) {
     return 1;
   }
   dalian::apply_window_settings(window, settings);
-  dalian::sync_drawable_size(window, settings.width, settings.height);
 
   bf2::Renderer renderer;
   renderer.initialize(window);
-  renderer.set_viewport(settings.width, settings.height);
+  dalian::refresh_display(window, renderer, settings.width, settings.height);
   dalian::apply_graphics_settings(renderer, settings);
   renderer.reload_shadow_res(settings.shadow_res);
 
@@ -592,6 +592,14 @@ int main(int argc, char** argv) {
       session_net = std::move(mr.net);
     }
 
+    dalian::LoadingScreen loading_scr;
+    if (!headless_shot) loading_scr.start_music(settings);
+
+    auto load_step = [&](float p, const char* phase, const char* detail = nullptr) {
+      if (!headless_shot) loading_scr.pump(window, renderer, p, phase, detail);
+    };
+    load_step(0.03f, "LOADING MAP", "Mounting level archives...");
+
     bool leave_to_menu = false;
 
     std::string objects_zip = (argc >= 3 && argv[2][0] != '-') ? argv[2] : std::string();
@@ -610,6 +618,7 @@ int main(int argc, char** argv) {
       archive_path.clear();
       continue;
     }
+    load_step(0.10f, "LOADING MAP", "Mounting mod and retail BF2 archives...");
 
     const auto level_mod_dir = std::filesystem::path(archive_path).parent_path().parent_path().parent_path();
     const std::string level_mod_name = level_mod_dir.filename().string();
@@ -682,6 +691,7 @@ int main(int argc, char** argv) {
       archive_path.clear();
       continue;
     }
+    load_step(0.18f, "LOADING TERRAIN", "Heightmap, sky, roads, and navigation...");
 
     float xz = 2.0f;
     std::string heightdata_con;
@@ -1011,6 +1021,7 @@ int main(int argc, char** argv) {
             << " static instances; textures loaded " << textures.loaded_count() << ", missing "
             << textures.missing_count() << "; collision tris " << collision_tris << ", meshes w/o "
             << "collision " << collision_miss << '\n';
+  load_step(0.42f, "BUILDING WORLD", "Static objects, trees, and collision...");
 
   std::vector<dalian::AmbientEmitter> ambient_emitters =
       dalian::collect_ambient_emitters(level.placements);
@@ -1844,6 +1855,7 @@ int main(int argc, char** argv) {
     }
     std::cout << "Vehicles: " << placed << " placed, " << vehicle_cache.size()
               << " unique meshes, " << part_count << " attached parts\n";
+    load_step(0.62f, "LOADING VEHICLES", "Placing vehicles and weapons...");
     if (std::getenv("BF2_VEHLIST")) {
       for (const auto& v : loaded_vehicles)
         std::cerr << "  veh " << v.mesh_key << " parts=" << v.parts.size()
@@ -1944,10 +1956,6 @@ int main(int argc, char** argv) {
         if (game_audio.load_weapon_sounds(resources, kWeaponTweaks[i], weapon_sound_sets[i])) {
           std::cout << "GameAudio: " << weapon_defs[i].name << " weapon sounds loaded\n";
         }
-      }
-      if (const auto amb = resources.read_bytes("ambientobjects.con")) {
-        game_audio.start_level_ambient(
-            resources, std::string(reinterpret_cast<const char*>(amb->data()), amb->size()));
       }
       std::unordered_set<std::string> seen_veh_snd;
       for (const auto& vv : loaded_vehicles) {
@@ -2261,12 +2269,28 @@ int main(int argc, char** argv) {
       sim_init.bot_count = settings.mp_bot_count;
       sim_init.bot_difficulty = settings.mp_bot_difficulty;
     }
+    sim_init.multiplayer = session_mp.enabled;
     game_sim.init(sim_init);
     if (weapon_profile.valid) game_sim.set_weapon_profile(weapon_profile, true);
     game_sim.state().vehicles = std::move(loaded_vehicles);
     std::cout << "Enemies: " << game_sim.state().enemies.size() << " defenders\n";
     std::cout << "Conquest: " << game_sim.state().control_points.size() << " control points, "
               << sim_init.starting_tickets << " tickets per team\n";
+    load_step(0.88f, "FINALIZING", "Soldier animations, audio, and conquest setup...");
+  }
+  load_step(1.f, "MAP LOADED", session_mp.enabled ? "Multiplayer session connected."
+                                                   : "All assets loaded.");
+  if (!headless_shot) {
+    loading_scr.wait_until_ready(
+        window, renderer,
+        session_mp.enabled ? "Deploy when your squad is ready."
+                           : "Listen to the track, then press Ready to open deployment.");
+    if (have_game_audio) {
+      if (const auto amb = resources.read_bytes("ambientobjects.con")) {
+        game_audio.start_level_ambient(
+            resources, std::string(reinterpret_cast<const char*>(amb->data()), amb->size()));
+      }
+    }
   }
   dalian::GameState& G = game_sim.state();
   auto& vehicles = G.vehicles;
@@ -3033,6 +3057,7 @@ int main(int argc, char** argv) {
   float last_jet_w_tap = -10.f;
   bool jet_w_was_down = false;
   bool jet_gear_toggle = false;
+  float match_restart_cd = 0.f;
 
   while (running) {
     bool launch_requested = false;  // set by the T key, serviced after camera update
@@ -3054,8 +3079,7 @@ int main(int argc, char** argv) {
         app_running = false;
         running = false;
       } else if (dalian::handle_display_hotkey(window, settings, e)) {
-        dalian::sync_drawable_size(window, cur_w, cur_h);
-        renderer.set_viewport(cur_w, cur_h);
+        dalian::refresh_display(window, renderer, cur_w, cur_h);
       } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) {
         if (deploy_open) {
           deploy_open = false;
@@ -3106,7 +3130,7 @@ int main(int argc, char** argv) {
                   e.window.event == SDL_WINDOWEVENT_RESIZED ||
                   e.window.event == SDL_WINDOWEVENT_RESTORED ||
                   e.window.event == SDL_WINDOWEVENT_MAXIMIZED)) {
-        dalian::sync_drawable_size(window, cur_w, cur_h);
+        dalian::refresh_display(window, renderer, cur_w, cur_h);
       }
     }
 
@@ -3297,6 +3321,14 @@ int main(int argc, char** argv) {
     voice_cooldown = std::max(0.f, voice_cooldown - dt);
     medkit_cd = std::max(0.f, medkit_cd - dt);
     snapshot_log_timer += dt;
+    if (match_over) match_restart_cd += dt;
+    if (match_over && match_started && match_restart_cd >= 12.f) {
+      game_sim.restart_round();
+      deploy_open = true;
+      match_restart_cd = 0.f;
+      player_health = 100.f;
+      player_stamina = 100.f;
+    }
 
     if (!drone_mode) {
       if (shot_missile && frame_no == std::max(2, shot_frames - 12)) launch_requested = true;
@@ -3369,6 +3401,9 @@ int main(int argc, char** argv) {
       pending_seat_switch = -1;
       launch_requested = false;
       heli_flare_requested = false;
+      int humans = 1;
+      if (net.active() && !deploy_open) humans = 1 + net.peer_count();
+      game_sim.set_connected_humans(humans);
       game_sim.tick(dt, inp);
       if (!ambient_emitters.empty()) {
         dalian::step_ambient_emitters(ambient_emitters, smoke, dt);
@@ -3563,7 +3598,7 @@ int main(int argc, char** argv) {
       me.x = player.position.x;
       me.y = player.position.y - player.eye_height;  // feet, matching body render
       me.z = player.position.z;
-      me.yaw = std::atan2(flat_front.x, flat_front.z);  // radians (body facing)
+      me.yaw = yaw;
       me.pitch = pitch;
       const float spd = std::sqrt(player.desired_velocity.x * player.desired_velocity.x +
                                   player.desired_velocity.z * player.desired_velocity.z);
@@ -3591,6 +3626,7 @@ int main(int argc, char** argv) {
     }
 
     // Camera: FPV from the drone when flying, else eye (1st) / behind (3rd).
+    dalian::refresh_display(window, renderer, cur_w, cur_h);
     glm::vec3 cam = eye;
     glm::vec3 cam_front = front;
     glm::vec3 cam_up(0.f, 1.f, 0.f);
@@ -3698,8 +3734,6 @@ int main(int argc, char** argv) {
 
     const float frame_t =
         static_cast<float>(now) / static_cast<float>(SDL_GetPerformanceFrequency());
-    dalian::sync_drawable_size(window, cur_w, cur_h);
-    renderer.set_viewport(cur_w, cur_h);
     if (drone_mode) {
       renderer.begin_scene(cur_w, cur_h, atmo.horizon_color.x, atmo.horizon_color.y,
                            atmo.horizon_color.z);
@@ -3967,7 +4001,7 @@ int main(int argc, char** argv) {
         const auto palette = bf2::compute_skin_palette(soldier_src, soldier_ske, clip, frame, 1, 0);
         if (palette.empty()) continue;
         glm::mat4 body = glm::translate(glm::mat4(1.0f), rpos);
-        body = glm::rotate(body, rp.ryaw, glm::vec3(0, 1, 0));
+        body = glm::rotate(body, glm::radians(rp.ryaw), glm::vec3(0, 1, 0));
         const glm::mat4 body_mvp = view_proj * body;
         const std::uint16_t rfid =
             rp.faction_id ? rp.faction_id : net.lobby_player_faction(rp.id);
@@ -4382,14 +4416,23 @@ int main(int argc, char** argv) {
         renderer.ui_text(30, 27, 1.7f, buf, 0.65f, 0.82f, 1.0f, 1.f);
         // Multiplayer status badge under the faction line.
         if (net.active()) {
-          char nb[64];
+          char nb[96];
+          const int in_match = 1 + net.peer_count();
           if (net.is_server())
-            std::snprintf(nb, sizeof(nb), "MP HOST  |  %d player(s)", net.peer_count());
+            std::snprintf(nb, sizeof(nb), "MP HOST  |  %d in match", in_match);
           else if (net.connected())
-            std::snprintf(nb, sizeof(nb), "MP CLIENT  |  %d peer(s)", net.peer_count());
+            std::snprintf(nb, sizeof(nb), "MP CLIENT  |  id %u  |  %d in match", net.local_id(),
+                          in_match);
           else
             std::snprintf(nb, sizeof(nb), "MP CONNECTING...");
           renderer.ui_text(30, 56, 1.3f, nb, 0.55f, 0.95f, 0.75f, 1.f);
+          float ny = 78.f;
+          for (const auto& m : net.lobby().members) {
+            char pline[80];
+            std::snprintf(pline, sizeof(pline), "%s%s", m.is_host ? "[H] " : "    ", m.name.c_str());
+            renderer.ui_text(30, ny, 1.1f, pline, 0.75f, 0.78f, 0.82f, 0.95f);
+            ny += 18.f;
+          }
         }
 
         // Bottom-right: weapon + ammo.
@@ -4632,6 +4675,18 @@ int main(int argc, char** argv) {
         const glm::vec2 pmm = minimap.world_to_minimap(
             {player.position.x, player.position.y - player.eye_height, player.position.z});
         renderer.ui_rect(pmm.x - 4.f, pmm.y - 4.f, 8.f, 8.f, 0.95f, 0.95f, 0.95f, 1.f);
+        if (net.active()) {
+          for (const auto& rp : net.players()) {
+            if (!rp.active || rp.id == net.local_id()) continue;
+            const glm::vec2 rmm = minimap.world_to_minimap({rp.rx, rp.ry, rp.rz});
+            renderer.ui_rect(rmm.x - 3.f, rmm.y - 3.f, 6.f, 6.f, 0.35f, 0.85f, 1.f, 1.f);
+          }
+        }
+        if (session_mp.enabled && match_started && round_time < 90.f) {
+          renderer.ui_text(mmx, mmy + mmh + 4.f, 1.0f,
+                           "Ticket bleed paused — waiting for all players (90s grace)", 0.55f,
+                           0.72f, 0.55f, 0.9f);
+        }
         const int mins = static_cast<int>(round_time) / 60;
         const int secs = static_cast<int>(round_time) % 60;
         char rbuf[32];
@@ -4669,14 +4724,21 @@ int main(int argc, char** argv) {
           hg = 0.35f;
           hb = 0.3f;
         }
-        renderer.ui_rect(W * 0.5f - 220.f, H * 0.5f - 60.f, 440.f, 120.f, 0.04f, 0.05f, 0.07f, 0.88f);
+        renderer.ui_rect(W * 0.5f - 220.f, H * 0.5f - 70.f, 440.f, 140.f, 0.04f, 0.05f, 0.07f,
+                         0.88f);
         const float hw = renderer.ui_text_width(headline, 4.2f);
         renderer.ui_text(W * 0.5f - hw * 0.5f, H * 0.5f - 10.f, 4.2f, headline, hr, hg, hb, 1.f);
-        char sub[96];
+        char sub[128];
         std::snprintf(sub, sizeof(sub), "Tickets  %d  -  %d", tickets.team1_tickets,
                       tickets.team2_tickets);
         const float sw = renderer.ui_text_width(sub, 1.6f);
         renderer.ui_text(W * 0.5f - sw * 0.5f, H * 0.5f - 44.f, 1.6f, sub, 0.85f, 0.88f, 0.9f, 1.f);
+        const float remain = std::max(0.f, 12.f - match_restart_cd);
+        char restart[96];
+        std::snprintf(restart, sizeof(restart), "New round in %.0fs...", remain);
+        const float rw = renderer.ui_text_width(restart, 1.4f);
+        renderer.ui_text(W * 0.5f - rw * 0.5f, H * 0.5f + 18.f, 1.4f, restart, 0.65f, 0.68f, 0.72f,
+                         1.f);
       }
       renderer.end_ui();
     }
