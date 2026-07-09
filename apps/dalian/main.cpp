@@ -1144,15 +1144,20 @@ int main(int argc, char** argv) {
         return it->second.vao != 0;
       }
       auto upload_mesh_data = [&](bf2::TexturedMeshData& data, const std::string& key,
-                                  const std::string& log_vpath) -> bool {
+                                  const std::string& log_vpath,
+                                  float min_y_override = std::numeric_limits<float>::quiet_NaN()) -> bool {
         if (data.vertices.empty()) return false;
-        std::vector<float> ys;
-        ys.reserve(data.vertices.size());
-        for (const auto& vtx : data.vertices) ys.push_back(vtx.position.y);
-        const std::size_t k =
-            std::min(ys.size() - 1, static_cast<std::size_t>(ys.size() * 0.015f));
-        std::nth_element(ys.begin(), ys.begin() + k, ys.end());
-        vehicle_min_y[key] = ys[k];
+        if (std::isnan(min_y_override)) {
+          std::vector<float> ys;
+          ys.reserve(data.vertices.size());
+          for (const auto& vtx : data.vertices) ys.push_back(vtx.position.y);
+          const std::size_t k =
+              std::min(ys.size() - 1, static_cast<std::size_t>(ys.size() * 0.015f));
+          std::nth_element(ys.begin(), ys.begin() + k, ys.end());
+          vehicle_min_y[key] = ys[k];
+        } else {
+          vehicle_min_y[key] = min_y_override;
+        }
         if (key == vpath) {
           std::vector<float> xs, zs, hs;
           xs.reserve(data.vertices.size());
@@ -1196,6 +1201,19 @@ int main(int argc, char** argv) {
         const bool ok = gpu.vao != 0;
         vehicle_cache[key] = std::move(gpu);
         return ok;
+      };
+      // Wheels/gear are separate geometry parts with their own rest pose; clearance
+      // must use the lowest vertex in assembled vehicle space, not hull-only bounds.
+      auto transformed_mesh_low_y = [](const bf2::TexturedMeshData& data,
+                                       const glm::mat4& xf) -> float {
+        if (data.vertices.empty()) return 0.f;
+        float low = std::numeric_limits<float>::max();
+        for (const auto& vtx : data.vertices) {
+          const glm::vec4 wp =
+              xf * glm::vec4(vtx.position.x, vtx.position.y, vtx.position.z, 1.f);
+          low = std::min(low, wp.y);
+        }
+        return low;
       };
 
       bf2::GpuTexturedMesh gpu;
@@ -1273,14 +1291,16 @@ int main(int argc, char** argv) {
             if (wit == part_meshes.end() || wit->second.vertices.empty()) continue;
             assign_submesh(wit->second);
             const std::string wkey = vpath + "#wheel_" + std::to_string(w.geom_part);
-            upload_mesh_data(wit->second, wkey, vpath);
+            const float wheel_low = transformed_mesh_low_y(wit->second, w.rest);
+            upload_mesh_data(wit->second, wkey, vpath, wheel_low);
           }
           for (const auto& g : hierarchy->gear_parts) {
             auto git = part_meshes.find(g.geom_part);
             if (git == part_meshes.end() || git->second.vertices.empty()) continue;
             assign_submesh(git->second);
             const std::string gkey = vpath + "#gear_" + std::to_string(g.geom_part);
-            upload_mesh_data(git->second, gkey, vpath);
+            const float gear_low = transformed_mesh_low_y(git->second, g.rest);
+            upload_mesh_data(git->second, gkey, vpath, gear_low);
           }
           return ok;
         }
@@ -1659,9 +1679,17 @@ int main(int argc, char** argv) {
       const float script_off = vs.pos.y - surfY;
       const auto myit = vehicle_min_y.find(vpath);
       const float body_low = myit != vehicle_min_y.end() ? myit->second : 0.f;
-      // Lowest rendered point including child parts (wheels are often separate
-      // parts, not in the body mesh).
+      // Lowest rendered point including child parts (wheels/gear are often separate
+      // geometry parts, not in the body mesh).
       float low = body_low;
+      for (const auto& w : v.wheels) {
+        const auto pit = vehicle_min_y.find(w.mesh_key);
+        if (pit != vehicle_min_y.end()) low = std::min(low, pit->second);
+      }
+      for (const auto& g : v.gear_parts) {
+        const auto pit = vehicle_min_y.find(g.mesh_key);
+        if (pit != vehicle_min_y.end()) low = std::min(low, pit->second);
+      }
       for (const auto& p : pcit->second) {
         const auto pit = vehicle_min_y.find(p.mesh_key);
         if (pit != vehicle_min_y.end()) low = std::min(low, p.local[3].y + pit->second);
