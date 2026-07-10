@@ -25,7 +25,6 @@ struct FaceIdx {
 
 FaceIdx parse_face_vert(const std::string& token) {
   FaceIdx out;
-  // formats: v | v/vt | v//vn | v/vt/vn
   std::stringstream ss(token);
   std::string part;
   int slot = 0;
@@ -47,7 +46,37 @@ int resolve_index(int idx, int count) {
   return -1;
 }
 
+std::string dirname_of(const std::string& path) {
+  const auto slash = path.find_last_of("/\\");
+  if (slash == std::string::npos) return {};
+  return path.substr(0, slash + 1);
+}
+
 }  // namespace
+
+std::unordered_map<std::string, ObjMaterial> load_obj_materials(const std::string& mtl_path) {
+  std::unordered_map<std::string, ObjMaterial> out;
+  std::ifstream in(mtl_path);
+  if (!in) return out;
+  ObjMaterial* cur = nullptr;
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.empty() || line[0] == '#') continue;
+    std::stringstream ss(line);
+    std::string tag;
+    ss >> tag;
+    for (char& c : tag) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (tag == "newmtl") {
+      std::string name;
+      ss >> name;
+      cur = &out[name];
+      cur->name = name;
+    } else if (cur && tag == "kd") {
+      ss >> cur->kd[0] >> cur->kd[1] >> cur->kd[2];
+    }
+  }
+  return out;
+}
 
 TexturedMeshData load_obj_file(const std::string& path, const std::string& base_map) {
   TexturedMeshData out;
@@ -103,13 +132,29 @@ TexturedMeshData load_obj_file(const std::string& path, const std::string& base_
     return id;
   };
 
+  std::string current_mtl = base_map.empty() ? "default" : base_map;
+  std::vector<std::uint32_t> face_indices;
+  auto flush_submesh = [&]() {
+    if (face_indices.empty()) return;
+    TexturedSubmesh sm;
+    sm.index_offset = static_cast<std::uint32_t>(out.indices.size());
+    sm.index_count = static_cast<std::uint32_t>(face_indices.size());
+    sm.base_map = current_mtl;
+    out.indices.insert(out.indices.end(), face_indices.begin(), face_indices.end());
+    out.submeshes.push_back(std::move(sm));
+    face_indices.clear();
+  };
+
   std::string line;
+  std::string mtllib;
   while (std::getline(in, line)) {
     if (line.empty() || line[0] == '#') continue;
     std::stringstream ss(line);
     std::string tag;
     ss >> tag;
-    if (tag == "v") {
+    if (tag == "mtllib") {
+      ss >> mtllib;
+    } else if (tag == "v") {
       ObjVert p;
       ss >> p.x >> p.y >> p.z;
       positions.push_back(p);
@@ -121,22 +166,26 @@ TexturedMeshData load_obj_file(const std::string& path, const std::string& base_
       ObjNrm n;
       ss >> n.x >> n.y >> n.z;
       normals.push_back(n);
+    } else if (tag == "usemtl") {
+      flush_submesh();
+      ss >> current_mtl;
+      if (current_mtl.empty()) current_mtl = "default";
     } else if (tag == "f") {
       std::vector<FaceIdx> corners;
       std::string tok;
       while (ss >> tok) corners.push_back(parse_face_vert(tok));
       if (corners.size() < 3) continue;
-      // Fan triangulation
       const auto i0 = emit_vert(corners[0]);
       for (std::size_t i = 1; i + 1 < corners.size(); ++i) {
         const auto i1 = emit_vert(corners[i]);
         const auto i2 = emit_vert(corners[i + 1]);
-        out.indices.push_back(i0);
-        out.indices.push_back(i1);
-        out.indices.push_back(i2);
+        face_indices.push_back(i0);
+        face_indices.push_back(i1);
+        face_indices.push_back(i2);
       }
     }
   }
+  flush_submesh();
 
   if (out.indices.empty()) return {};
 
@@ -170,11 +219,16 @@ TexturedMeshData load_obj_file(const std::string& path, const std::string& base_
     fix(c);
   }
 
-  TexturedSubmesh sm;
-  sm.index_offset = 0;
-  sm.index_count = static_cast<std::uint32_t>(out.indices.size());
-  sm.base_map = base_map;
-  out.submeshes.push_back(std::move(sm));
+  if (out.submeshes.empty()) {
+    TexturedSubmesh sm;
+    sm.index_offset = 0;
+    sm.index_count = static_cast<std::uint32_t>(out.indices.size());
+    sm.base_map = base_map.empty() ? "default" : base_map;
+    out.submeshes.push_back(std::move(sm));
+  }
+
+  (void)mtllib;
+  (void)dirname_of;
   return out;
 }
 

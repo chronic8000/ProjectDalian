@@ -102,6 +102,9 @@ struct SimEvents {
   TeamId captured_cp_owner = TeamId::Neutral;
   std::string voice_cue;  // semantic cue → conquest_voice.hpp
   std::vector<KillFeedEvent> kill_feed;
+  // Heavy artillery / Car-SAM / Hawk impact (client plays a large boom).
+  bool play_artillery_explosion = false;
+  glm::vec3 artillery_explosion_pos{};
 };
 
 }  // namespace dalian

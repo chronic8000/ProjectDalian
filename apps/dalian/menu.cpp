@@ -280,6 +280,15 @@ void draw_options_content(bf2::Renderer& r, Settings& settings, OptTab tab, int 
       y += 32;
     };
 
+    if (visible(y, 40.f)) {
+      if (draw_button(r, mx, my, ox, y, 280, 36, "LAPTOP / COMPAT MODE") && gclick) {
+        settings.apply_laptop_compat();
+      }
+      r.ui_text(ox + 295, y + 10, 1.05f, "(fixes green/purple on weak GPUs)", 0.55f, 0.58f, 0.62f,
+                1.f);
+    }
+    y += 48;
+
     row_slider("DRAW DISTANCE", settings.draw_distance, 1000.f, 12000.f);
     row_slider("FOG SCALE", settings.fog_scale, 0.35f, 2.5f);
     row_slider("RENDER SCALE", settings.render_scale, 0.5f, 1.f, "(internal 3D res)");
@@ -302,7 +311,7 @@ void draw_options_content(bf2::Renderer& r, Settings& settings, OptTab tab, int 
     row_slider("GRASS DISTANCE", settings.grass_distance, 10.f, 160.f);
     row_check("BLOOM", settings.bloom);
     row_slider("BLOOM INTENSITY", settings.bloom_intensity, 0.f, 1.5f);
-    row_check("HDR (TONEMAP)", settings.hdr);
+    row_check("HDR TONEMAP (float GPU)", settings.hdr);
     row_slider("HDR EXPOSURE", settings.hdr_exposure, 0.15f, 1.5f);
     row_check("SSAO", settings.ssao);
     row_check("SHADOWS", settings.shadows_enabled);

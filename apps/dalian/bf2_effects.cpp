@@ -140,23 +140,37 @@ void spawn_igla_detonation_fx(std::vector<Smoke>& smoke, std::vector<Explosion>&
   Explosion ex;
   ex.p = center;
   ex.age = 0.f;
-  ex.life = 1.0f * scale;
+  ex.life = 1.35f * scale;
   ex.scale = scale;
   explosions.push_back(ex);
-  if (g_fx && g_fx->get("e_vexp_igla")) {
+  // Extra fireball layers for artillery / Car-SAM so the blast reads at distance.
+  if (scale >= 2.5f) {
+    Explosion ex2 = ex;
+    ex2.life = 1.8f * scale;
+    ex2.scale = scale * 1.35f;
+    explosions.push_back(ex2);
+  }
+  if (g_fx && g_fx->get("e_vexp_tank")) {
+    emit_bundle(smoke, "e_vexp_tank", center, glm::vec3(0.f, 1.f, 0.f),
+                static_cast<int>(48 * scale), scale * 1.25f, 3);
+  } else if (g_fx && g_fx->get("e_vexp_igla")) {
     emit_bundle(smoke, "e_vexp_igla", center, glm::vec3(0.f, 1.f, 0.f),
-                static_cast<int>(32 * scale), scale, 3);
-    return;
+                static_cast<int>(40 * scale), scale, 3);
+  } else {
+    const char* bundle = surface_mexp("dirt");
+    if (g_fx && g_fx->get(bundle)) {
+      emit_bundle(smoke, bundle, center, glm::vec3(0.f, 1.f, 0.f), static_cast<int>(36 * scale),
+                  scale, 3);
+    } else {
+      for (int i = 0; i < static_cast<int>(40 * scale); ++i) {
+        const glm::vec3 v = rand_dir() * (10.f + frand() * 28.f) * scale;
+        push_smoke(smoke, center + v * 0.03f, v, 1.2f + frand() * 2.2f, 0.7f + frand() * 1.8f, 3);
+      }
+    }
   }
-  const char* bundle = surface_mexp("dirt");
-  if (g_fx && g_fx->get(bundle)) {
-    emit_bundle(smoke, bundle, center, glm::vec3(0.f, 1.f, 0.f), static_cast<int>(28 * scale),
-                scale, 3);
-    return;
-  }
-  for (int i = 0; i < 28; ++i) {
-    const glm::vec3 v = rand_dir() * (6.f + frand() * 18.f);
-    push_smoke(smoke, center + v * 0.04f, v, 0.8f + frand() * 1.4f, 0.5f + frand() * 1.2f, 3);
+  for (int i = 0; i < static_cast<int>(22 * scale); ++i) {
+    push_smoke(smoke, center, rand_dir() * (3.f + frand() * 8.f) * scale, 3.f + frand() * 4.f,
+               1.2f + frand() * 2.2f, 0);
   }
 }
 

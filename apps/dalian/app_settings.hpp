@@ -34,7 +34,8 @@ struct Settings {
   // Internal 3D resolution vs window (1 = native). Biggest FPS lever on all GPUs.
   float render_scale = 0.85f;
   // 0=Bilinear, 1=FSR1 (EASU+RCAS), 2=Auto (→ FSR1 on OpenGL; DLSS/XeSS later).
-  int upscale_mode = 1;
+  // Bilinear default — FSR can look like scanlines on weak Intel/AMD laptop GPUs.
+  int upscale_mode = 0;
   float fsr_sharpness = 0.2f;  // RCAS stops: 0=max sharp, 2=soft
   // Positive = prefer cheaper/blurrier mips (helps HD texture packs).
   float mip_lod_bias = 0.35f;
@@ -43,7 +44,9 @@ struct Settings {
   float grass_distance = 55.f;
   bool bloom = true;
   float bloom_intensity = 0.45f;
-  bool hdr = false;              // off by default — can look washed/bright
+  // Engine "HDR" = float colour buffer + ACES tonemap — NOT Windows/monitor HDR.
+  // Off by default; weak laptop GPUs often corrupt float FBOs (green/magenta).
+  bool hdr = false;
   float hdr_exposure = 0.55f;    // only used when hdr is on
   bool ssao = false;             // expensive; off by default for playable FPS
   bool shadows_enabled = true;
@@ -74,7 +77,7 @@ struct Settings {
     s.apply_env_defaults();
     const std::string path = config_path();
     std::ifstream in(path);
-    if (!in) return s;
+    if (in) {
     std::string line;
     while (std::getline(in, line)) {
       const auto eq = line.find('=');
@@ -135,6 +138,7 @@ struct Settings {
       else if (key == "menu_music_enabled") s.menu_music_enabled = val == "1" || val == "true";
       else if (key == "menu_music") s.menu_music = val;
     }
+    }
     if (s.width < 640 || s.height < 480) {
       s.width = 1920;
       s.height = 1080;
@@ -147,6 +151,11 @@ struct Settings {
     if (const char* wf = std::getenv("BF2_WINDOWED")) {
       if (wf[0] != '0' && wf[0] != 'n' && wf[0] != 'N')
         s.fullscreen = FullscreenMode::Windowed;
+    }
+    // BF2_COMPAT=1 overrides cfg — laptop-safe path (no float HDR / FSR).
+    if (const char* c = std::getenv("BF2_COMPAT")) {
+      if (c[0] == '1' || c[0] == 't' || c[0] == 'T' || c[0] == 'y' || c[0] == 'Y')
+        s.apply_laptop_compat();
     }
     return s;
   }
@@ -222,6 +231,22 @@ struct Settings {
     if (const char* ia = std::getenv("BF2_INVERTAIR"))
       invert_air = ia[0] == '1' || ia[0] == 't' || ia[0] == 'T' || ia[0] == 'y' ||
                    ia[0] == 'Y' || ia[0] == 'o' || ia[0] == 'O';
+  }
+
+  // Safe path for weak Intel/old laptop GPUs: no float HDR buffers, no FSR, cheap shadows.
+  void apply_laptop_compat() {
+    hdr = false;
+    bloom = false;
+    ssao = false;
+    msaa = 0;
+    upscale_mode = 0;  // bilinear
+    render_scale = 0.7f;
+    shadow_res = 1024;
+    anisotropic = 2;
+    grass_enabled = false;
+    mip_lod_bias = 0.75f;
+    shadow_distance = 800.f;
+    draw_distance = 4000.f;
   }
 
   static std::string config_path() {

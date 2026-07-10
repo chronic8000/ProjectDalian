@@ -1365,6 +1365,35 @@ bool Renderer::initialize(void* sdl_window) {
     glBindTexture(GL_TEXTURE_2D, 0);
   }
 
+  // Probe float colour FBOs. Many Intel/old laptop drivers advertise GL 3.3 but
+  // produce green/magenta garbage with RGB16F colour attachments.
+  float_color_ok_ = false;
+  {
+    GLuint tex = 0, fbo = 0, depth = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, 8, 8, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glGenRenderbuffers(1, &depth);
+    glBindRenderbuffer(GL_RENDERBUFFER, depth);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, 8, 8);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth);
+    const GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    float_color_ok_ = (st == GL_FRAMEBUFFER_COMPLETE);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteRenderbuffers(1, &depth);
+    glDeleteTextures(1, &tex);
+    if (!float_color_ok_) {
+      std::fprintf(stderr,
+                   "[render] Float colour FBO incomplete — forcing LDR (RGBA8) path "
+                   "(fixes green/magenta on many laptops)\n");
+    }
+  }
+  use_float_color_ = hdr_enabled_ && float_color_ok_;
+
   initialized_ = true;
   sdl_window_ = static_cast<SDL_Window*>(sdl_window);
   return true;
@@ -2543,12 +2572,19 @@ void Renderer::set_shadows(const float* cascade_view_proj_4x16, const float* spl
 
 void Renderer::begin_scene(int w, int h, float r, float g, float b) {
   if (!initialized_) return;
-  if (scene_fbo_ == 0 || w != scene_w_ || h != scene_h_) {
+  use_float_color_ = hdr_enabled_ && float_color_ok_;
+  const GLint want_fmt = use_float_color_ ? GL_RGBA16F : GL_RGBA8;
+  if (scene_fbo_ == 0 || w != scene_w_ || h != scene_h_ || scene_color_fmt_ != want_fmt) {
     scene_w_ = w;
     scene_h_ = h;
+    scene_color_fmt_ = want_fmt;
     if (scene_color_ == 0) glGenTextures(1, &scene_color_);
     glBindTexture(GL_TEXTURE_2D, scene_color_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, w, h, 0, GL_RGB, GL_FLOAT, nullptr);
+    if (use_float_color_) {
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
+    } else {
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    }
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -2565,6 +2601,16 @@ void Renderer::begin_scene(int w, int h, float r, float g, float b) {
     glBindFramebuffer(GL_FRAMEBUFFER, scene_fbo_);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, scene_color_, 0);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, scene_depth_tex_, 0);
+    const GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (st != GL_FRAMEBUFFER_COMPLETE && use_float_color_) {
+      std::fprintf(stderr, "[render] HDR FBO incomplete (0x%X) — falling back to LDR\n", st);
+      float_color_ok_ = false;
+      use_float_color_ = false;
+      scene_color_fmt_ = 0;
+      bloom_w_ = bloom_h_ = 0;  // recreate bloom as RGBA8 too
+      begin_scene(w, h, r, g, b);
+      return;
+    }
   }
   glBindFramebuffer(GL_FRAMEBUFFER, scene_fbo_);
   glDisable(GL_POLYGON_OFFSET_FILL);
@@ -2580,7 +2626,14 @@ void Renderer::set_bloom(bool enabled, float intensity) {
 
 void Renderer::set_ssao(bool enabled) { ssao_enabled_ = enabled; }
 
-void Renderer::set_hdr(bool enabled) { hdr_enabled_ = enabled; }
+void Renderer::set_hdr(bool enabled) {
+  if (hdr_enabled_ == enabled) return;
+  hdr_enabled_ = enabled;
+  // Recreate scene/bloom targets next frame (float vs 8-bit).
+  scene_w_ = scene_h_ = 0;
+  bloom_w_ = bloom_h_ = 0;
+  scene_color_fmt_ = 0;
+}
 
 void Renderer::set_hdr_exposure(float exposure) {
   hdr_exposure_ = std::clamp(exposure, 0.15f, 2.5f);
@@ -2645,18 +2698,24 @@ void Renderer::present_scene(float degrade, float time_seconds, float near_z, fl
   glDisable(GL_DEPTH_TEST);
   glBindVertexArray(sky_vao_);
 
-  // ---- Bloom (HDR half-res) ----
+  // ---- Bloom (half-res; float only when HDR path is active) ----
   float bloom_i = 0.f;
   if (bloom_enabled_ && bright_program_ != 0 && blur_program_ != 0) {
     const int bw = std::max(1, scene_w_ / 2);
     const int bh = std::max(1, scene_h_ / 2);
-    if (bloom_fbo_[0] == 0 || bw != bloom_w_ || bh != bloom_h_) {
+    if (bloom_fbo_[0] == 0 || bw != bloom_w_ || bh != bloom_h_ ||
+        bloom_float_ != use_float_color_) {
       bloom_w_ = bw;
       bloom_h_ = bh;
+      bloom_float_ = use_float_color_;
       for (int i = 0; i < 2; ++i) {
         if (bloom_tex_[i] == 0) glGenTextures(1, &bloom_tex_[i]);
         glBindTexture(GL_TEXTURE_2D, bloom_tex_[i]);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, bw, bh, 0, GL_RGB, GL_FLOAT, nullptr);
+        if (use_float_color_) {
+          glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, bw, bh, 0, GL_RGBA, GL_FLOAT, nullptr);
+        } else {
+          glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, bw, bh, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        }
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);

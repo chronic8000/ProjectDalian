@@ -2503,13 +2503,16 @@ int main(int argc, char** argv) {
               << '\n';
   }
 
-  // ---- MIM-23 Hawk emplacement (custom OBJ) on Chinese airfield runway apron ----
+  // ---- MIM-23 Hawk emplacement (custom OBJ) — open ground by Chinese Z-8 ----
   bf2::GpuTexturedMesh hawk_mesh{};
   glm::vec3 hawk_pos{0.f};
   bool hawk_present = false;
   float hawk_heading_init = 0.f;
-  float hawk_draw_scale = 2.2f;  // OBJ is ~5 m tall; scale up so it reads on the apron
-  float hawk_ground_lift = 0.f;  // -min_y so wheels sit on terrain after scale
+  float hawk_draw_scale = 2.0f;
+  float hawk_ground_lift = 0.f;
+  // Source FBX/OBJ sits on Z=0 (Z-up). Convert to engine Y-up before draw.
+  glm::mat4 hawk_mesh_fix =
+      glm::rotate(glm::mat4(1.f), glm::radians(-90.f), glm::vec3(1.f, 0.f, 0.f));
   {
     namespace fs = std::filesystem;
     std::vector<fs::path> cands;
@@ -2518,7 +2521,6 @@ int main(int argc, char** argv) {
     cands.emplace_back("apps/dalian/content/emplacements/mim23_hawk/mim23_launcher.obj");
     cands.emplace_back("../content/emplacements/mim23_hawk/mim23_launcher.obj");
     cands.emplace_back("../../apps/dalian/content/emplacements/mim23_hawk/mim23_launcher.obj");
-    // Prefer paths beside the executable (POST_BUILD copies content/ there).
     if (char* base = SDL_GetBasePath()) {
       const fs::path exe_dir(base);
       SDL_free(base);
@@ -2531,27 +2533,62 @@ int main(int argc, char** argv) {
     cands.emplace_back(fs::current_path() /
                        "../../../apps/dalian/content/emplacements/mim23_hawk/mim23_launcher.obj");
 
+    auto solid_tex = [&](float r, float g, float b) -> std::uint32_t {
+      std::uint8_t px[16 * 4];
+      for (int i = 0; i < 16; ++i) {
+        px[i * 4 + 0] = static_cast<std::uint8_t>(std::clamp(r, 0.f, 1.f) * 255.f);
+        px[i * 4 + 1] = static_cast<std::uint8_t>(std::clamp(g, 0.f, 1.f) * 255.f);
+        px[i * 4 + 2] = static_cast<std::uint8_t>(std::clamp(b, 0.f, 1.f) * 255.f);
+        px[i * 4 + 3] = 255;
+      }
+      return renderer.upload_rgba_texture(4, 4, px);
+    };
+
     for (const auto& cand : cands) {
       std::error_code ec;
       if (!fs::is_regular_file(cand, ec)) continue;
       try {
         auto data = bf2::load_obj_file(cand.string());
         if (data.vertices.empty() || data.indices.empty()) continue;
+
+        // Ground lift after Z-up → Y-up so wheels sit on terrain.
         float min_y = 1e9f;
-        for (const auto& v : data.vertices) min_y = std::min(min_y, v.position.y);
+        for (const auto& v : data.vertices) {
+          const glm::vec4 p = hawk_mesh_fix * glm::vec4(v.position.x, v.position.y, v.position.z, 1.f);
+          min_y = std::min(min_y, p.y);
+        }
         hawk_mesh = renderer.upload_textured(data);
         if (hawk_mesh.vao == 0) continue;
-        // Chinese 64 CQ airfield apron — between J-10 pads (~-793,-119) and the
-        // control tower (~-732,-333), on the open pad players drive when looking
-        // for jets (not the radar jeep south of the strip).
-        hawk_pos = glm::vec3(-760.f, 0.f, -155.f);
+
+        // Bind olive / rocket / tire colours from MTL (FBX had no map_Kd).
+        const fs::path mtl_path = cand.parent_path() / "mim23_launcher.mtl";
+        auto mats = bf2::load_obj_materials(mtl_path.string());
+        // Sensible defaults if MTL missing.
+        if (mats.find("Mim23_Hull_Mat") == mats.end())
+          mats["Mim23_Hull_Mat"] = {"Mim23_Hull_Mat", {0.42f, 0.48f, 0.32f}};
+        if (mats.find("Mim23_Rocket_Mat") == mats.end())
+          mats["Mim23_Rocket_Mat"] = {"Mim23_Rocket_Mat", {0.82f, 0.78f, 0.70f}};
+        if (mats.find("Mim23_Tire_Mat") == mats.end())
+          mats["Mim23_Tire_Mat"] = {"Mim23_Tire_Mat", {0.12f, 0.12f, 0.12f}};
+        if (mats.find("Mim23_Tower_Mat") == mats.end())
+          mats["Mim23_Tower_Mat"] = {"Mim23_Tower_Mat", {0.55f, 0.52f, 0.38f}};
+        for (std::size_t i = 0; i < hawk_mesh.submeshes.size() && i < data.submeshes.size(); ++i) {
+          const std::string& mat_name = data.submeshes[i].base_map;
+          auto it = mats.find(mat_name);
+          const float* kd = it != mats.end() ? it->second.kd : mats["Mim23_Hull_Mat"].kd;
+          hawk_mesh.submeshes[i].base_tex = solid_tex(kd[0], kd[1], kd[2]);
+        }
+
+        // Open dirt south of the Chinese Z-8 transport heli (-638,-316), off the runway.
+        hawk_pos = glm::vec3(-655.f, 0.f, -345.f);
         hawk_pos.y = world.terrain_height(hawk_pos.x, hawk_pos.z);
         hawk_ground_lift = (min_y < 1e8f) ? -min_y : 0.f;
         hawk_present = true;
-        hawk_heading_init = 200.f;  // face roughly along the runway / toward the sea
+        hawk_heading_init = 100.f;  // face roughly toward the airfield / runway
         std::cout << "Hawk emplacement: " << cand.string() << " at " << hawk_pos.x << ","
                   << hawk_pos.y << "," << hawk_pos.z << " scale=" << hawk_draw_scale
-                  << " lift=" << hawk_ground_lift << '\n';
+                  << " lift=" << hawk_ground_lift << " mats=" << hawk_mesh.submeshes.size()
+                  << '\n';
         break;
       } catch (const std::exception& ex) {
         std::cerr << "Hawk load failed (" << cand.string() << "): " << ex.what() << '\n';
@@ -4166,6 +4203,28 @@ int main(int argc, char** argv) {
         game_audio.play_weapon_reload(resources, !third_person);
         game_audio.play_voice(resources, voice_bank, "AUTO_MOODGP_reloading");
       }
+      if (ev.play_artillery_explosion && have_game_audio) {
+        const auto& p = ev.artillery_explosion_pos;
+        static const char* kBoomPaths[] = {
+            "Objects/Vehicles/Common/Sounds/exp_tank.wav",
+            "Objects/Weapons/Common/Sounds/exp_large.wav",
+            "Objects/Weapons/Common/Sounds/exp_medium.wav",
+            "Objects/Effects/Sounds/exp_generic.wav",
+        };
+        bool played = false;
+        for (const char* path : kBoomPaths) {
+          if (resources.read_bytes(path)) {
+            game_audio.play_3d(resources, path, p.x, p.y, p.z, player.position.x, player.position.y,
+                               player.position.z, 1.55f);
+            game_audio.play_2d(resources, path, 0.85f);
+            played = true;
+            break;
+          }
+        }
+        if (!played) {
+          for (const char* path : kBoomPaths) game_audio.play_2d(resources, path, 1.2f);
+        }
+      }
       if (ev.out_of_ammo_voice && voice_cooldown <= 0.f && have_game_audio) {
         game_audio.play_voice(resources, voice_bank, "out_of_ammo");
         voice_cooldown = 2.5f;
@@ -4655,13 +4714,13 @@ int main(int argc, char** argv) {
       }
     }
 
-    // MIM-23 Hawk emplacement (custom OBJ) — Chinese airfield runway apron.
+    // MIM-23 Hawk emplacement — open ground by Chinese Z-8 (off runway).
     if (hawk_present && hawk_mesh.vao != 0) {
       const glm::mat4 model =
           glm::translate(glm::mat4(1.f), hawk_pos) *
           glm::rotate(glm::mat4(1.f), glm::radians(hawk_heading), glm::vec3(0.f, 1.f, 0.f)) *
           glm::scale(glm::mat4(1.f), glm::vec3(hawk_draw_scale)) *
-          glm::translate(glm::mat4(1.f), glm::vec3(0.f, hawk_ground_lift, 0.f));
+          glm::translate(glm::mat4(1.f), glm::vec3(0.f, hawk_ground_lift, 0.f)) * hawk_mesh_fix;
       const glm::mat4 mvp = view_proj * model;
       renderer.draw_textured(hawk_mesh, glm::value_ptr(mvp), glm::value_ptr(model));
     }
@@ -5029,7 +5088,7 @@ int main(int argc, char** argv) {
           bp.x = ex.p.x;
           bp.y = ex.p.y + layer * 0.4f;
           bp.z = ex.p.z;
-          bp.size = (1.2f + k * 7.f) * ex.scale * (1.f + layer * 0.25f);
+          bp.size = (2.4f + k * 14.f) * ex.scale * (1.f + layer * 0.3f);
           bp.r = 1.f;
           bp.g = 0.45f + layer * 0.1f;
           bp.b = 0.08f;

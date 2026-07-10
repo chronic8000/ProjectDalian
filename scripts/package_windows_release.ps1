@@ -1,7 +1,7 @@
 # Package a Windows x64 binary release (no EA/DICE assets — user supplies BF2 install).
 param(
     [string]$BuildDir = "C:\Projects\bf2respawn\build",
-    [string]$Version = "v0.5.7-alpha",
+    [string]$Version = "v0.5.13-alpha",
     [string]$OutDir = "C:\Projects\bf2respawn\dist"
 )
 
@@ -60,12 +60,17 @@ No EA/DICE game data is included.
    (default: C:\Program Files (x86)\Battlefield2)
 4. Pick a map from the main menu and play.
 
-MIM-23 Hawk (Dalian Plant 64 CQ): orange blip on the minimap near the Chinese
-airfield jets. Walk up and press E / F8 to fire map SAMs.
+MIM-23 Hawk (Dalian Plant 64 CQ): orange minimap blip near the Chinese heli
+pad / airfield. Walk up and press E / F8 to fire map SAMs.
 
 Graphics tips (HD texture packs):
-  Options → Graphics → lower Render Scale, enable FSR 1.0, raise Mip LOD Bias.
+  Options → Graphics → lower Render Scale, try FSR 1.0, raise Mip LOD Bias.
   Options → Video → Show FPS to measure the result.
+
+Green sky / purple world (weak laptop GPUs):
+  Options → Graphics → Laptop / Compat Mode → Apply
+  or set BF2_COMPAT=1 before launch
+  (HDR off now uses real LDR buffers — not Windows/monitor HDR)
 
 Recovery if the display breaks:
   project_dalian.exe --windowed

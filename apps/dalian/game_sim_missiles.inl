@@ -71,8 +71,8 @@ if ((want_at || want_sam) && state_.missile_reload <= 0.f) {
         am.m.life = 28.f;
         am.m.gravity = 9.81f * 0.55f;
         am.m.drag = 0.00035f;
-        am.explosion_radius = 22.f;
-        am.explosion_damage = 240.f;
+        am.explosion_radius = 38.f;
+        am.explosion_damage = 320.f;
         am.smoke_timer = 0.04f;
       }
       if (params_.missile_headless_demo && !state_.missiles.empty()) {
@@ -203,8 +203,10 @@ for (auto& am : state_.missiles) {
     am.m.alive = false;
     if (am.detonation_fx == 1) {
       spawn_igla_detonation_fx(state_.smoke, state_.explosions, boom,
-                               glm::clamp(am.explosion_radius / 8.f, 1.2f, 3.5f));
+                               glm::clamp(am.explosion_radius / 7.f, 3.0f, 7.5f));
       explode_at(boom, am.explosion_radius, am.explosion_damage, false);
+      events_.play_artillery_explosion = true;
+      events_.artillery_explosion_pos = boom;
     } else {
       explode_at(boom, am.explosion_radius, am.explosion_damage);
     }

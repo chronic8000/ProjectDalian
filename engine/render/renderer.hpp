@@ -236,6 +236,9 @@ public:
   void set_upscale_mode(int mode);
   // RCAS sharpness in AMD "stops" (0 = max sharp, ~2 = soft). Typical 0.2.
   void set_fsr_sharpness(float stops);
+  // When false (HDR tonemap off), scene/bloom use RGBA8 — required on many
+  // Intel/old laptop GPUs where RGB16F FBOs render as green/magenta garbage.
+  bool using_float_color() const { return use_float_color_; }
 
   // Full-screen sky. Samples Skydome.skyTexture when provided; otherwise a
   // vertical gradient. Night maps draw a moon disc from flareDirection.
@@ -330,6 +333,7 @@ private:
   std::uint32_t bloom_tex_[2] = {0, 0};
   int bloom_w_ = 0;
   int bloom_h_ = 0;
+  bool bloom_float_ = false;  // last bloom allocation used float colour
   bool bloom_enabled_ = true;
   float bloom_intensity_ = 0.55f;
   float bloom_threshold_ = 0.85f;
@@ -361,6 +365,9 @@ private:
   bool ssao_enabled_ = true;
   bool hdr_enabled_ = false;
   float hdr_exposure_ = 0.55f;
+  bool use_float_color_ = false;   // RGB16F only when HDR tonemap is on + GPU OK
+  bool float_color_ok_ = true;     // probed at init
+  int scene_color_fmt_ = 0;        // tracks last allocated internal format
 
   bool initialized_ = false;
 };
