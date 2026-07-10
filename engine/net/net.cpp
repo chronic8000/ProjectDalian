@@ -84,6 +84,8 @@ constexpr std::size_t kPlayerV2TailBytes = 39;  // vx..veh_rotor_spin
 
 constexpr std::size_t kPlayerV3ExtraBytes = 4;  // input_seq
 
+constexpr std::size_t kPlayerV4ExtraBytes = 1;  // seat
+
 
 
 void put_u8(std::vector<std::uint8_t>& b, std::uint8_t v) { b.push_back(v); }
@@ -252,6 +254,8 @@ NetPlayerSnapshot snapshot_from_player(const NetPlayer& p, double time) {
 
   s.veh_rotor_spin = p.veh_rotor_spin;
 
+  s.seat = p.seat;
+
   return s;
 
 }
@@ -310,6 +314,8 @@ void write_player(std::vector<std::uint8_t>& b, const NetPlayer& pl) {
 
   put_u32(b, pl.input_seq);
 
+  put_u8(b, static_cast<std::uint8_t>(pl.seat));
+
 }
 
 
@@ -367,6 +373,8 @@ NetPlayer read_player(Reader& r) {
   }
 
   if (r.o + kPlayerV3ExtraBytes <= r.n) pl.input_seq = r.u32();
+
+  if (r.o + kPlayerV4ExtraBytes <= r.n) pl.seat = static_cast<std::int8_t>(r.u8());
 
   pl.active = true;
 
@@ -883,6 +891,8 @@ void Net::sample_interpolated(const NetPlayer& p, double render_time, NetPlayerS
 
   out.veh_rotor_spin = lerp1(older.veh_rotor_spin, newer.veh_rotor_spin, u);
 
+  out.seat = newer.seat;
+
 }
 
 
@@ -957,6 +967,8 @@ void Net::update_remotes() {
 
       p.rveh_rotor_spin = view.veh_rotor_spin;
 
+      p.seat = view.seat;
+
       p.ranim_time = view.anim_time;
 
       p.have_render = true;
@@ -986,6 +998,8 @@ void Net::update_remotes() {
     p.rveh_rotor_rpm = view.veh_rotor_rpm;
 
     p.rveh_rotor_spin = view.veh_rotor_spin;
+
+    p.seat = view.seat;
 
     p.ranim_time = view.anim_time;
 

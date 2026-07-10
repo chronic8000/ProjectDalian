@@ -40,6 +40,10 @@ struct PlayerInput {
   bool reloading_blocked = false;
   bool launch_missile = false;
   bool launch_at = false;
+  bool has_missile_target = false;  // map-picked SAM destination
+  glm::vec3 missile_target{0.f};
+  bool has_sam_launch_origin = false;  // fixed emplacement (Hawk) vs nearest car
+  glm::vec3 sam_launch_origin{0.f};
   bool flare_request = false;
   bool gear_toggle = false;
   bool pitch_up = false;  // Space — continuous pitch-up (BF2 jet dogfight bind)
@@ -81,6 +85,7 @@ struct ActiveMissile {
   float smoke_timer = 0.f;
   float explosion_radius = 9.f;
   float explosion_damage = 150.f;
+  std::uint8_t detonation_fx = 0;  // 0 = default, 1 = igla (e_vexp_igla)
 };
 
 struct Smoke {
@@ -120,7 +125,7 @@ struct VehicleWheelSlot {
   std::string mesh_key;
   glm::mat4 rest{1.f};
   bool steers = false;
-  // Tanks: road-wheel tread pads scroll UVs; drive sprockets still spin geometry.
+  // Tanks: hubs spin with speed; tread-belt UV scroll is on hull track materials.
   bool spin_geometry = true;
   bool is_sprocket = false;
   float gear_tuck_angle = 65.f;  // degrees when landing gear stows (jets)
@@ -189,8 +194,8 @@ struct Vehicle {
   float rotor_spool_down = 4.f;
   float rotor_spool_collective = 1.8f;
   float rotor_spin_rate = 62.f;
-  float heli_drag_horiz = 0.9f;
-  float heli_drag_vert = 1.4f;
+  float heli_drag_horiz = 0.32f;
+  float heli_drag_vert = 0.55f;
   float gravity = 9.81f;
   float jet_v1 = 20.f;
   float jet_liftoff = 26.f;
@@ -240,6 +245,10 @@ struct Enemy {
   glm::vec3 patrol_target{};
   float patrol_wait = 0.f;
   std::vector<HitCapsule> caps;
+  // Squad tactics (Phase 8).
+  int squad_id = -1;
+  std::int8_t role = 0;       // 0 assault, 1 flank, 2 suppress
+  float flank_sign = 1.f;     // +1 / -1 side for flankers
 };
 
 }  // namespace dalian

@@ -2,6 +2,7 @@
 
 #include "game_sim_types.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -77,16 +78,35 @@ void init_bf2_fx(bf2::EffectBundleLibrary* library) { g_fx = library; }
 
 void spawn_rocket_launch_fx(std::vector<Smoke>& smoke, const glm::vec3& origin,
                             const glm::vec3& dir) {
+  // Prefer retail ignition + rocketpod muzzle when present.
+  if (g_fx && g_fx->get("e_missile_ignition")) {
+    emit_bundle(smoke, "e_missile_ignition", origin, dir, 10, 1.15f, 1);
+  }
   if (g_fx && g_fx->get("e_muzz_rocketpod")) {
     emit_bundle(smoke, "e_muzz_rocketpod", origin, dir, 8, 1.f, 1);
     return;
   }
+  if (g_fx && g_fx->get("e_missile_ignition")) return;
   const glm::vec3 back = glm::normalize(dir) * -1.f;
   for (int i = 0; i < 14; ++i) {
     push_smoke(smoke, origin + back * (0.1f + frand() * 0.4f),
                back * (8.f + frand() * 10.f) + rand_dir() * 2.f, 0.5f + frand() * 0.35f,
                0.35f + frand() * 0.25f, 1);
   }
+}
+
+void spawn_missile_trail_fx(std::vector<Smoke>& smoke, const glm::vec3& pos, const glm::vec3& dir,
+                            float density) {
+  density = std::clamp(density, 0.15f, 2.f);
+  if (g_fx && g_fx->get("e_missile_trail")) {
+    const int n = std::max(1, static_cast<int>(std::lround(2.0 * static_cast<double>(density))));
+    emit_bundle(smoke, "e_missile_trail", pos, dir, n, 0.55f * density, 1);
+    return;
+  }
+  // Fallback still uses smoke billboards (anim_smoketrail texture), not debug lines.
+  const glm::vec3 back = glm::normalize(dir) * -1.f;
+  push_smoke(smoke, pos + back * 0.4f, back * (3.f + frand() * 4.f) + rand_dir() * 0.8f,
+             1.4f + frand() * 0.6f, (0.45f + frand() * 0.25f) * density, 1);
 }
 
 void spawn_missile_detonation_fx(std::vector<Smoke>& smoke, std::vector<Explosion>& explosions,
@@ -112,6 +132,31 @@ void spawn_missile_detonation_fx(std::vector<Smoke>& smoke, std::vector<Explosio
   for (int i = 0; i < 18; ++i) {
     push_smoke(smoke, center, rand_dir() * (2.f + frand() * 5.f), 2.f + frand() * 2.5f,
                0.9f + frand() * 1.6f, 0);
+  }
+}
+
+void spawn_igla_detonation_fx(std::vector<Smoke>& smoke, std::vector<Explosion>& explosions,
+                              const glm::vec3& center, float scale) {
+  Explosion ex;
+  ex.p = center;
+  ex.age = 0.f;
+  ex.life = 1.0f * scale;
+  ex.scale = scale;
+  explosions.push_back(ex);
+  if (g_fx && g_fx->get("e_vexp_igla")) {
+    emit_bundle(smoke, "e_vexp_igla", center, glm::vec3(0.f, 1.f, 0.f),
+                static_cast<int>(32 * scale), scale, 3);
+    return;
+  }
+  const char* bundle = surface_mexp("dirt");
+  if (g_fx && g_fx->get(bundle)) {
+    emit_bundle(smoke, bundle, center, glm::vec3(0.f, 1.f, 0.f), static_cast<int>(28 * scale),
+                scale, 3);
+    return;
+  }
+  for (int i = 0; i < 28; ++i) {
+    const glm::vec3 v = rand_dir() * (6.f + frand() * 18.f);
+    push_smoke(smoke, center + v * 0.04f, v, 0.8f + frand() * 1.4f, 0.5f + frand() * 1.2f, 3);
   }
 }
 

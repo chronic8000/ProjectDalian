@@ -19,6 +19,8 @@
 #include "engine/core/overgrowth_parser.hpp"
 #include "engine/core/overgrowth_instances.hpp"
 #include "engine/core/compiled_roads_parser.hpp"
+#include "engine/core/collision_resolver.hpp"
+#include "engine/formats/mesh/bf2_road_mesh.hpp"
 #include "engine/formats/terrain/heightmap_cluster.hpp"
 #include "engine/formats/terrain/terrain_con_parser.hpp"
 #include "engine/formats/terrain/terrain_loader.hpp"
@@ -80,6 +82,9 @@ int main() {
   check(bf2::overgrowth_parser_self_test(), "OvergrowthParser self-test");
   check(bf2::overgrowth_instances_self_test(), "OvergrowthInstances self-test");
   check(bf2::compiled_roads_parser_self_test(), "CompiledRoadsParser self-test");
+  check(bf2::road_compiled_self_test(), "RoadCompiled mesh self-test");
+  check(bf2::collision_resolver_self_test(), "CollisionResolver self-test");
+  check(bf2::MeshLoader::technique_map_assign_self_test(), "Technique map assign self-test");
   check(bf2::heightmap_cluster_self_test(), "HeightmapCluster self-test");
 
   // Character controller clamps to a flat terrain surface.

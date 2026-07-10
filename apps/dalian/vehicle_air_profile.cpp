@@ -82,7 +82,9 @@ VehicleAirProfile parse_vehicle_air_profile(const std::string& tweak_text) {
     setf("objecttemplate.setmaxspeed", p.jet_max_air);
     setf("objecttemplate.setgravity", p.gravity);
     setf("objecttemplate.physics.mass", p.physics_mass);
+    setf("objecttemplate.mass", p.physics_mass);
     setf("objecttemplate.physics.drag", p.physics_drag);
+    setf("objecttemplate.drag", p.physics_drag);
     setf("objecttemplate.physics.winglift", p.physics_wing_lift);
     setf("objecttemplate.setwinglift", p.total_wing_lift);
     setf("objecttemplate.setflaplift", p.max_flap_lift);
@@ -152,8 +154,10 @@ void apply_vehicle_air_profile(Vehicle& v, const VehicleAirProfile& p) {
   v.rotor_spool_down = std::max(0.5f, p.rotor_spool_down_sec);
   v.rotor_spool_collective = std::max(0.5f, p.rotor_spool_collective_sec);
   v.rotor_spin_rate = std::max(10.f, p.rotor_spin_rate);
-  v.heli_drag_horiz = std::max(0.1f, p.heli_drag_horiz);
-  v.heli_drag_vert = std::max(0.1f, p.heli_drag_vert);
+  // Arcade linear drag (1/s). Keep low so helis carry momentum for J-hooks;
+  // angular damp (horizon spring) stays aggressive separately.
+  v.heli_drag_horiz = std::clamp(p.heli_drag_horiz, 0.12f, 0.55f);
+  v.heli_drag_vert = std::clamp(p.heli_drag_vert, 0.2f, 0.9f);
   v.gravity = std::max(1.f, p.gravity);
 
   v.jet_v1 = std::max(8.f, p.jet_v1);
@@ -184,6 +188,8 @@ bool vehicle_air_profile_self_test() {
   static const char* kSample = R"(
 ObjectTemplate.create Vehicle
 ObjectTemplate.activeSafe Vehicle
+ObjectTemplate.mass 6500
+ObjectTemplate.drag 0.05
 ObjectTemplate.setGearUpSpeed 50
 ObjectTemplate.setGearDownSpeed 40
 ObjectTemplate.setGearUpHeight 12
@@ -207,6 +213,7 @@ ObjectTemplate.setFlapLift 13
   const VehicleAirProfile p = parse_vehicle_air_profile(kSample);
   if (!p.valid) return false;
   if (std::fabs(p.max_thrust - 145.f) > 1e-3f) return false;
+  if (std::fabs(p.physics_mass - 6500.f) > 1e-3f) return false;
   if (std::fabs(p.horizon_damp_angle - 50.f) > 1e-3f) return false;
   if (std::fabs(p.gear_up_height - 12.f) > 1e-3f) return false;
   if (std::fabs(p.total_wing_lift - 0.72f) > 1e-3f) return false;

@@ -50,6 +50,8 @@ target_include_directories(bf2miniz PUBLIC ${CMAKE_SOURCE_DIR}/third_party/miniz
 
 add_library(bf2engine STATIC
   formats/mesh/bf2_mesh.cpp
+  formats/mesh/bf2_road_mesh.cpp
+  formats/mesh/obj_loader.cpp
   formats/archive/archive.cpp
   formats/dds/dds_loader.cpp
   formats/animation/bf2_animation.cpp

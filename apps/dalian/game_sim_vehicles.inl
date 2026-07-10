@@ -1,9 +1,39 @@
 if (state_.in_vehicle < 0) return;
 
 Vehicle& v = state_.vehicles[state_.in_vehicle];
+if (v.destroyed) {
+  state_.in_vehicle = -1;
+  state_.player_seat = 0;
+  return;
+}
 const float step = dt > 0.f ? dt : 1.f / 60.f;
 const bool boost = input.boost;
 const bool driving = state_.player_seat == 0;  // only the pilot/driver flies it
+
+// BF2 masses are ~4k–12k kg. Scale arcade accelerations so heavier airframes lag.
+const float mass_scale = [&]() {
+  const float m = v.physics_mass > 100.f ? v.physics_mass : 6500.f;
+  constexpr float kRefMass = 6500.f;
+  return glm::clamp(kRefMass / m, 0.55f, 1.4f);
+}();
+
+// Jet dogfight authority: peak near cruise (BF2 ~300–315 HUD), weak when stalled
+// or afterburning. Replaces the old monotonic "slower = better" factor.
+auto jet_turn_authority = [](float speed, float cruise, float max_air) {
+  const float sweet = std::max(12.f, cruise);
+  const float ratio = speed / sweet;
+  if (ratio < 0.5f) {
+    const float t = glm::clamp(ratio / 0.5f, 0.f, 1.f);
+    return glm::mix(0.12f, 0.42f, t);
+  }
+  if (ratio <= 1.f) {
+    const float t = (ratio - 0.5f) / 0.5f;
+    return glm::mix(0.42f, 1.f, t);
+  }
+  const float hi = std::max(sweet + 1.f, max_air);
+  const float t = glm::clamp((speed - sweet) / (hi - sweet), 0.f, 1.f);
+  return glm::mix(1.f, 0.22f, t);
+};
 
 if (v.is_air && v.is_heli) {
   // ---- BF2 rotary-wing flight (thrust-vector + virtual cyclic) ----
@@ -23,8 +53,9 @@ if (v.is_air && v.is_heli) {
   if (driving) {
     if (input.throttle_up) coll_in += 1.f;
     if (input.throttle_down) coll_in -= 1.f;
-    if (input.yaw_left) yaw_in += 1.f;
-    if (input.yaw_right) yaw_in -= 1.f;
+    // BF2 yaw: +heading = clockwise (right). A = left, D = right.
+    if (input.yaw_left) yaw_in -= 1.f;
+    if (input.yaw_right) yaw_in += 1.f;
     pitch_cmd = state_.air_pitch_stick * max_pitch;
     roll_cmd = -state_.air_roll_stick * max_roll;
   }
@@ -33,6 +64,7 @@ if (v.is_air && v.is_heli) {
   auto approach = [&](float cur, float cmd, float rate) {
     return cur + (cmd - cur) * std::min(1.f, rate * step);
   };
+  // Angular response stays snappy (high damp when stick centres) — BF2 "secret sauce".
   v.pitch = approach(v.pitch, pitch_cmd * authority, 2.6f);
   v.roll = approach(v.roll, roll_cmd * authority, 2.2f);
 
@@ -68,13 +100,19 @@ if (v.is_air && v.is_heli) {
     v.roll = approach(v.roll, 0.f, 2.0f);
   }
   thrust_mag = glm::clamp(thrust_mag, 0.f, kMaxCollectiveThrust * (boost ? 1.25f : 1.f));
+  thrust_mag *= mass_scale;
 
   v.vel += up_vector * thrust_mag * step;
   v.vel.y -= v.gravity * step;
 
-  v.vel.x -= v.vel.x * v.heli_drag_horiz * step;
-  v.vel.z -= v.vel.z * v.heli_drag_horiz * step;
-  v.vel.y -= v.vel.y * v.heli_drag_vert * step;
+  // Low linear drag + further reduction when tilted = BF2 slide / J-hook momentum.
+  const float tilt = 1.f - std::cos(glm::radians(v.pitch)) * std::cos(glm::radians(v.roll));
+  const float slide = glm::clamp(tilt * 1.8f, 0.f, 1.f);
+  const float drag_h = v.heli_drag_horiz * glm::mix(1.f, 0.28f, slide);
+  const float drag_v = v.heli_drag_vert;
+  v.vel.x -= v.vel.x * drag_h * step;
+  v.vel.z -= v.vel.z * drag_h * step;
+  v.vel.y -= v.vel.y * drag_v * step;
   v.vel = glm::clamp(v.vel, glm::vec3(-95.f), glm::vec3(95.f));
   // Integrate horizontally (with building collision), then vertically.
   if (move_vehicle_horiz(v, glm::vec3(v.vel.x, 0.f, v.vel.z) * step)) {
@@ -192,7 +230,9 @@ if (v.is_air && v.is_heli) {
     } else {
       const float roll_auth =
           glm::clamp((v.jet_rpm - jet_min_roll_rpm) / (1.f - jet_min_roll_rpm), 0.f, 1.f);
-      const float thrust = (ab_active ? 36.f * kSprintFactor : 22.f) * kThrustScale * roll_auth * v.jet_rpm;
+      const float thrust =
+          (ab_active ? 36.f * kSprintFactor : 22.f) * kThrustScale * roll_auth * v.jet_rpm *
+          mass_scale;
       if (thr_in >= 0.f)
         horiz_spd += thrust * step;
       else
@@ -237,10 +277,11 @@ if (v.is_air && v.is_heli) {
 
     const bool stick_neutral =
         std::fabs(state_.air_pitch_stick) < 0.06f && std::fabs(state_.air_roll_stick) < 0.06f;
+    const float airspeed = glm::length(v.vel);
     const float spd_norm = glm::clamp(horiz_spd / jet_cruise, 0.35f, 1.35f);
-    // BF2: high speed = wide turn radius; slow down (S) to tighten dogfight turns.
-    const float turn_speed_factor = 1.f / (1.f + horiz_spd / std::max(18.f, jet_cruise * 0.55f));
-    float ctrl = glm::clamp(horiz_spd / 32.f, 0.45f, 1.f) * turn_speed_factor;
+    // BF2 sweet spot: peak turn near cruise; stall + afterburner both punish.
+    const float turn_speed_factor = jet_turn_authority(airspeed, jet_cruise, jet_max_air);
+    float ctrl = turn_speed_factor;
 
     const float pitch_target = state_.air_pitch_stick * 48.f;
     const float roll_target = -state_.air_roll_stick * 58.f;
@@ -276,7 +317,8 @@ if (v.is_air && v.is_heli) {
     v.heading += (bank_turn + yaw_in * rudder_air) * step;
     flat_fwd = glm::vec3(std::sin(glm::radians(v.heading)), 0.f, std::cos(glm::radians(v.heading)));
 
-    const float thrust_acc = v.jet_rpm * (ab_active ? 30.f * kSprintFactor : 26.f) * kThrustScale;
+    float thrust_acc =
+        v.jet_rpm * (ab_active ? 30.f * kSprintFactor : 26.f) * kThrustScale * mass_scale;
     const float drag_base = v.physics_drag > 0.f ? v.physics_drag * 0.0008f : 0.04f;
     const float drag = drag_base + 0.0012f * horiz_spd +
                        (v.jet_gear_anim > 0.05f ? 0.018f * v.jet_gear_anim : 0.f);
@@ -338,8 +380,9 @@ if (v.is_air && v.is_heli) {
     }
     const float turn = 55.f * step * std::clamp(std::fabs(v.speed) / 6.f, 0.2f, 1.f);
     const float dir = v.speed >= 0.f ? 1.f : -1.f;
-    if (input.yaw_left) v.heading += turn * dir;
-    if (input.yaw_right) v.heading -= turn * dir;
+    // +heading = clockwise (right turn when going forward).
+    if (input.yaw_left) v.heading -= turn * dir;
+    if (input.yaw_right) v.heading += turn * dir;
   }
   if (!throttling) {
     const float d = brake * 0.55f * step;
@@ -398,11 +441,12 @@ if (v.is_air && v.is_heli) {
     // Steering scales with speed and reverses when backing up.
     const float turn = 75.f * step * std::clamp(std::fabs(v.speed) / 8.f, 0.15f, 1.f);
     const float dir = v.speed >= 0.f ? 1.f : -1.f;
-    if (input.yaw_left) v.heading += turn * dir;
-    if (input.yaw_right) v.heading -= turn * dir;
+    // +heading = clockwise (right). Matches BF2 after LH view correction.
+    if (input.yaw_left) v.heading -= turn * dir;
+    if (input.yaw_right) v.heading += turn * dir;
     float steer_target = 0.f;
-    if (input.yaw_left) steer_target = 0.42f;
-    if (input.yaw_right) steer_target = -0.42f;
+    if (input.yaw_left) steer_target = -0.42f;
+    if (input.yaw_right) steer_target = 0.42f;
     v.visual_steer = glm::mix(v.visual_steer, steer_target, 1.f - std::exp(-10.f * step));
   }
   if (!throttling) {  // engine braking / rolling resistance
@@ -422,12 +466,27 @@ if (v.is_air && v.is_heli) {
   // just the heightmap: casting down catches bridge decks, road props and
   // rail beds laid over the terrain, so the vehicle drives across them
   // instead of sinking to the ground below.
+  //
+  // Ignore hangar/canopy roofs: a hit far above the expected wheel contact
+  // (one side roof, one side ground) was tipping tanks ~45° on enter.
+  const float expect_surf = v.pos.y - v.clearance;
   auto ground_at = [&](float x, float z) -> float {
     const float terr = params_.world->terrain_height(x, z);
     float s = terr;
-    const float top = std::max(v.pos.y, terr) + 2.0f;
-    const auto dn = params_.world->raycast({x, top, z}, {0.f, -1.f, 0.f}, 28.f);
-    if (dn.hit && dn.normal.y > 0.5f) s = std::max(s, top - dn.distance);
+    const float band_lo = std::min(terr, expect_surf) - 1.5f;
+    const float band_hi = expect_surf + 1.25f;
+    const float feet = expect_surf + 1.5f;
+    const float support = params_.world->support_height(x, z, feet, 4.0f);
+    if (support > terr + 0.2f && support >= band_lo && support <= band_hi)
+      s = std::max(s, support);
+    const float top = expect_surf + 1.75f;
+    const auto dn = params_.world->raycast({x, top, z}, {0.f, -1.f, 0.f}, 10.f);
+    if (dn.hit) {
+      float ny = dn.normal.y;
+      if (ny < 0.f) ny = -ny;
+      const float hit_y = top - dn.distance;
+      if (ny > 0.5f && hit_y >= band_lo && hit_y <= band_hi) s = std::max(s, hit_y);
+    }
     return s;
   };
   const glm::vec3 fdir(std::sin(hd), 0.f, std::cos(hd));
@@ -440,8 +499,11 @@ if (v.is_air && v.is_heli) {
   v.pos.y = ground_at(v.pos.x, v.pos.z) + v.clearance;
   // Chassis normal from the four wheel-contact heights (spans the wheelbase
   // so it rides smoothly over bumps, like real suspension).
-  const float dFwd = (hF - hB) / (2.f * L);
-  const float dSide = (hR - hL) / (2.f * Wd);
+  float dFwd = (hF - hB) / (2.f * L);
+  float dSide = (hR - hL) / (2.f * Wd);
+  // Cap slope so a bad sample can't stand the vehicle on its side.
+  dFwd = std::clamp(dFwd, -0.55f, 0.55f);
+  dSide = std::clamp(dSide, -0.55f, 0.55f);
   const glm::vec3 target_n =
       glm::normalize(glm::vec3(0.f, 1.f, 0.f) - fdir * dFwd - sdir * dSide);
   const float k = 1.f - std::exp(-8.f * step);  // suspension response

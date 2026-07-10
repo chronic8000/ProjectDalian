@@ -23,17 +23,32 @@ struct Settings {
   int height = 900;
   FullscreenMode fullscreen = FullscreenMode::Windowed;
   bool vsync = true;
-  int msaa = 8;
+  bool show_fps = false;
+  int msaa = 0;  // scene is offscreen FBO; window MSAA helps little — default off
   float fov = 74.f;
   float mouse_sensitivity = 0.12f;
   bool invert_air = false;
-  float draw_distance = 2000.f;
-  float fog_scale = 1.f;
+  // Remastered default: keep the full BF2 skyline (cranes, carrier, ridges) in view.
+  float draw_distance = 8000.f;
+  float fog_scale = 1.15f;
+  // Internal 3D resolution vs window (1 = native). Biggest FPS lever on all GPUs.
+  float render_scale = 0.85f;
+  // 0=Bilinear, 1=FSR1 (EASU+RCAS), 2=Auto (→ FSR1 on OpenGL; DLSS/XeSS later).
+  int upscale_mode = 1;
+  float fsr_sharpness = 0.2f;  // RCAS stops: 0=max sharp, 2=soft
+  // Positive = prefer cheaper/blurrier mips (helps HD texture packs).
+  float mip_lod_bias = 0.35f;
+  float shadow_distance = 1400.f;  // world metres covered by cascades
+  bool grass_enabled = true;
+  float grass_distance = 55.f;
   bool bloom = true;
-  float bloom_intensity = 0.6f;
+  float bloom_intensity = 0.45f;
+  bool hdr = false;              // off by default — can look washed/bright
+  float hdr_exposure = 0.55f;    // only used when hdr is on
+  bool ssao = false;             // expensive; off by default for playable FPS
   bool shadows_enabled = true;
-  int shadow_res = 4096;
-  int anisotropic = 8;
+  int shadow_res = 2048;         // 4096 is very heavy with remastered textures
+  int anisotropic = 4;           // 8–16 is costly with remastered albedo
   float master_volume = 1.f;
   float sfx_volume = 1.f;
   float music_volume = 0.85f;
@@ -70,14 +85,32 @@ struct Settings {
       else if (key == "height") s.height = std::atoi(val.c_str());
       else if (key == "fullscreen") s.fullscreen = static_cast<FullscreenMode>(std::atoi(val.c_str()));
       else if (key == "vsync") s.vsync = val == "1" || val == "true";
+      else if (key == "show_fps") s.show_fps = val == "1" || val == "true";
       else if (key == "msaa") s.msaa = std::atoi(val.c_str());
       else if (key == "fov") s.fov = static_cast<float>(std::atof(val.c_str()));
       else if (key == "mouse_sensitivity") s.mouse_sensitivity = static_cast<float>(std::atof(val.c_str()));
       else if (key == "invert_air") s.invert_air = val == "1" || val == "true";
-      else if (key == "draw_distance") s.draw_distance = static_cast<float>(std::atof(val.c_str()));
+      else if (key == "draw_distance")
+        s.draw_distance = std::clamp(static_cast<float>(std::atof(val.c_str())), 500.f, 16000.f);
       else if (key == "fog_scale") s.fog_scale = static_cast<float>(std::atof(val.c_str()));
+      else if (key == "render_scale")
+        s.render_scale = std::clamp(static_cast<float>(std::atof(val.c_str())), 0.5f, 1.f);
+      else if (key == "upscale_mode") s.upscale_mode = std::clamp(std::atoi(val.c_str()), 0, 2);
+      else if (key == "fsr_sharpness")
+        s.fsr_sharpness = std::clamp(static_cast<float>(std::atof(val.c_str())), 0.f, 2.f);
+      else if (key == "mip_lod_bias")
+        s.mip_lod_bias = std::clamp(static_cast<float>(std::atof(val.c_str())), -2.f, 2.f);
+      else if (key == "shadow_distance")
+        s.shadow_distance = std::clamp(static_cast<float>(std::atof(val.c_str())), 200.f, 4000.f);
+      else if (key == "grass_enabled") s.grass_enabled = val == "1" || val == "true";
+      else if (key == "grass_distance")
+        s.grass_distance = std::clamp(static_cast<float>(std::atof(val.c_str())), 10.f, 200.f);
       else if (key == "bloom") s.bloom = val == "1" || val == "true";
       else if (key == "bloom_intensity") s.bloom_intensity = static_cast<float>(std::atof(val.c_str()));
+      else if (key == "hdr") s.hdr = val == "1" || val == "true";
+      else if (key == "hdr_exposure")
+        s.hdr_exposure = std::clamp(static_cast<float>(std::atof(val.c_str())), 0.15f, 2.5f);
+      else if (key == "ssao") s.ssao = val == "1" || val == "true";
       else if (key == "shadows_enabled") s.shadows_enabled = val == "1" || val == "true";
       else if (key == "shadow_res") s.shadow_res = std::atoi(val.c_str());
       else if (key == "anisotropic") s.anisotropic = std::atoi(val.c_str());
@@ -106,6 +139,9 @@ struct Settings {
       s.width = 1920;
       s.height = 1080;
     }
+    // Migrate pre-remaster visibility defaults (old default was 2000 / fog 1.0).
+    if (s.draw_distance > 0.f && s.draw_distance <= 2500.f) s.draw_distance = 8000.f;
+    if (s.fog_scale > 0.99f && s.fog_scale < 1.01f) s.fog_scale = 1.15f;
     if (static_cast<int>(s.fullscreen) < 0 || static_cast<int>(s.fullscreen) > 2)
       s.fullscreen = FullscreenMode::Windowed;
     if (const char* wf = std::getenv("BF2_WINDOWED")) {
@@ -124,14 +160,25 @@ struct Settings {
     out << "height=" << height << '\n';
     out << "fullscreen=" << static_cast<int>(fullscreen) << '\n';
     out << "vsync=" << (vsync ? 1 : 0) << '\n';
+    out << "show_fps=" << (show_fps ? 1 : 0) << '\n';
     out << "msaa=" << msaa << '\n';
     out << "fov=" << fov << '\n';
     out << "mouse_sensitivity=" << mouse_sensitivity << '\n';
     out << "invert_air=" << (invert_air ? 1 : 0) << '\n';
     out << "draw_distance=" << draw_distance << '\n';
     out << "fog_scale=" << fog_scale << '\n';
+    out << "render_scale=" << render_scale << '\n';
+    out << "upscale_mode=" << upscale_mode << '\n';
+    out << "fsr_sharpness=" << fsr_sharpness << '\n';
+    out << "mip_lod_bias=" << mip_lod_bias << '\n';
+    out << "shadow_distance=" << shadow_distance << '\n';
+    out << "grass_enabled=" << (grass_enabled ? 1 : 0) << '\n';
+    out << "grass_distance=" << grass_distance << '\n';
     out << "bloom=" << (bloom ? 1 : 0) << '\n';
     out << "bloom_intensity=" << bloom_intensity << '\n';
+    out << "hdr=" << (hdr ? 1 : 0) << '\n';
+    out << "hdr_exposure=" << hdr_exposure << '\n';
+    out << "ssao=" << (ssao ? 1 : 0) << '\n';
     out << "shadows_enabled=" << (shadows_enabled ? 1 : 0) << '\n';
     out << "shadow_res=" << shadow_res << '\n';
     out << "anisotropic=" << anisotropic << '\n';
@@ -158,7 +205,7 @@ struct Settings {
 
   void apply_env_defaults() {
     if (const char* dd = std::getenv("BF2_DRAWDIST"))
-      draw_distance = std::max(200.f, static_cast<float>(std::atof(dd)));
+      draw_distance = std::clamp(static_cast<float>(std::atof(dd)), 500.f, 16000.f);
     if (const char* fs = std::getenv("BF2_FOGSCALE"))
       fog_scale = std::max(0.05f, static_cast<float>(std::atof(fs)));
     if (const char* ms = std::getenv("BF2_MSAA")) msaa = std::atoi(ms);
@@ -166,6 +213,12 @@ struct Settings {
       bloom = !(b[0] == '0' || b[0] == 'n' || b[0] == 'N');
     if (const char* bi = std::getenv("BF2_BLOOMI"))
       bloom_intensity = static_cast<float>(std::atof(bi));
+    if (const char* h = std::getenv("BF2_HDR"))
+      hdr = !(h[0] == '0' || h[0] == 'n' || h[0] == 'N');
+    if (const char* he = std::getenv("BF2_HDR_EXPOSURE"))
+      hdr_exposure = std::clamp(static_cast<float>(std::atof(he)), 0.15f, 2.5f);
+    if (const char* ao = std::getenv("BF2_SSAO"))
+      ssao = !(ao[0] == '0' || ao[0] == 'n' || ao[0] == 'N');
     if (const char* ia = std::getenv("BF2_INVERTAIR"))
       invert_air = ia[0] == '1' || ia[0] == 't' || ia[0] == 'T' || ia[0] == 'y' ||
                    ia[0] == 'Y' || ia[0] == 'o' || ia[0] == 'O';

@@ -41,6 +41,7 @@ if (state_.in_vehicle >= 0 && state_.in_vehicle < static_cast<int>(state_.vehicl
 int best = -1;
 float best_d2 = 6.0f * 6.0f;
 for (std::size_t i = 0; i < state_.vehicles.size(); ++i) {
+  if (state_.vehicles[i].destroyed) continue;
   if (state_.vehicles[i].mesh_key.find("vehicles/") == std::string::npos) continue;
   const glm::vec3 d(state_.vehicles[i].pos.x - state_.player.position.x, 0.f,
                     state_.vehicles[i].pos.z - state_.player.position.z);
@@ -59,6 +60,11 @@ Vehicle& nv = state_.vehicles[best];
 for (auto& s : nv.seats) s.occupant = -1;
 if (!nv.seats.empty()) nv.seats[0].occupant = 0;
 if (nv.seats.size() > 1) nv.seats[1].occupant = 1;
+// Start level so the first ground sample can't inherit a tipped normal.
+if (!nv.is_air && !nv.is_boat) {
+  nv.ground_normal = glm::vec3(0.f, 1.f, 0.f);
+  rebuild_vehicle_model(nv);
+}
 if (nv.is_air) {
   events_.capture_mouse = true;
   events_.discard_mouse_delta = true;

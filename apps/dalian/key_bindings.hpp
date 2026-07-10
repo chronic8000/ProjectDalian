@@ -59,6 +59,7 @@ enum class GameAction : std::uint16_t {
   ReconDrone,
   KamikazeDrone,
   MedkitHeal,
+  CarSam,  // opens tactical map; click destination to fire car-launched Igla
   Count
 };
 

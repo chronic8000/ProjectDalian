@@ -261,9 +261,10 @@ float PhysicsWorld::terrain_height(float x, float z) const {
   const float w = static_cast<float>(terrain_.width);
   const float h = static_cast<float>(terrain_.height);
 
-  // World -> grid coordinates.
-  float gx = x / cell_size_ + (centered_ ? w * 0.5f : 0.f);
-  float gz = z / cell_size_ + (centered_ ? h * 0.5f : 0.f);
+  // World -> grid coordinates. Use (w-1)/2 so sample 0 maps to -1024 on a
+  // 1025@2m BF2 primary (matches HeightmapCluster patch bounds and object space).
+  float gx = x / cell_size_ + (centered_ ? (w - 1.f) * 0.5f : 0.f);
+  float gz = z / cell_size_ + (centered_ ? (h - 1.f) * 0.5f : 0.f);
   gx = std::clamp(gx, 0.f, w - 1.001f);
   gz = std::clamp(gz, 0.f, h - 1.001f);
 

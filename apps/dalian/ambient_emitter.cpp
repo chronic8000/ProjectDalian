@@ -97,17 +97,8 @@ void step_ambient_emitters(std::vector<AmbientEmitter>& emitters, std::vector<Sm
     while (e.accum >= e.emit_period) {
       e.accum -= e.emit_period;
       if (e.kind == 2) {
-        if (smoke.size() >= 8000) break;
-        Smoke s;
-        s.p = e.pos;
-        s.vel = glm::vec3(0.f, 0.15f, 0.f);
-        s.age = 0.f;
-        s.life = 0.35f;
-        s.size = 0.9f;
-        s.birth_size = 0.9f;
-        s.kind = 2;
-        s.tint = e.light_color;
-        smoke.push_back(s);
+        // Baselights are drawn as soft camera-facing glow sprites — do not also
+        // emit kind-2 smoke puffs (those became the white vertical streaks).
         continue;
       }
       if (!e.bundle.empty()) {

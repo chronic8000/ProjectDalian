@@ -194,7 +194,9 @@ void draw_options_content(bf2::Renderer& r, Settings& settings, OptTab tab, int 
                           bool clicked, int& res_idx, bool& res_open, int& fs_idx, bool& fs_open,
                           int& msaa_idx, bool& msaa_open, int& shadow_idx, bool& shadow_open,
                           const std::vector<DisplayModeEntry>& modes, OptionPopupAnchors& anchors,
-                          float& controls_scroll, int& rebind_action, bool& capture_key) {
+                          float& controls_scroll, float& graphics_scroll, int& rebind_action,
+                          bool& capture_key) {
+  constexpr float H = 900.f;
   const float ox = 48, oy = 160;
   if (tab == OptTab::Video) {
     r.ui_text(ox, oy, 1.5f, "VIDEO SETTINGS", UiTheme::kOrangeR, UiTheme::kOrangeG,
@@ -228,6 +230,9 @@ void draw_options_content(bf2::Renderer& r, Settings& settings, OptTab tab, int 
     if (draw_checkbox(r, mx, my, ox, y, "VERTICAL SYNC", settings.vsync) && clicked)
       settings.vsync = !settings.vsync;
     y += 32;
+    if (draw_checkbox(r, mx, my, ox, y, "SHOW FPS", settings.show_fps) && clicked)
+      settings.show_fps = !settings.show_fps;
+    y += 32;
     r.ui_text(ox, y, 1.3f, "ANTI-ALIASING (MSAA)", 0.75f, 0.78f, 0.82f, 1.f);
     y += 22;
     const char* msaa_labels[] = {"OFF", "2x", "4x", "8x", "16x"};
@@ -242,35 +247,95 @@ void draw_options_content(bf2::Renderer& r, Settings& settings, OptTab tab, int 
   } else if (tab == OptTab::Graphics) {
     r.ui_text(ox, oy, 1.5f, "GRAPHICS SETTINGS", UiTheme::kOrangeR, UiTheme::kOrangeG,
               UiTheme::kOrangeB, 1.f);
-    float y = oy + 36;
-    draw_slider(r, mx, my, clicked, ox, y, 280, "DRAW DISTANCE", settings.draw_distance, 500.f,
-                4000.f);
-    y += 52;
-    draw_slider(r, mx, my, clicked, ox, y, 280, "FOG SCALE", settings.fog_scale, 0.2f, 3.f);
-    y += 52;
-    if (draw_checkbox(r, mx, my, ox, y, "BLOOM", settings.bloom) && clicked)
-      settings.bloom = !settings.bloom;
-    y += 32;
-    draw_slider(r, mx, my, clicked, ox, y, 280, "BLOOM INTENSITY", settings.bloom_intensity, 0.f,
-                1.5f);
-    y += 52;
-    if (draw_checkbox(r, mx, my, ox, y, "SHADOWS", settings.shadows_enabled) && clicked)
-      settings.shadows_enabled = !settings.shadows_enabled;
-    y += 32;
-    const char* sh_labels[] = {"1024", "2048", "4096", "8192"};
-    r.ui_text(ox, y, 1.3f, "SHADOW RESOLUTION", 0.75f, 0.78f, 0.82f, 1.f);
-    y += 22;
-    anchors.shadow_x = ox;
-    anchors.shadow_y = y;
-    if (draw_button(r, mx, my, ox, y, 120, 32, sh_labels[shadow_idx])) {
-      if (clicked) shadow_open = !shadow_open;
+    const float view_top = oy + 34.f;
+    const float view_bot = H - 150.f;
+    const float view_h = view_bot - view_top;
+    // Approximate full content height (must stay in sync with layout below).
+    constexpr float kGraphicsContentH = 820.f;
+    graphics_scroll = clamp_scroll(graphics_scroll, kGraphicsContentH, view_h);
+    r.ui_text(ox + 320, oy + 4, 1.05f, "mouse wheel to scroll", 0.45f, 0.48f, 0.52f, 1.f);
+
+    float mx_d = 0.f, my_d = 0.f;
+    ui_mouse_design(r, mx, my, mx_d, my_d);
+    const bool in_view = my_d >= view_top && my_d <= view_bot;
+    const bool gclick = clicked && in_view;
+
+    auto visible = [&](float y, float h) {
+      return y + h > view_top && y < view_bot;
+    };
+
+    float y = view_top - graphics_scroll;
+    auto row_slider = [&](const char* label, float& value, float vmin, float vmax,
+                          const char* hint = nullptr) {
+      if (visible(y, 48.f)) {
+        draw_slider(r, mx, my, gclick, ox, y, 280, label, value, vmin, vmax);
+        if (hint) r.ui_text(ox + 300, y + 24, 1.05f, hint, 0.55f, 0.58f, 0.62f, 1.f);
+      }
+      y += 52;
+    };
+    auto row_check = [&](const char* label, bool& flag) {
+      if (visible(y, 28.f)) {
+        if (draw_checkbox(r, mx, my, ox, y, label, flag) && gclick) flag = !flag;
+      }
+      y += 32;
+    };
+
+    row_slider("DRAW DISTANCE", settings.draw_distance, 1000.f, 12000.f);
+    row_slider("FOG SCALE", settings.fog_scale, 0.35f, 2.5f);
+    row_slider("RENDER SCALE", settings.render_scale, 0.5f, 1.f, "(internal 3D res)");
+    {
+      const char* up_labels[] = {"BILINEAR", "FSR 1.0", "AUTO"};
+      settings.upscale_mode = std::clamp(settings.upscale_mode, 0, 2);
+      if (visible(y, 54.f)) {
+        r.ui_text(ox, y, 1.3f, "UPSCALING", 0.75f, 0.78f, 0.82f, 1.f);
+        if (draw_button(r, mx, my, ox, y + 22, 160, 32, up_labels[settings.upscale_mode]) &&
+            gclick) {
+          settings.upscale_mode = (settings.upscale_mode + 1) % 3;
+        }
+        r.ui_text(ox + 175, y + 30, 1.05f, "(any GPU; Auto picks best)", 0.55f, 0.58f, 0.62f, 1.f);
+      }
+      y += 62;
     }
-    r.ui_text(ox + 130, y + 8, 1.1f, "(restart to apply)", 0.55f, 0.58f, 0.62f, 1.f);
-    y += 50;
-    float aniso = static_cast<float>(settings.anisotropic);
-    draw_slider(r, mx, my, clicked, ox, y, 280, "ANISOTROPIC FILTER", aniso, 1.f, 16.f);
-    settings.anisotropic = static_cast<int>(aniso + 0.5f);
-    r.ui_text(ox + 300, y + 24, 1.1f, "(next map load)", 0.55f, 0.58f, 0.62f, 1.f);
+    row_slider("FSR SHARPNESS", settings.fsr_sharpness, 0.f, 2.f, "(0=sharp, 2=soft)");
+    row_slider("MIP LOD BIAS", settings.mip_lod_bias, -1.f, 2.f, "(+ = cheaper HD mips)");
+    row_check("GRASS", settings.grass_enabled);
+    row_slider("GRASS DISTANCE", settings.grass_distance, 10.f, 160.f);
+    row_check("BLOOM", settings.bloom);
+    row_slider("BLOOM INTENSITY", settings.bloom_intensity, 0.f, 1.5f);
+    row_check("HDR (TONEMAP)", settings.hdr);
+    row_slider("HDR EXPOSURE", settings.hdr_exposure, 0.15f, 1.5f);
+    row_check("SSAO", settings.ssao);
+    row_check("SHADOWS", settings.shadows_enabled);
+    row_slider("SHADOW DISTANCE", settings.shadow_distance, 400.f, 2800.f);
+    {
+      const char* sh_labels[] = {"1024", "2048", "4096", "8192"};
+      if (visible(y, 54.f)) {
+        r.ui_text(ox, y, 1.3f, "SHADOW RESOLUTION", 0.75f, 0.78f, 0.82f, 1.f);
+        anchors.shadow_x = ox;
+        anchors.shadow_y = y + 22;
+        if (draw_button(r, mx, my, ox, y + 22, 120, 32, sh_labels[shadow_idx])) {
+          if (gclick) shadow_open = !shadow_open;
+        }
+        r.ui_text(ox + 130, y + 30, 1.05f, "(restart to apply)", 0.55f, 0.58f, 0.62f, 1.f);
+      } else {
+        anchors.shadow_x = ox;
+        anchors.shadow_y = y + 22;
+      }
+      y += 62;
+    }
+    {
+      float aniso = static_cast<float>(settings.anisotropic);
+      if (visible(y, 48.f)) {
+        draw_slider(r, mx, my, gclick, ox, y, 280, "ANISOTROPIC FILTER", aniso, 1.f, 16.f);
+        settings.anisotropic = static_cast<int>(aniso + 0.5f);
+        r.ui_text(ox + 300, y + 24, 1.05f, "(cap 4–8 for HD packs)", 0.55f, 0.58f, 0.62f, 1.f);
+      }
+      y += 52;
+    }
+    // Keep measured content height honest if layout drifts.
+    const float measured = (y + graphics_scroll) - view_top;
+    if (measured > 1.f)
+      graphics_scroll = clamp_scroll(graphics_scroll, measured, view_h);
   } else if (tab == OptTab::Controls) {
     draw_controls_options(r, settings, mx, my, clicked, controls_scroll, rebind_action,
                           capture_key);
@@ -477,8 +542,14 @@ MapEntry resolve_map_entry(const std::vector<MapEntry>& maps, const std::string&
 
 void apply_graphics_settings(bf2::Renderer& renderer, Settings& settings) {
   renderer.set_bloom(settings.bloom, settings.bloom_intensity);
+  renderer.set_hdr(settings.hdr);
+  renderer.set_hdr_exposure(settings.hdr_exposure);
+  renderer.set_ssao(settings.ssao);
   renderer.set_shadows_enabled(settings.shadows_enabled);
   renderer.set_anisotropic(settings.anisotropic);
+  renderer.set_mip_lod_bias(settings.mip_lod_bias);
+  renderer.set_upscale_mode(settings.upscale_mode);
+  renderer.set_fsr_sharpness(settings.fsr_sharpness);
 }
 
 bool run_options_panel(SDL_Window* window, bf2::Renderer& renderer, Settings& settings, int& screen_w,
@@ -506,6 +577,7 @@ bool run_options_panel(SDL_Window* window, bf2::Renderer& renderer, Settings& se
   bool res_open = false, fs_open = false, msaa_open = false, shadow_open = false;
   OptionPopupAnchors anchors{};
   float controls_scroll = 0.f;
+  float graphics_scroll = 0.f;
   float res_list_scroll = 0.f;
   int rebind_action = -1;
   bool capture_key = false;
@@ -530,6 +602,8 @@ bool run_options_panel(SDL_Window* window, bf2::Renderer& renderer, Settings& se
                  handle_controls_key_capture(e, settings, rebind_action, capture_key)) {
       } else if (e.type == SDL_MOUSEWHEEL && opt_tab == OptTab::Controls) {
         controls_scroll -= e.wheel.y * 24.f;
+      } else if (e.type == SDL_MOUSEWHEEL && opt_tab == OptTab::Graphics) {
+        graphics_scroll -= e.wheel.y * 36.f;
       } else if (e.type == SDL_MOUSEWHEEL && opt_tab == OptTab::Video && res_open) {
         res_list_scroll -= e.wheel.y * 28.f;
       } else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
@@ -563,10 +637,9 @@ bool run_options_panel(SDL_Window* window, bf2::Renderer& renderer, Settings& se
     }
     draw_options_content(renderer, settings, opt_tab, mx, my, clicked, res_idx, res_open, fs_idx,
                          fs_open, msaa_idx, msaa_open, shadow_idx, shadow_open, display_modes,
-                         anchors, controls_scroll, rebind_action, capture_key);
-    draw_options_popups(renderer, settings, opt_tab, mx, my, clicked, res_idx, res_open, fs_idx,
-                        fs_open, msaa_idx, msaa_open, shadow_idx, shadow_open, display_modes,
-                        anchors, res_list_scroll);
+                         anchors, controls_scroll, graphics_scroll, rebind_action, capture_key);
+    // Cover scrolled graphics rows so they don't bleed into APPLY / CANCEL.
+    renderer.ui_rect(48, H - 130, W - 96, 90, 0.06f, 0.07f, 0.08f, 1.f);
     const float bx = W - 220, by = H - 100;
     if (draw_button(renderer, mx, my, bx, by, 160, 40, "APPLY", true) && clicked) {
       settings.save();
@@ -577,6 +650,9 @@ bool run_options_panel(SDL_Window* window, bf2::Renderer& renderer, Settings& se
       result = true;
     }
     if (draw_button(renderer, mx, my, bx - 180, by, 160, 40, "CANCEL") && clicked) done = true;
+    draw_options_popups(renderer, settings, opt_tab, mx, my, clicked, res_idx, res_open, fs_idx,
+                        fs_open, msaa_idx, msaa_open, shadow_idx, shadow_open, display_modes,
+                        anchors, res_list_scroll);
     renderer.end_ui();
     renderer.end_frame();
     SDL_GL_SwapWindow(window);
@@ -614,6 +690,7 @@ MenuResult run_main_menu(SDL_Window* window, bf2::Renderer& renderer, Settings& 
   OptTab opt_tab = OptTab::Video;
   OptionPopupAnchors anchors{};
   float controls_scroll = 0.f;
+  float graphics_scroll = 0.f;
   float res_list_scroll = 0.f;
   int rebind_action = -1;
   bool capture_key = false;
@@ -644,6 +721,8 @@ MenuResult run_main_menu(SDL_Window* window, bf2::Renderer& renderer, Settings& 
                  handle_controls_key_capture(e, settings, rebind_action, capture_key)) {
       } else if (e.type == SDL_MOUSEWHEEL && tab == TopTab::Options && opt_tab == OptTab::Controls) {
         controls_scroll -= e.wheel.y * 24.f;
+      } else if (e.type == SDL_MOUSEWHEEL && tab == TopTab::Options && opt_tab == OptTab::Graphics) {
+        graphics_scroll -= e.wheel.y * 36.f;
       } else if (e.type == SDL_MOUSEWHEEL && tab == TopTab::Options && opt_tab == OptTab::Video &&
                  res_open) {
         res_list_scroll -= e.wheel.y * 28.f;
@@ -762,10 +841,9 @@ MenuResult run_main_menu(SDL_Window* window, bf2::Renderer& renderer, Settings& 
       }
       draw_options_content(renderer, settings, opt_tab, mx, my, clicked, res_idx, res_open, fs_idx,
                            fs_open, msaa_idx, msaa_open, shadow_idx, shadow_open, display_modes,
-                           anchors, controls_scroll, rebind_action, capture_key);
-      draw_options_popups(renderer, settings, opt_tab, mx, my, clicked, res_idx, res_open, fs_idx,
-                          fs_open, msaa_idx, msaa_open, shadow_idx, shadow_open, display_modes,
-                          anchors, res_list_scroll);
+                           anchors, controls_scroll, graphics_scroll, rebind_action, capture_key);
+      // Mask bottom chrome so scrolled settings don't overlay path / APPLY / footer.
+      renderer.ui_rect(40, H - 145, W - 80, 117, 0.06f, 0.07f, 0.08f, 1.f);
       float y = H - 130;
       renderer.ui_text(48, y, 1.2f, "BF2 INSTALL PATH:", 0.75f, 0.78f, 0.82f, 1.f);
       draw_clipped_text(renderer, 48, y + 22, W - 320.f, 1.1f,
@@ -780,6 +858,9 @@ MenuResult run_main_menu(SDL_Window* window, bf2::Renderer& renderer, Settings& 
         int sw = 0, sh = 0;
         refresh_display(window, renderer, sw, sh);
       }
+      draw_options_popups(renderer, settings, opt_tab, mx, my, clicked, res_idx, res_open, fs_idx,
+                          fs_open, msaa_idx, msaa_open, shadow_idx, shadow_open, display_modes,
+                          anchors, res_list_scroll);
     }
 
     draw_clipped_text(renderer, 24, H - 28, W - 48.f, 1.1f,

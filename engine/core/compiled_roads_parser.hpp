@@ -6,6 +6,7 @@
 namespace bf2 {
 
 struct CompiledRoadPlacement {
+  std::string template_name;  // object.create name (Fall_road, …) for textures
   std::string mesh_vpath;
   float position[3] = {0.f, 0.f, 0.f};
 };

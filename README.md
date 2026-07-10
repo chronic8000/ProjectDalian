@@ -174,18 +174,18 @@ multiplayer, conquest, static prop heights, etc.).
 - **Enemy AI** spread across map objectives: idle patrol, advance-to-contact
   when spotted, reaction delay, burst fire, limited simultaneous attackers,
   player health regen (tuned to be survivable, not an instant-death swarm)
-- **6-DoF FPV recon drone** (`B` to toggle): true rigid-body quad with independent
+- **6-DoF FPV recon drone** (`F9` to toggle): true rigid-body quad with independent
   per-rotor thrust, gravity, and simulated battery voltage sag, plus a
   render-to-texture FPV feed with signal degradation
-- **FPV kamikaze loitering munition** (`N`): a one-way, player-steered terminal
+- **FPV kamikaze loitering munition** (`F10`): a one-way, player-steered terminal
   munition using a lighter/faster airframe. FPV link with faster signal decay;
   detonates on impact (terrain, buildings, enemies), manual trigger (LMB/Space),
   or dead battery. No recall.
-- **Vehicle-launched missiles** (`R`): a guided/ballistic missile flight model
-  (rocket-motor boost, gravity, drag, limited-turn-rate homing) fired from the
-  nearest vehicle's turret. Locks onto an enemy under the crosshair, or arcs
-  ballistically at open ground, with an exhaust smoke trail and an
-  area-of-effect explosion. Loads the real BF2 SAM `.bundledmesh` when present
+- **Car-launched SAM** (`F8`): opens a tactical map; click a destination anywhere
+  on the map. The Igla launches from the nearest ground vehicle roof with a lofted
+  climb so you can watch it fly. Uses retail BF2 `igla_9k38` mesh plus
+  `e_missile_ignition` / `e_missile_trail` / `e_vexp_igla` effect bundles when
+  present. AT rockets use **RMB** on the Anti-Tank kit.
 
 ---
 
@@ -279,12 +279,15 @@ Settings and the BF2 root path from the main menu are stored under
 | Mouse | Look |
 | `Tab` | Toggle mouse capture |
 | `LMB` | Fire (hold for automatic) |
-| `F` | Toggle ballistic ⇄ hitscan |
-| `Q` / Mouse wheel | Cycle weapon |
-| `R` | Launch missile from the nearest vehicle |
-| `N` | Launch FPV kamikaze loitering munition (one-way) |
-| `B` | Launch / recall FPV recon drone |
-| `V` | Toggle 1st / 3rd person |
+| `RMB` | AT rocket (Anti-Tank kit) / vehicle secondary |
+| Mouse wheel | Cycle weapon |
+| `R` | Reload |
+| `4` / `5` / `X` | Grenade / place C4 / detonate C4 (or vehicle flares) |
+| `F8` | Open car-SAM map (near a ground vehicle); click destination to fire |
+| `F9` | Launch / recall FPV recon drone |
+| `F10` | Launch FPV kamikaze loitering munition (one-way) |
+| `H` | Medkit self-heal (Medic kit) |
+| `C` | Toggle 1st / 3rd person |
 | `E` | Enter / exit vehicle |
 | `Enter` | Deploy screen (kit, faction, spawn) |
 | `Esc` | Pause menu (in-game) / back (deploy) |

@@ -322,10 +322,15 @@ void GameSim::spawn_defenders() {
   for (const auto& post : posts) {
     if (state_.enemies.size() >= kMaxEnemies) break;
     const int squad = 2 + (std::rand() % 2);
+    const int squad_id = static_cast<int>(state_.enemies.size());
     for (int i = 0; i < squad; ++i) {
       if (state_.enemies.size() >= kMaxEnemies) break;
       Enemy en;
       en.team = opfor;
+      en.squad_id = squad_id;
+      // Rotate roles: assault closes, flank sweeps wide, suppress holds range.
+      en.role = static_cast<std::int8_t>(i % 3);
+      en.flank_sign = (i % 2 == 0) ? 1.f : -1.f;
       const float ang = frand() * 6.2831853f;
       const float r = 4.f + frand() * 14.f;
       en.home = post;
@@ -340,6 +345,7 @@ void GameSim::spawn_defenders() {
         en.damage = params_.enemy_weapon.damage;
         en.spread = params_.enemy_weapon.spread;
       }
+      if (en.role == 2) en.spread *= 0.75f;  // suppress: tighter fire
       en.name = pick_bot_name(params_.bot_names, bot_name_idx++);
       state_.enemies.push_back(en);
     }
@@ -529,8 +535,11 @@ void GameSim::hurt_player(float damage, int killer_enemy_idx, const char* killer
   }
 }
 
-void GameSim::explode_at(const glm::vec3& center, float radius, float max_damage) {
-  spawn_missile_detonation_fx(state_.smoke, state_.explosions, center, glm::clamp(radius / 9.f, 0.5f, 2.f));
+void GameSim::explode_at(const glm::vec3& center, float radius, float max_damage, bool spawn_fx) {
+  if (spawn_fx) {
+    spawn_missile_detonation_fx(state_.smoke, state_.explosions, center,
+                                glm::clamp(radius / 9.f, 0.5f, 2.f));
+  }
   for (auto& en : state_.enemies) {
     if (!en.alive) continue;
     const glm::vec3 chest(en.pos.x, en.pos.y + 1.0f, en.pos.z);
@@ -549,6 +558,59 @@ void GameSim::explode_at(const glm::vec3& center, float radius, float max_damage
                      "Explosives");
     }
   }
+
+  // Damage / destroy vehicles in the blast (retail BF2 vehicle death).
+  for (std::size_t vi = 0; vi < state_.vehicles.size(); ++vi) {
+    Vehicle& v = state_.vehicles[vi];
+    if (v.destroyed) continue;
+    const float d = glm::length(v.pos - center);
+    const float hit_r = radius + 3.5f;
+    if (d > hit_r) continue;
+    const float falloff = 1.f - (d / hit_r);
+    v.health -= max_damage * falloff * falloff * 1.35f;
+    if (v.health > 0.f) continue;
+
+    v.health = 0.f;
+    v.destroyed = true;
+    v.speed = 0.f;
+    v.vel = glm::vec3(0.f);
+    // Vehicle death blast (e_vexp_* bundles loaded when available; always spawn FX).
+    spawn_missile_detonation_fx(state_.smoke, state_.explosions, v.pos, v.is_air ? 1.8f : 2.2f,
+                                "dirt");
+    // Kill anyone still inside or standing next to the wreck.
+    const float kill_r = v.is_air ? 10.f : 8.f;
+    const float kill_dmg = v.is_air ? 220.f : 280.f;
+    if (state_.in_vehicle == static_cast<int>(vi)) {
+      state_.in_vehicle = -1;
+      state_.player_seat = 0;
+      hurt_player(kill_dmg, -1, "Vehicle");
+    } else {
+      const glm::vec3 player_chest(state_.player.position.x, state_.player.position.y + 0.4f,
+                                   state_.player.position.z);
+      const float pd = glm::length(player_chest - v.pos);
+      if (pd <= kill_r) {
+        const float f = 1.f - (pd / kill_r);
+        hurt_player(kill_dmg * f * f, -1, "Vehicle");
+      }
+    }
+    for (auto& en : state_.enemies) {
+      if (!en.alive) continue;
+      const glm::vec3 chest(en.pos.x, en.pos.y + 1.0f, en.pos.z);
+      const float ed = glm::length(chest - v.pos);
+      if (ed > kill_r) continue;
+      const float f = 1.f - (ed / kill_r);
+      en.health -= kill_dmg * f * f;
+      en.hit_flash = 0.2f;
+      if (en.health <= 0.f) {
+        en.alive = false;
+        en.death_time = 0.f;
+        ++state_.player_kills;
+        push_kill_feed(params_.player_label.empty() ? "You" : params_.player_label,
+                       en.name.empty() ? "Enemy" : en.name, "Vehicle");
+      }
+    }
+  }
+
   const glm::vec3 player_chest(state_.player.position.x, state_.player.position.y + 0.4f,
                                state_.player.position.z);
   const float pd = glm::length(player_chest - center);
@@ -1079,16 +1141,42 @@ void GameSim::step_enemies(float dt, const PlayerInput& input) {
     en.moving = false;
     if (hostile_to_player && los && dist < kEngageRange) {
       en.yaw = std::atan2(to_player.x, to_player.z);
-      if (dist > 35.f) {
-        glm::vec3 goal = glm::vec3(eye.x, en.pos.y, eye.z);
-        if (params_.nav_mesh && params_.nav_mesh->valid()) {
-          goal = params_.nav_mesh->waypoint_along_path(en.pos, goal, 3.0f * dt);
+      const glm::vec3 flat_to = glm::normalize(glm::vec3(to_player.x, 0.f, to_player.z));
+      const glm::vec3 flank_axis = glm::normalize(glm::vec3(-flat_to.z, 0.f, flat_to.x));
+      // Role goals: assault closes, flank sweeps wide, suppress holds mid-range.
+      glm::vec3 goal = glm::vec3(eye.x, en.pos.y, eye.z);
+      float step_spd = 3.0f;
+      if (en.role == 1) {
+        goal = glm::vec3(eye.x, en.pos.y, eye.z) + flank_axis * (18.f * en.flank_sign) -
+               flat_to * 6.f;
+        step_spd = 3.4f;
+      } else if (en.role == 2) {
+        if (dist < 28.f) {
+          goal = en.pos - flat_to * 2.5f;  // back off to suppress range
+          step_spd = 2.2f;
+        } else if (dist > 42.f) {
+          goal = glm::vec3(eye.x, en.pos.y, eye.z) - flat_to * 32.f;
+          step_spd = 2.6f;
         } else {
-          goal = en.pos + glm::normalize(glm::vec3(to_player.x, 0.f, to_player.z)) * 3.0f * dt;
+          goal = en.pos;  // hold
+          step_spd = 0.f;
+        }
+      } else if (dist <= 35.f) {
+        goal = en.pos;
+        step_spd = 0.f;
+      }
+      if (step_spd > 0.f) {
+        if (params_.nav_mesh && params_.nav_mesh->valid()) {
+          goal = params_.nav_mesh->waypoint_along_path(en.pos, goal, step_spd * dt);
+        } else {
+          const glm::vec3 to_g = goal - en.pos;
+          const float gl = glm::length(glm::vec2(to_g.x, to_g.z));
+          if (gl > 0.1f)
+            goal = en.pos + glm::vec3(to_g.x, 0.f, to_g.z) / gl * step_spd * dt;
         }
         const glm::vec3 step = goal - en.pos;
         try_step(step);
-        move_speed = 3.0f;
+        move_speed = step_spd;
         en.moving = true;
       }
       contacts.push_back({static_cast<int>(i), dist});

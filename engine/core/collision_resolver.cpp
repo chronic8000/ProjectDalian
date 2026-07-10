@@ -1,9 +1,11 @@
 #include "collision_resolver.hpp"
 
 #include "engine/formats/collision/bf2_collision.hpp"
+#include "engine/formats/mesh/bf2_road_mesh.hpp"
 
 #include <algorithm>
 #include <cctype>
+#include <limits>
 
 namespace bf2 {
 namespace {
@@ -74,17 +76,36 @@ std::vector<Float3> load_collision_soup(ResourceManager& resources, const std::s
     if (const auto bytes = resources.read_bytes(col_vpath)) {
       try {
         const auto cm = CollisionLoader::load_from_memory(*bytes);
-        std::vector<const CollisionCol*> cols;
-        for (const auto& col : cm.cols) {
-          if (col.col_type == 2 || col.col_type == 1) cols.push_back(&col);
-        }
-        if (cols.empty()) {
+        // BF2 col types: 0=projectile, 1=vehicle, 2=soldier, 3=AI.
+        // Vehicle hulls are often sealed boxes that close doorways/windows.
+        // Prefer soldier (walk openings), then projectile (dense + usually open),
+        // and only then vehicle. Never merge vehicle with soldier — that seals
+        // arches like ch_wall_high_6m_door.
+        auto append_type = [&](std::uint32_t type) {
           for (const auto& col : cm.cols) {
-            if (!col.faces.empty()) cols.push_back(&col);
+            if (col.col_type == type) append_col_faces(col, out);
+          }
+        };
+        append_type(2);
+        if (out.empty()) append_type(0);
+        if (out.empty()) append_type(1);
+        if (out.empty()) {
+          for (const auto& col : cm.cols) {
+            if (!col.faces.empty()) append_col_faces(col, out);
           }
         }
-        for (const CollisionCol* col : cols) append_col_faces(*col, out);
         if (!out.empty()) return out;
+      } catch (...) {
+      }
+    }
+  }
+
+  // RoadCompiled meshes are not StaticMeshes — dedicated loader.
+  if (const auto bytes = resources.read_bytes(mesh_vpath)) {
+    if (is_road_compiled_bytes(*bytes)) {
+      try {
+        const auto road = load_road_compiled(*bytes);
+        return road_compiled_collision_soup(road);
       } catch (...) {
       }
     }
@@ -92,7 +113,10 @@ std::vector<Float3> load_collision_soup(ResourceManager& resources, const std::s
 
   try {
     const auto mesh = resources.load_mesh(mesh_vpath);
-    append_render_mesh(mesh, out, max_render_tris);
+    // Roads/bridges need full deck density — never stride-downsample them.
+    const bool dense = mesh_vpath.find("road") != std::string::npos ||
+                       mesh_vpath.find("bridge") != std::string::npos;
+    append_render_mesh(mesh, out, dense ? std::numeric_limits<std::size_t>::max() : max_render_tris);
   } catch (...) {
   }
   return out;

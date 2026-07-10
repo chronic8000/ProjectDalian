@@ -193,7 +193,13 @@ void dump_mesh_detail(bf2::ArchiveMount& archive, const std::string& vpath) {
         const auto& mat = lod.materials[m];
         std::cout << "     mat[" << m << "] verts=" << mat.vertex_count
                   << " idx=" << mat.index_count << " tech=" << mat.technique;
-        if (!mat.maps.empty()) std::cout << " map0=" << mat.maps[0];
+        if (!mat.maps.empty()) {
+          std::cout << " maps=";
+          for (std::size_t mi = 0; mi < mat.maps.size(); ++mi) {
+            if (mi) std::cout << "|";
+            std::cout << mat.maps[mi];
+          }
+        }
         std::cout << '\n';
       }
     }

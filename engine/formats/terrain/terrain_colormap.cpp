@@ -514,8 +514,8 @@ TexturedMeshData terrain_to_textured_mesh(const Terrain& terrain, float xz_scale
   const int h = static_cast<int>(terrain.height);
   const int gw = (w + step - 1) / step;
   const int gh = (h + step - 1) / step;
-  const float off_x = (w * 0.5f) * xz_scale;
-  const float off_z = (h * 0.5f) * xz_scale;
+  const float off_x = ((w - 1.f) * 0.5f) * xz_scale;
+  const float off_z = ((h - 1.f) * 0.5f) * xz_scale;
   const float u_max = static_cast<float>(w - 1);
   const float v_max = static_cast<float>(h - 1);
 

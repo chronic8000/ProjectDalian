@@ -37,6 +37,8 @@ struct Material {
     std::uint32_t index_start = 0;
     std::uint32_t index_count = 0;
     std::uint32_t vertex_count = 0;
+    // StaticMesh: index into Lod::nodes (rigid sub-object transform).
+    std::uint32_t node_index = 0;
     Aabb bounds{};
 };
 
@@ -121,6 +123,14 @@ struct TexturedSubmesh {
     std::string normal_map;  // detail normal/bump (*_deb)
     std::string dirt_map;    // tiling-break dirt overlay (*_di)
     std::string crack_map;   // alpha damage decal (*_cr)
+    // AnimatedUV* tread subset: BF2 UV-matrix id from BLENDINDICES byte 3 (0 = none).
+    std::uint8_t uv_matrix_id = 0;
+    // True when this range should scroll with vehicle speed (translation matrices only).
+    bool animated_uv = false;
+    // Prefer V scroll when the .tweak TranslationMax is predominantly on Y.
+    bool animated_uv_axis_v = true;
+    // UV pads that sample hull camo in bind pose — keep for wheel parts, skip on hull.
+    bool omit_from_hull = false;
 };
 
 struct TexturedMeshData {
@@ -145,6 +155,9 @@ public:
     // plus resolved texture map names, for textured rendering.
     static TexturedMeshData extract_textured(const Mesh& mesh, std::size_t geometry_index = 0,
                                              std::size_t lod_index = 0);
+
+    // Unit-test helper: technique token order must not put normals in color slots.
+    static bool technique_map_assign_self_test();
 };
 
 }  // namespace bf2

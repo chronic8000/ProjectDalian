@@ -41,17 +41,30 @@ std::vector<std::string> texture_candidate_paths(const std::string& bf2_path,
   } else {
     push_unique(candidates, "objects/" + key);
   }
-  // Meshes often reference .tga while archives store .dds.
-  if (key.size() > 4 && key.rfind(".tga") == key.size() - 4) {
-    std::string dds = key;
-    dds.replace(dds.size() - 4, 4, ".dds");
-    push_unique(candidates, dds);
-    if (dds.rfind("objects/", 0) == 0) {
-      push_unique(candidates, dds.substr(std::string("objects/").size()));
-    } else {
-      push_unique(candidates, "objects/" + dds);
+  // Meshes often reference .tga while archives store .dds. Also accept
+  // extensionless paths (RoadCompiled .dat lists) by trying .dds.
+  auto push_dds_variants = [&](const std::string& path) {
+    const auto dot = path.find_last_of('.');
+    const bool has_ext = dot != std::string::npos && path.find('/', dot) == std::string::npos;
+    if (has_ext && path.size() > 4 && path.rfind(".tga") == path.size() - 4) {
+      std::string dds = path;
+      dds.replace(dds.size() - 4, 4, ".dds");
+      push_unique(candidates, dds);
+      if (dds.rfind("objects/", 0) == 0) {
+        push_unique(candidates, dds.substr(std::string("objects/").size()));
+      } else {
+        push_unique(candidates, "objects/" + dds);
+      }
+    } else if (!has_ext) {
+      push_unique(candidates, path + ".dds");
+      if (path.rfind("objects/", 0) == 0) {
+        push_unique(candidates, path.substr(std::string("objects/").size()) + ".dds");
+      } else {
+        push_unique(candidates, "objects/" + path + ".dds");
+      }
     }
-  }
+  };
+  push_dds_variants(key);
 
   if (!mesh_folder.empty()) {
     const std::string folder = normalize(mesh_folder);

@@ -31,6 +31,7 @@ struct CharacterController {
 class PhysicsWorld {
 public:
   // cell_size = world spacing between heightmap samples; centered maps the grid
+  // so sample 0 is at -((w-1)/2)*cell (BF2 primary: 1025@2m → ±1024).
   // onto world coordinates centred at the origin (BF2 convention).
   void set_terrain(const Terrain& terrain, float cell_size = 1.f, bool centered = false);
   // When set, terrain_height() samples the full 3x3 BF2 heightmap cluster (secondary

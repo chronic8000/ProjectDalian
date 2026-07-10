@@ -128,6 +128,8 @@ struct NetPlayerSnapshot {
 
   float veh_rotor_rpm = 0.f, veh_rotor_spin = 0.f;
 
+  std::int8_t seat = 0;
+
 };
 
 
@@ -177,6 +179,10 @@ struct NetPlayer {
   // v3: last processed input sequence (wire tail).
 
   std::uint32_t input_seq = 0;
+
+  // v4: vehicle seat index (0 = driver/pilot).
+
+  std::int8_t seat = 0;
 
 
 

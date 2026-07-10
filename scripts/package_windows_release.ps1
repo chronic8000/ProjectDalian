@@ -33,6 +33,13 @@ if (Test-Path $loadingTrack) {
     Copy-Item $loadingTrack (Join-Path $pkg "music\Before_the_First_Volley.mp3") -Force
 }
 Copy-Item "$dalian\menu" "$pkg\menu" -Recurse
+$contentSrc = Join-Path $dalian "content"
+if (-not (Test-Path $contentSrc)) {
+    $contentSrc = "C:\Projects\bf2respawn\apps\dalian\content"
+}
+if (Test-Path $contentSrc) {
+    Copy-Item $contentSrc "$pkg\content" -Recurse
+}
 Copy-Item "C:\Projects\bf2respawn\LICENSE" $pkg
 Copy-Item "C:\Projects\bf2respawn\docs\PARITY.md" "$pkg\docs\"
 Copy-Item "C:\Projects\bf2respawn\scripts\validate_all_levels.ps1" "$pkg\tools\"
@@ -43,14 +50,22 @@ Project Dalian — Windows quick start
 ====================================
 
 REQUIRES: A legitimate Battlefield 2 installation (retail or compatible mod).
-This package contains ONLY Project Dalian binaries and permissively-licensed
-third-party DLLs. No EA/DICE game data is included.
+This package contains ONLY Project Dalian binaries, custom content packs
+(OBJ emplacements/missiles), and permissively-licensed third-party DLLs.
+No EA/DICE game data is included.
 
 1. Unzip anywhere (e.g. C:\Games\ProjectDalian).
 2. Run project_dalian.exe
 3. In Options, set your BF2 install path if auto-detect fails
    (default: C:\Program Files (x86)\Battlefield2)
 4. Pick a map from the main menu and play.
+
+MIM-23 Hawk (Dalian Plant 64 CQ): orange blip on the minimap near the Chinese
+airfield jets. Walk up and press E / F8 to fire map SAMs.
+
+Graphics tips (HD texture packs):
+  Options → Graphics → lower Render Scale, enable FSR 1.0, raise Mip LOD Bias.
+  Options → Video → Show FPS to measure the result.
 
 Recovery if the display breaks:
   project_dalian.exe --windowed

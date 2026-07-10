@@ -83,9 +83,9 @@ std::vector<OvergrowthInstance> build_overgrowth_instances(const OvergrowthParse
       if (tit == types_by_mat.end() || tit->second.empty()) continue;
 
       const float wx =
-          (static_cast<float>(i) - side * 0.5f) * cell_size + (og_hash(i, j, 1) - 0.5f) * cell_size;
+          (static_cast<float>(i) - (side - 1) * 0.5f) * cell_size + (og_hash(i, j, 1) - 0.5f) * cell_size;
       const float wz =
-          (static_cast<float>(j) - side * 0.5f) * cell_size + (og_hash(i, j, 2) - 0.5f) * cell_size;
+          (static_cast<float>(j) - (side - 1) * 0.5f) * cell_size + (og_hash(i, j, 2) - 0.5f) * cell_size;
 
       // Pick a type from this material.
       const auto& types = tit->second;

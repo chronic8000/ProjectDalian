@@ -46,4 +46,7 @@ add_custom_command(TARGET project_dalian POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_directory
     ${CMAKE_CURRENT_SOURCE_DIR}/assets/menu
     $<TARGET_FILE_DIR:project_dalian>/menu
-  COMMENT "Copying menu music and background assets")
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+    ${CMAKE_CURRENT_SOURCE_DIR}/content
+    $<TARGET_FILE_DIR:project_dalian>/content
+  COMMENT "Copying menu music, backgrounds, and custom content packs")

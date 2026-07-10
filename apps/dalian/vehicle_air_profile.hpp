@@ -33,8 +33,8 @@ struct VehicleAirProfile {
   float rotor_spool_down_sec = 4.f;
   float rotor_spool_collective_sec = 1.8f;
   float rotor_spin_rate = 62.f;
-  float heli_drag_horiz = 0.9f;
-  float heli_drag_vert = 1.4f;
+  float heli_drag_horiz = 0.32f;
+  float heli_drag_vert = 0.55f;
 
   float physics_mass = 0.f;
   float physics_drag = 0.f;

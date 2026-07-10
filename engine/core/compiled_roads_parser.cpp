@@ -57,6 +57,8 @@ std::vector<CompiledRoadPlacement> parse_compiled_roads(const std::string& scrip
     if (lc == "object.create") {
       flush();
       have = true;
+      std::string name;
+      if (ls >> name) cur.template_name = name;
     } else if (have && lc == "object.geometry.loadmesh") {
       std::string path;
       ls >> path;
@@ -82,6 +84,7 @@ object.absoluteposition -5/15/2
 )";
   const auto roads = parse_compiled_roads(kSample);
   if (roads.size() != 2) return false;
+  if (roads[0].template_name != "highway") return false;
   if (roads[0].mesh_vpath != "levels/test/roads/main_compiled.mesh") return false;
   if (roads[0].position[1] != 20.f) return false;
   if (roads[1].position[0] != -5.f) return false;

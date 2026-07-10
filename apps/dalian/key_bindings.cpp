@@ -43,9 +43,9 @@ const ActionMeta kMeta[] = {
     {GameAction::WeaponSlot2, "Weapon slot 2", "Infantry", true, false, SDL_SCANCODE_2},
     {GameAction::WeaponSlot3, "Weapon slot 3 / fire mode", "Infantry", true, false, SDL_SCANCODE_3},
     {GameAction::WeaponSlot4, "Weapon slot 4 / grenade", "Infantry", true, true, SDL_SCANCODE_4},
-    {GameAction::WeaponSlot5, "Weapon slot 5", "Infantry", true, false, SDL_SCANCODE_5},
+    {GameAction::WeaponSlot5, "Weapon slot 5 / C4 place", "Infantry", true, true, SDL_SCANCODE_5},
     {GameAction::WeaponSlot6, "Weapon slot 6", "Infantry", true, false, SDL_SCANCODE_6},
-    {GameAction::SmokeFlares, "Smoke / flares (vehicle)", "Land", true, true, SDL_SCANCODE_X},
+    {GameAction::SmokeFlares, "C4 detonate / vehicle flares", "Land", true, true, SDL_SCANCODE_X},
     {GameAction::Seat1, "Vehicle seat 1", "Land", true, true, SDL_SCANCODE_F1},
     {GameAction::Seat2, "Vehicle seat 2", "Land", true, true, SDL_SCANCODE_F2},
     {GameAction::Seat3, "Vehicle seat 3", "Land", true, true, SDL_SCANCODE_F3},
@@ -55,6 +55,7 @@ const ActionMeta kMeta[] = {
     {GameAction::ReconDrone, "Recon FPV drone", "Dalian", false, true, SDL_SCANCODE_F9},
     {GameAction::KamikazeDrone, "Kamikaze drone", "Dalian", false, true, SDL_SCANCODE_F10},
     {GameAction::MedkitHeal, "Medkit self-heal", "Dalian", false, true, SDL_SCANCODE_H},
+    {GameAction::CarSam, "Car SAM map / fire", "Dalian", false, true, SDL_SCANCODE_F8},
 };
 
 std::string action_key_name(GameAction a) {
@@ -104,6 +105,7 @@ std::string action_key_name(GameAction a) {
     case GameAction::ReconDrone: return "ReconDrone";
     case GameAction::KamikazeDrone: return "KamikazeDrone";
     case GameAction::MedkitHeal: return "MedkitHeal";
+    case GameAction::CarSam: return "CarSam";
     default: return "Unknown";
   }
 }

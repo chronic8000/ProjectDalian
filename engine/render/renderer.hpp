@@ -30,6 +30,14 @@ struct GpuSubmesh {
   std::uint32_t crack_tex = 0;
   bool cutout = false;  // base texture is an alpha cutout mask (foliage/fence)
   bool track_uv = false;  // scroll base UVs when the vehicle moves (tank treads)
+  bool track_uv_axis_v = true;  // false = scroll U, true = scroll V (BF2 TranslationMax)
+  // When set, scroll wraps inside the atlas tread strip instead of GL_REPEAT
+  // into neighboring hull camo (which reads as vertical smears on the belt).
+  bool track_uv_wrap_strip = false;
+  float track_strip_umin = 0.f;
+  float track_strip_umax = 1.f;
+  float track_strip_vmin = 0.f;
+  float track_strip_vmax = 1.f;
 };
 
 // A textured mesh with vertices pos(3)/normal(3)/uv0(2)/uv1(2) already in world
@@ -110,7 +118,7 @@ public:
   // faces aren't visible through openings. Leave off for static objects, which
   // include double-sided foliage/fences that must render from both sides.
   // alpha_mode: 0 opaque; 1 = alpha-blend using the base texture's alpha channel
-  // (for rotor-blur discs and other cutout/translucent parts).
+  // (rotor blur); 2 = cutout (per-submesh); 3 = road soft edge (vertex alpha).
   void draw_textured(const GpuTexturedMesh& mesh, const float* mvp, const float* model = nullptr,
                      std::uint32_t obj_lightmap = 0, const float* lm_xform = nullptr,
                      bool cull_backfaces = false, int alpha_mode = 0, float uv_scroll_u = 0.f,
@@ -146,16 +154,18 @@ public:
   void draw_lines(const float* mvp, const float* xyz, int vertex_count, float r, float g, float b,
                   float width, bool depth_test);
 
-  // Camera-facing additive/textured sprites (smoke, fire, tracers).
+  // Camera-facing additive/textured sprites (smoke, fire, tracers, baselights).
+  // cam_right/cam_up must be orthonormal view axes (not world X/Y) or sprites
+  // collapse to thin vertical lines when viewed edge-on.
   struct BillboardParticle {
     float x, y, z;
     float size;
     float r, g, b, a;
-    float kind;  // 0=smoke, 1=exhaust, 2=afterburner, 3=explosion_fire
+    float kind;  // 0=smoke, 1=exhaust, 2=glow/afterburner, 3=explosion_fire
   };
-  void draw_billboards(const float* view_proj, const float* cam_pos, const BillboardParticle* parts,
-                       int count, std::uint32_t smoke_tex, std::uint32_t fire_tex,
-                       bool additive = true);
+  void draw_billboards(const float* view_proj, const float* cam_right3, const float* cam_up3,
+                       const BillboardParticle* parts, int count, std::uint32_t tex,
+                       bool additive = true, bool fire_mode = false);
 
   // ---- 2D UI (menus / HUD) --------------------------------------------------
   // Screen-space, top-left origin (y grows downward), alpha-blended, no depth.
@@ -165,11 +175,14 @@ public:
   void begin_ui(int width, int height);
   void ui_rect(float x, float y, float w, float h, float r, float g, float b, float a);
   // Draws `text` with its top-left at (x,y). `scale` multiplies the built-in font
-  // (scale 2 ~= 16px tall). Returns nothing; use ui_text_width to lay text out.
+  // (scale 2 ~= 16px tall). Letter spacing is set via stb_easy_font_spacing so
+  // width metrics match the drawn glyphs. Use ui_text_width / ui_text_height to lay out.
   void ui_text(float x, float y, float scale, const char* text, float r, float g, float b,
                float a);
   float ui_text_width(const char* text, float scale) const;
+  // Single-line glyph height (scale 1 ≈ 12px). Prefer the text overload for '\n'.
   float ui_text_height(float scale) const;
+  float ui_text_height(const char* text, float scale) const;
   // Upload an RGBA8 image (4 bytes/pixel, top-left origin) for UI drawing.
   std::uint32_t upload_rgba_texture(int width, int height, const std::uint8_t* rgba);
   // Draw a texture across the full framebuffer (object-fit: cover).
@@ -182,10 +195,12 @@ public:
   void end_ui();
 
   // Per-frame environment applied to terrain/object/water shaders: camera world
-  // position (for fog distance), sun direction (light travel direction), fog
+  // position (for fog distance), sun/moon direction (light travel direction), fog
   // colour, and fog start/end distances (fog_end <= 0 disables fog).
+  // sun_color3 / ambient_scale tint direct light and fill (night moonlight).
   void set_environment(const float* cam_pos3, const float* sun_dir3, const float* fog_color3,
-                       float fog_start, float fog_end);
+                       float fog_start, float fog_end, const float* sun_color3 = nullptr,
+                       float ambient_scale = 1.f);
 
   // ---- Cascaded Shadow Maps -------------------------------------------------
   static constexpr int kShadowCascades = 4;
@@ -203,25 +218,42 @@ public:
   // Bind an offscreen colour+depth target sized (w,h) and clear it. All world
   // draws after this land in the offscreen buffer instead of the backbuffer.
   void begin_scene(int w, int h, float r, float g, float b);
-  // Resolve the offscreen scene to the default framebuffer through the FPV
-  // post-process shader. `degrade` (0..1) scales the video-feed artefacts.
-  void present_scene(float degrade, float time_seconds);
+  // Resolve the offscreen scene to the default framebuffer through HDR tone map,
+  // bloom, optional SSAO, and FPV degrade. near_z/far_z reconstruct view depth.
+  void present_scene(float degrade, float time_seconds, float near_z = 0.2f,
+                     float far_z = 8000.f, int output_w = 0, int output_h = 0);
 
   void set_bloom(bool enabled, float intensity);
+  void set_ssao(bool enabled);
+  void set_hdr(bool enabled);
+  void set_hdr_exposure(float exposure);
   void set_shadows_enabled(bool enabled);
   bool reload_shadow_res(int resolution);
   void set_anisotropic(int level);
+  // Positive bias = blurrier/cheaper mips (good with HD textures); negative = sharper.
+  void set_mip_lod_bias(float bias);
+  // 0 = bilinear stretch, 1 = FSR1 EASU+RCAS, 2 = Auto (→ FSR1 on OpenGL).
+  void set_upscale_mode(int mode);
+  // RCAS sharpness in AMD "stops" (0 = max sharp, ~2 = soft). Typical 0.2.
+  void set_fsr_sharpness(float stops);
 
-  // Full-screen gradient sky. inv_view_proj reconstructs world ray directions;
-  // the gradient runs from horizon_color (at the horizon) to sky_color (zenith).
+  // Full-screen sky. Samples Skydome.skyTexture when provided; otherwise a
+  // vertical gradient. Night maps draw a moon disc from flareDirection.
   void draw_sky(const float* inv_view_proj, const float* cam_pos3, const float* sky_color3,
-                const float* horizon_color3, std::uint32_t cloud_tex = 0, float cloud_scroll_u = 0.f,
-                float cloud_scroll_v = 0.f, float cloud_strength = 0.55f);
+                const float* horizon_color3, std::uint32_t sky_tex = 0,
+                std::uint32_t cloud_tex = 0, float cloud_scroll_u = 0.f,
+                float cloud_scroll_v = 0.f, float cloud_strength = 0.55f,
+                const float* sun_color3 = nullptr, int is_night = 0,
+                const float* moon_dir3 = nullptr, const float* moon_color3 = nullptr,
+                float dome_rotation_deg = 0.f);
 
   // Translucent animated water plane at world height level_y, centred on the
   // camera's XZ and extending half_extent metres in every direction.
   void draw_water(const float* view_proj, float level_y, float cam_x, float cam_z, float half_extent,
-                  float time_seconds, const float* water_color3);
+                  float time_seconds, const float* water_color3,
+                  const float* water_specular3 = nullptr, float specular_power = 12.f,
+                  const float* water_fog_color3 = nullptr, float sun_intensity = 1.f,
+                  const float* sun_color3 = nullptr);
 
   // Alpha-tested grass billboards. verts is interleaved [pos.xyz, uv.xy, sway]
   // (6 floats/vertex) in world space; sway (0 at blade base, 1 at tip) drives the
@@ -269,6 +301,8 @@ private:
     std::uint32_t grass_vbo_ = 0;
   float env_cam_[3] = {0, 0, 0};
   float env_sun_[3] = {0, 0, 0};
+  float env_sun_color_[3] = {1.f, 0.96f, 0.88f};
+  float env_ambient_scale_ = 1.f;
   float env_fog_[3] = {0.7f, 0.75f, 0.82f};
   float env_fog_range_[2] = {0, 0};
 
@@ -281,17 +315,15 @@ private:
   float shadow_splits_[4] = {0, 0, 0, 0};
   int shadows_enabled_ = 0;
 
-  // Offscreen scene capture + post-process.
+  // Offscreen scene capture + post-process (HDR colour + sampleable depth).
   std::uint32_t scene_fbo_ = 0;
   std::uint32_t scene_color_ = 0;
-  std::uint32_t scene_depth_rbo_ = 0;
+  std::uint32_t scene_depth_tex_ = 0;  // sampleable depth for SSAO
   std::uint32_t post_program_ = 0;
   int scene_w_ = 0;
   int scene_h_ = 0;
 
-  // Bloom: half-res bright-pass + separable Gaussian ping-pong, composited
-  // additively in the final post pass so bright areas (sun, tracers, explosions,
-  // hot metal) glow. Purely LDR so it doesn't shift the base image's exposure.
+  // Bloom: half-res bright-pass + separable Gaussian ping-pong (HDR RGB16F).
   std::uint32_t bright_program_ = 0;
   std::uint32_t blur_program_ = 0;
   std::uint32_t bloom_fbo_[2] = {0, 0};
@@ -299,9 +331,36 @@ private:
   int bloom_w_ = 0;
   int bloom_h_ = 0;
   bool bloom_enabled_ = true;
-  float bloom_intensity_ = 0.6f;
-  float bloom_threshold_ = 0.6f;
-  int anisotropic_ = 8;
+  float bloom_intensity_ = 0.55f;
+  float bloom_threshold_ = 0.85f;
+  int anisotropic_ = 4;
+  float mip_lod_bias_ = 0.f;
+  int upscale_mode_ = 1;  // SpatialFsr by default when render_scale < 1
+  float fsr_sharpness_ = 0.2f;
+  std::vector<std::uint32_t> tracked_textures_;
+
+  // LDR resolve + FSR1 intermediates (post → EASU → RCAS).
+  std::uint32_t resolve_fbo_ = 0;
+  std::uint32_t resolve_tex_ = 0;
+  int resolve_w_ = 0;
+  int resolve_h_ = 0;
+  std::uint32_t easu_fbo_ = 0;
+  std::uint32_t easu_tex_ = 0;
+  int easu_w_ = 0;
+  int easu_h_ = 0;
+  std::uint32_t easu_program_ = 0;
+  std::uint32_t rcas_program_ = 0;
+
+  // SSAO: half-res AO from scene depth, blurred, multiplied in post.
+  std::uint32_t ssao_program_ = 0;
+  std::uint32_t ssao_blur_program_ = 0;
+  std::uint32_t ssao_fbo_[2] = {0, 0};
+  std::uint32_t ssao_tex_[2] = {0, 0};
+  int ssao_w_ = 0;
+  int ssao_h_ = 0;
+  bool ssao_enabled_ = true;
+  bool hdr_enabled_ = false;
+  float hdr_exposure_ = 0.55f;
 
   bool initialized_ = false;
 };

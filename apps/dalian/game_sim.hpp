@@ -120,7 +120,7 @@ private:
   EnemyHit shoot_enemies(const glm::vec3& o, const glm::vec3& dir, float maxd) const;
   void damage_enemy(int idx, int zone);
   void damage_enemy(int idx, int zone, float weapon_damage_override);
-  void explode_at(const glm::vec3& center, float radius, float max_damage);
+  void explode_at(const glm::vec3& center, float radius, float max_damage, bool spawn_fx = true);
   void fire_heli_rocket(const glm::vec3& origin, const glm::vec3& dir,
                         const VehicleWeaponSlot* weapon_slot = nullptr);
   void fire_vehicle_projectile(const glm::vec3& origin, const glm::vec3& dir,

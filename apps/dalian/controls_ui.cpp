@@ -119,8 +119,8 @@ bool draw_controls_options(bf2::Renderer& r, Settings& settings, int mx, int my,
   }
 
   r.ui_text(ox, oy + list_h + 8, 1.05f,
-            "Dalian extras use F9/F10/H so retail BF2 keys (G kit, Q commo, B squad, N minimap) stay "
-            "free.",
+            "Dalian extras: F8 car SAM, F9/F10 drones, H medkit. Retail BF2 keys (G/Q/B/N/T/V) stay "
+            "free for stubs.",
             0.55f, 0.58f, 0.62f, 1.f);
 
   return changed;

@@ -23,9 +23,23 @@ glm::vec2 MinimapProjector::world_to_minimap(const glm::vec3& world_pos) const {
   return {screen_x_ + u * screen_w_, screen_y_ + (1.f - v) * screen_h_};
 }
 
+glm::vec3 MinimapProjector::minimap_to_world(float screen_x, float screen_y, float world_y) const {
+  const float u = (screen_x - screen_x_) / screen_w_;
+  const float v = 1.f - (screen_y - screen_y_) / screen_h_;
+  const float wx = world_max_xz_.x - world_min_xz_.x;
+  const float wz = world_max_xz_.y - world_min_xz_.y;
+  return {world_min_xz_.x + std::clamp(u, 0.f, 1.f) * wx, world_y,
+          world_min_xz_.y + std::clamp(v, 0.f, 1.f) * wz};
+}
+
+bool MinimapProjector::contains_screen(float screen_x, float screen_y) const {
+  return screen_x >= screen_x_ && screen_x <= screen_x_ + screen_w_ && screen_y >= screen_y_ &&
+         screen_y <= screen_y_ + screen_h_;
+}
+
 float MinimapProjector::forward_to_arrow_angle(const glm::vec3& forward) const {
-  // 0 radians = arrow points up on the minimap (north / -Z in typical BF2 layouts).
-  return std::atan2(forward.x, -forward.z);
+  // 0 radians = arrow points up on the minimap (BF2 north = +Z).
+  return std::atan2(forward.x, forward.z);
 }
 
 bool minimap_projector_self_test() {
@@ -35,10 +49,14 @@ bool minimap_projector_self_test() {
   if (std::fabs(center.x - 200.f) > 1e-3f || std::fabs(center.y - 150.f) > 1e-3f) return false;
   const glm::vec2 corner = proj.world_to_minimap({-512.f, 0.f, 512.f});
   if (std::fabs(corner.x - 100.f) > 1e-3f || std::fabs(corner.y - 50.f) > 1e-3f) return false;
-  const float ang = proj.forward_to_arrow_angle({0.f, 0.f, -1.f});
+  const float ang = proj.forward_to_arrow_angle({0.f, 0.f, 1.f});
   if (std::fabs(ang) > 1e-4f) return false;
   const float east = proj.forward_to_arrow_angle({1.f, 0.f, 0.f});
   if (std::fabs(east - 1.5707963f) > 1e-3f) return false;
+  const glm::vec3 back = proj.minimap_to_world(center.x, center.y);
+  if (std::fabs(back.x) > 1e-2f || std::fabs(back.z) > 1e-2f) return false;
+  if (!proj.contains_screen(150.f, 100.f)) return false;
+  if (proj.contains_screen(50.f, 50.f)) return false;
   return true;
 }
 

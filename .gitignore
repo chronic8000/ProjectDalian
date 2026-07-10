@@ -55,3 +55,7 @@ run_pose.png
 # --- Keep the tiny hand-authored parser test fixtures ---
 !tests/fixtures/
 !tests/fixtures/**
+
+# Portable Blender used only for mesh conversion (huge)
+tools/blender-portable/
+

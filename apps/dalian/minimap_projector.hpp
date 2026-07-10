@@ -11,6 +11,9 @@ public:
                  float screen_y, float screen_w, float screen_h);
 
   glm::vec2 world_to_minimap(const glm::vec3& world_pos) const;
+  // Inverse of world_to_minimap — returns world XZ (Y unused). Screen Y is top-down.
+  glm::vec3 minimap_to_world(float screen_x, float screen_y, float world_y = 0.f) const;
+  bool contains_screen(float screen_x, float screen_y) const;
   float forward_to_arrow_angle(const glm::vec3& forward) const;
 
   glm::vec2 world_min_xz() const { return world_min_xz_; }

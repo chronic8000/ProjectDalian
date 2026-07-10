@@ -42,8 +42,8 @@ struct Undergrowth {
 
   // World XZ -> grass type for that spot (nullptr if bare ground).
   const GrassType* grass_at(float wx, float wz) const {
-    const int i = static_cast<int>(std::lround(wx / cell_size + (centered ? width * 0.5f : 0.f)));
-    const int j = static_cast<int>(std::lround(wz / cell_size + (centered ? height * 0.5f : 0.f)));
+    const int i = static_cast<int>(std::lround(wx / cell_size + (centered ? (width - 1) * 0.5f : 0.f)));
+    const int j = static_cast<int>(std::lround(wz / cell_size + (centered ? (height - 1) * 0.5f : 0.f)));
     const int id = id_at_grid(i, j);
     if (id < 0) return nullptr;
     const auto it = grass.find(id);
