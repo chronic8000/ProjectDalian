@@ -86,8 +86,13 @@ struct ActiveMissile {
   float explosion_radius = 9.f;
   float explosion_damage = 150.f;
   std::uint8_t detonation_fx = 0;  // 0 = default, 1 = igla / artillery SAM
-  float guide_arm_age = 0.f;       // age before guidance enables (artillery loft)
+  float guide_arm_age = 0.f;       // climb timeout before forcing transit
   float fuse_arm_age = 0.f;        // age before proximity / soft ground fuse
+  glm::vec3 impact_pos{0.f};       // ground mark (mortar dive target)
+  bool has_impact = false;
+  float loft_height = 160.f;       // apex height above impact
+  // 0 = vertical climb, 1 = high transit over mark, 2 = tip over / dive
+  std::uint8_t arty_phase = 0;
 };
 
 struct Smoke {

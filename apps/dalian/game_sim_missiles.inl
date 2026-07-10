@@ -45,41 +45,39 @@ if ((want_at || want_sam) && state_.missile_reload <= 0.f) {
       glm::vec3 flat = aim_point - launch;
       flat.y = 0.f;
       const float horiz = glm::length(flat);
-      glm::vec3 dir0;
+      // Mortar-style: nearly straight up (tiny lean toward the mark). Old loft was
+      // ~horizontal so the round flew into mountains then steered sideways.
+      glm::vec3 dir0(0.f, 1.f, 0.f);
       if (horiz > 1.f) {
-        // Artillery loft: climb hard so the round is visible before the dive.
-        const float loft = std::clamp(horiz * 0.5f, 110.f, 320.f);
-        const float up = loft / std::max(horiz, 1.f);
-        // Keep a strong upward bias even on short shots (was nearly horizontal).
-        const float fwd = horiz < 80.f ? 0.28f : 0.85f;
-        dir0 = glm::normalize(glm::normalize(flat) * fwd + glm::vec3(0.f, std::max(up, 1.15f), 0.f));
-      } else {
-        dir0 = glm::vec3(0.f, 1.f, 0.f);
+        dir0 = glm::normalize(glm::normalize(flat) * 0.08f + glm::vec3(0.f, 1.f, 0.f));
       }
+      const float loft_h = std::clamp(horiz * 0.4f, 140.f, 300.f);
       spawn_missile_from_profile(launch, dir0, prof, true);
       if (!state_.missiles.empty()) {
         ActiveMissile& am = state_.missiles.back();
+        am.impact_pos = aim_point;
+        am.has_impact = true;
+        am.loft_height = loft_h;
+        am.arty_phase = 0;
         am.m.target = aim_point;
         am.m.has_target = true;
-        // Ballistic climb first — guidance arms later so you see the loft + drop.
         am.m.guided = false;
-        am.homing_enemy = -1;  // stay on the map mark — don't steal lock to distant AI
+        am.homing_enemy = -1;
         am.detonation_fx = 1;
-        // Visible artillery arc (was too fast / fused mid-air before the dive).
-        am.m.velocity = dir0 * 22.f;
-        am.m.max_speed = 58.f;
-        am.m.boost_accel = 32.f;
-        am.m.boost_time = 3.6f;
-        am.m.turn_rate = 0.85f;
-        am.m.life = 35.f;
-        am.m.gravity = 9.81f * 0.9f;
-        am.m.drag = 0.00045f;
-        // Artillery / Hawk SAM: big but not map-clearing. (Was 38m/320 — nuke.)
+        // Vertical boost climb, then high transit, then dive.
+        am.m.velocity = dir0 * 30.f;
+        am.m.max_speed = 75.f;
+        am.m.boost_accel = 48.f;
+        am.m.boost_time = 2.6f;
+        am.m.turn_rate = 1.15f;
+        am.m.life = 40.f;
+        am.m.gravity = 9.81f * 1.05f;
+        am.m.drag = 0.0004f;
         am.explosion_radius = 12.f;
         am.explosion_damage = 145.f;
         am.smoke_timer = 0.04f;
-        am.guide_arm_age = 2.4f;  // start steering after the climb
-        am.fuse_arm_age = 1.6f;   // no proximity boom during boost
+        am.guide_arm_age = 3.8f;  // force transit if still climbing
+        am.fuse_arm_age = 2.0f;
       }
       if (params_.missile_headless_demo && !state_.missiles.empty()) {
         ActiveMissile& am = state_.missiles.back();
@@ -138,11 +136,43 @@ for (auto& am : state_.missiles) {
     }
   }
   am.prev_pos = am.m.position;
-  // Hawk / Car-SAM: ballistic loft, then arm guidance for the dive.
-  if (am.detonation_fx == 1 && am.m.has_target && am.homing_enemy < 0) {
+  // Hawk / Car-SAM mortar profile: up → slide over mark → tip over / dive.
+  if (am.detonation_fx == 1 && am.has_impact && am.homing_enemy < 0) {
+    const float dx = am.impact_pos.x - am.m.position.x;
+    const float dz = am.impact_pos.z - am.m.position.z;
+    const float horiz2 = dx * dx + dz * dz;
+    if (am.arty_phase == 0) {
+      am.m.guided = false;
+      // Past apex (falling) or climb timeout → transit high over the mark.
+      if ((am.m.age > 1.4f && am.m.velocity.y < 4.f) || am.m.age >= am.guide_arm_age) {
+        am.arty_phase = 1;
+        const float hold_y =
+            std::max(am.m.position.y, am.impact_pos.y + am.loft_height * 0.65f);
+        am.m.target = glm::vec3(am.impact_pos.x, hold_y, am.impact_pos.z);
+        am.m.has_target = true;
+        am.m.guided = true;
+        am.m.turn_rate = 1.05f;
+      }
+    } else if (am.arty_phase == 1) {
+      am.m.guided = true;
+      const float hold_y =
+          std::max(am.m.position.y * 0.98f, am.impact_pos.y + am.loft_height * 0.45f);
+      am.m.target = glm::vec3(am.impact_pos.x, hold_y, am.impact_pos.z);
+      // Over the mark (or close enough) → tip over into a steep dive.
+      if (horiz2 < 40.f * 40.f || am.m.age > am.guide_arm_age + 10.f) {
+        am.arty_phase = 2;
+        am.m.target = am.impact_pos;
+        am.m.turn_rate = 1.55f;
+      }
+    } else {
+      am.m.guided = true;
+      am.m.target = am.impact_pos;
+      am.m.has_target = true;
+    }
+  } else if (am.detonation_fx == 1 && am.m.has_target && am.homing_enemy < 0) {
+    // Fallback if impact_pos wasn't set.
     if (am.m.age >= am.guide_arm_age) {
       am.m.guided = true;
-      am.m.has_target = true;
     } else {
       am.m.guided = false;
     }
@@ -175,19 +205,28 @@ for (auto& am : state_.missiles) {
       boom = am.m.position;
     }
   }
-  // Map-guided SAMs: wait for fuse arm, then only boom near the ground mark
-  // (old fuse fired at +35m AGL while still diving — looked like no drop).
-  if (!detonate && am.m.has_target && am.homing_enemy < 0 && am.detonation_fx == 1) {
+  // Map-guided SAMs: wait for fuse arm, then boom near the ground mark on dive.
+  if (!detonate && am.has_impact && am.homing_enemy < 0 && am.detonation_fx == 1) {
+    if (am.m.age >= am.fuse_arm_age && am.arty_phase >= 2) {
+      const float dx = am.impact_pos.x - am.m.position.x;
+      const float dz = am.impact_pos.z - am.m.position.z;
+      const float horiz2 = dx * dx + dz * dz;
+      const bool near_ground = am.m.position.y < am.impact_pos.y + 10.f;
+      const bool diving = am.m.velocity.y < 5.f;
+      if (horiz2 < 10.f * 10.f && near_ground && diving) {
+        detonate = true;
+        boom = am.impact_pos;
+      } else if (glm::length(am.impact_pos - am.m.position) < 5.f) {
+        detonate = true;
+        boom = am.impact_pos;
+      }
+    }
+  } else if (!detonate && am.m.has_target && am.homing_enemy < 0 && am.detonation_fx == 1) {
     if (am.m.age >= am.fuse_arm_age) {
       const float dx = am.m.target.x - am.m.position.x;
       const float dz = am.m.target.z - am.m.position.z;
       const float horiz2 = dx * dx + dz * dz;
-      const bool near_ground = am.m.position.y < am.m.target.y + 8.f;
-      const bool diving = am.m.velocity.y < 8.f;
-      if (horiz2 < 9.f * 9.f && near_ground && diving) {
-        detonate = true;
-        boom = am.m.target;
-      } else if (glm::length(am.m.target - am.m.position) < 5.f) {
+      if (horiz2 < 9.f * 9.f && am.m.position.y < am.m.target.y + 8.f && am.m.velocity.y < 8.f) {
         detonate = true;
         boom = am.m.target;
       }
