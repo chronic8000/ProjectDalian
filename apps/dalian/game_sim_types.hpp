@@ -85,7 +85,9 @@ struct ActiveMissile {
   float smoke_timer = 0.f;
   float explosion_radius = 9.f;
   float explosion_damage = 150.f;
-  std::uint8_t detonation_fx = 0;  // 0 = default, 1 = igla (e_vexp_igla)
+  std::uint8_t detonation_fx = 0;  // 0 = default, 1 = igla / artillery SAM
+  float guide_arm_age = 0.f;       // age before guidance enables (artillery loft)
+  float fuse_arm_age = 0.f;        // age before proximity / soft ground fuse
 };
 
 struct Smoke {

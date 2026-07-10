@@ -4161,7 +4161,7 @@ int main(int argc, char** argv) {
       if (sam_launch_requested && sam_launch_mode == 1 && hawk_present) {
         inp.has_sam_launch_origin = true;
         // Launch from above the rail / tower.
-        inp.sam_launch_origin = hawk_pos + glm::vec3(0.f, 3.2f, 0.f);
+        inp.sam_launch_origin = hawk_pos + glm::vec3(0.f, 5.5f, 0.f);
       } else {
         inp.has_sam_launch_origin = false;
       }
