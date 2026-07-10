@@ -143,8 +143,8 @@ void spawn_igla_detonation_fx(std::vector<Smoke>& smoke, std::vector<Explosion>&
   ex.life = 1.35f * scale;
   ex.scale = scale;
   explosions.push_back(ex);
-  // Extra fireball layers for artillery / Car-SAM so the blast reads at distance.
-  if (scale >= 2.5f) {
+  // Extra fireball layer only for clearly oversized blasts (not normal SAM).
+  if (scale >= 3.5f) {
     Explosion ex2 = ex;
     ex2.life = 1.8f * scale;
     ex2.scale = scale * 1.35f;

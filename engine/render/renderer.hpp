@@ -227,6 +227,8 @@ public:
   void set_ssao(bool enabled);
   void set_hdr(bool enabled);
   void set_hdr_exposure(float exposure);
+  // Always-on output gain (SDR capture / YouTube). 1 = neutral, ~1.2–1.4 if OBS looks dark.
+  void set_output_brightness(float brightness);
   void set_shadows_enabled(bool enabled);
   bool reload_shadow_res(int resolution);
   void set_anisotropic(int level);
@@ -365,6 +367,7 @@ private:
   bool ssao_enabled_ = true;
   bool hdr_enabled_ = false;
   float hdr_exposure_ = 0.55f;
+  float output_brightness_ = 1.f;
   bool use_float_color_ = false;   // RGB16F only when HDR tonemap is on + GPU OK
   bool float_color_ok_ = true;     // probed at init
   int scene_color_fmt_ = 0;        // tracks last allocated internal format

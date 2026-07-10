@@ -381,7 +381,7 @@ std::uint32_t create_textured_program() {
       vec3 sunColor = uSunColor;
       vec3 ambient = albedo * (0.40 * ao * uAmbientScale);
       float sh = shadowFactor(vWorldPos, NdotL);
-      vec3 lit = ambient + (diffuse + spec) * sunColor * (1.75 * NdotL) * ao * sh;
+      vec3 lit = ambient + (diffuse + spec) * sunColor * (1.35 * NdotL) * ao * sh;
       if (uFogRange.y > 0.0) {
         float f = clamp((distance(uCamPos, vWorldPos) - uFogRange.x) /
                             max(uFogRange.y - uFogRange.x, 0.001),
@@ -731,7 +731,8 @@ std::uint32_t create_sky_program() {
         }
       } else if (length(uSunDir) > 0.001) {
         float s = max(dot(dir, normalize(-uSunDir)), 0.0);
-        col += uSunColor * (pow(s, 800.0) * 1.2 + pow(s, 8.0) * 0.15);
+        // Tight disc + mild corona — avoid a blown white sky blob in LDR.
+        col += uSunColor * (pow(s, 900.0) * 0.85 + pow(s, 12.0) * 0.08);
       }
       FragColor = vec4(col, 1.0);
     }
@@ -1024,8 +1025,9 @@ std::uint32_t create_post_program() {
     uniform sampler2D uSsao;
     uniform float uBloomI;
     uniform float uSsaoI;     // 0 = off, 1 = full AO
-    uniform float uHdr;       // 1 = ACES tone map
-    uniform float uExposure;  // HDR brightness (only when uHdr)
+    uniform float uHdr;         // 1 = ACES tone map
+    uniform float uExposure;    // ACES pre-exposure (HDR path)
+    uniform float uBrightness;  // always-on output gain (OBS / YouTube SDR)
     uniform float uDegrade;
     uniform float uTime;
     uniform vec2 uResolution;
@@ -1050,13 +1052,19 @@ std::uint32_t create_post_program() {
     vec3 finish(vec3 c, float ao) {
       c *= mix(1.0, ao, uSsaoI);
       c += texture(uBloom, vUv).rgb * uBloomI;
+      c *= uBrightness;
       if (uHdr > 0.5) {
+        // Float HDR path: ACES in (approx) linear, then display gamma.
+        // See Narkowicz ACES fit — gamma belongs AFTER the curve, not before.
         c = aces_tonemap(c * uExposure);
         c = pow(max(c, vec3(0.0)), vec3(1.0 / 2.2));
       } else {
-        // LDR: mild soft-knee so sun highlights don't clip hard, without the
-        // washed Reinhard look that made non-HDR feel dim/muddy or blown out.
-        c = c * (1.0 + c * 0.08);
+        // LDR / SDR capture path. Textures are NOT loaded as sRGB→linear, so
+        // lighting is already roughly display-referred. Applying pow(1/2.2) here
+        // double-brightens midtones (sun/nuke look). OBS darkness was Windows HDR
+        // capture, not missing gamma — keep Windows HDR off when recording.
+        // Soft Reinhard compresses the sun disc without washing the whole frame.
+        c = c / (1.0 + c * 0.22);
         c = clamp(c, 0.0, 1.0);
       }
       return c;
@@ -2639,6 +2647,10 @@ void Renderer::set_hdr_exposure(float exposure) {
   hdr_exposure_ = std::clamp(exposure, 0.15f, 2.5f);
 }
 
+void Renderer::set_output_brightness(float brightness) {
+  output_brightness_ = std::clamp(brightness, 0.5f, 2.0f);
+}
+
 void Renderer::set_shadows_enabled(bool enabled) {
   shadows_enabled_ = enabled ? 1 : 0;
 }
@@ -2836,6 +2848,7 @@ void Renderer::present_scene(float degrade, float time_seconds, float near_z, fl
     glUniform1f(glGetUniformLocation(post_program_, "uSsaoI"), ssao_i);
     glUniform1f(glGetUniformLocation(post_program_, "uHdr"), hdr_enabled_ ? 1.f : 0.f);
     glUniform1f(glGetUniformLocation(post_program_, "uExposure"), hdr_exposure_);
+    glUniform1f(glGetUniformLocation(post_program_, "uBrightness"), output_brightness_);
     glUniform1f(glGetUniformLocation(post_program_, "uDegrade"), degrade);
     glUniform1f(glGetUniformLocation(post_program_, "uTime"), time_seconds);
     glUniform2f(glGetUniformLocation(post_program_, "uResolution"), static_cast<float>(w),

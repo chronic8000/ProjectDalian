@@ -312,7 +312,9 @@ void draw_options_content(bf2::Renderer& r, Settings& settings, OptTab tab, int 
     row_check("BLOOM", settings.bloom);
     row_slider("BLOOM INTENSITY", settings.bloom_intensity, 0.f, 1.5f);
     row_check("HDR TONEMAP (float GPU)", settings.hdr);
-    row_slider("HDR EXPOSURE", settings.hdr_exposure, 0.15f, 1.5f);
+    row_slider("HDR EXPOSURE", settings.hdr_exposure, 0.15f, 1.5f, "(ACES only)");
+    row_slider("OUTPUT BRIGHTNESS", settings.output_brightness, 0.5f, 2.f,
+               "(1.0 default; only raise for capture)");
     row_check("SSAO", settings.ssao);
     row_check("SHADOWS", settings.shadows_enabled);
     row_slider("SHADOW DISTANCE", settings.shadow_distance, 400.f, 2800.f);
@@ -553,6 +555,7 @@ void apply_graphics_settings(bf2::Renderer& renderer, Settings& settings) {
   renderer.set_bloom(settings.bloom, settings.bloom_intensity);
   renderer.set_hdr(settings.hdr);
   renderer.set_hdr_exposure(settings.hdr_exposure);
+  renderer.set_output_brightness(settings.output_brightness);
   renderer.set_ssao(settings.ssao);
   renderer.set_shadows_enabled(settings.shadows_enabled);
   renderer.set_anisotropic(settings.anisotropic);

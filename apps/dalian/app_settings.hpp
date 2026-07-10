@@ -48,6 +48,8 @@ struct Settings {
   // Off by default; weak laptop GPUs often corrupt float FBOs (green/magenta).
   bool hdr = false;
   float hdr_exposure = 0.55f;    // only used when hdr is on
+  // Always-on gain after post (OBS/YouTube SDR). Raise if recordings look dark.
+  float output_brightness = 1.f;
   bool ssao = false;             // expensive; off by default for playable FPS
   bool shadows_enabled = true;
   int shadow_res = 2048;         // 4096 is very heavy with remastered textures
@@ -113,6 +115,8 @@ struct Settings {
       else if (key == "hdr") s.hdr = val == "1" || val == "true";
       else if (key == "hdr_exposure")
         s.hdr_exposure = std::clamp(static_cast<float>(std::atof(val.c_str())), 0.15f, 2.5f);
+      else if (key == "output_brightness")
+        s.output_brightness = std::clamp(static_cast<float>(std::atof(val.c_str())), 0.5f, 2.f);
       else if (key == "ssao") s.ssao = val == "1" || val == "true";
       else if (key == "shadows_enabled") s.shadows_enabled = val == "1" || val == "true";
       else if (key == "shadow_res") s.shadow_res = std::atoi(val.c_str());
@@ -187,6 +191,7 @@ struct Settings {
     out << "bloom_intensity=" << bloom_intensity << '\n';
     out << "hdr=" << (hdr ? 1 : 0) << '\n';
     out << "hdr_exposure=" << hdr_exposure << '\n';
+    out << "output_brightness=" << output_brightness << '\n';
     out << "ssao=" << (ssao ? 1 : 0) << '\n';
     out << "shadows_enabled=" << (shadows_enabled ? 1 : 0) << '\n';
     out << "shadow_res=" << shadow_res << '\n';

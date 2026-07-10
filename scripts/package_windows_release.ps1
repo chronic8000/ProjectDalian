@@ -1,7 +1,7 @@
 # Package a Windows x64 binary release (no EA/DICE assets — user supplies BF2 install).
 param(
     [string]$BuildDir = "C:\Projects\bf2respawn\build",
-    [string]$Version = "v0.5.13-alpha",
+    [string]$Version = "v0.5.14-alpha",
     [string]$OutDir = "C:\Projects\bf2respawn\dist"
 )
 
@@ -70,7 +70,11 @@ Graphics tips (HD texture packs):
 Green sky / purple world (weak laptop GPUs):
   Options → Graphics → Laptop / Compat Mode → Apply
   or set BF2_COMPAT=1 before launch
-  (HDR off now uses real LDR buffers — not Windows/monitor HDR)
+
+Recording / YouTube (avoid dark or blown footage):
+  Turn Windows HDR / Auto HDR OFF while capturing
+  In-game: HDR off, Bloom off, Output Brightness 1.0
+  OBS: SDR (NV12, Rec.709, Partial) — do not capture as HDR
 
 Recovery if the display breaks:
   project_dalian.exe --windowed
