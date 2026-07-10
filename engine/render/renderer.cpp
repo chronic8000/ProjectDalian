@@ -1660,7 +1660,7 @@ GpuTexturedMesh Renderer::upload_textured(const TexturedMeshData& data) {
 
 void Renderer::draw_textured(const GpuTexturedMesh& mesh, const float* mvp, const float* model,
                              std::uint32_t obj_lightmap, const float* lm_xform, bool cull_backfaces,
-                             int alpha_mode, float uv_scroll_v, bool scroll_all_uv) {
+                             int alpha_mode, float uv_scroll_u, bool scroll_all_uv) {
   if (!initialized_ || mesh.vao == 0) {
     return;
   }
@@ -1705,8 +1705,9 @@ void Renderer::draw_textured(const GpuTexturedMesh& mesh, const float* mvp, cons
   glBindVertexArray(mesh.vao);
   for (const auto& sub : mesh.submeshes) {
     if (sub.index_count == 0) continue;
-    const float scroll = (sub.track_uv || scroll_all_uv) ? uv_scroll_v : 0.f;
-    glUniform2f(uv_scroll_loc, 0.f, scroll);
+    // BF2 tank treads scroll along U (SetAnimatedTextureSpeed x/0 in vehicle .con).
+    const float scroll = (sub.track_uv || scroll_all_uv) ? uv_scroll_u : 0.f;
+    glUniform2f(uv_scroll_loc, scroll, 0.f);
     glActiveTexture(GL_TEXTURE0);
     // Missing textures fall back to neutral grey rather than skipping the
     // submesh, which would leave a hole you can see through.

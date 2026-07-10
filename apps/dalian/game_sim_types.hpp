@@ -120,8 +120,9 @@ struct VehicleWheelSlot {
   std::string mesh_key;
   glm::mat4 rest{1.f};
   bool steers = false;
-  // Tanks/APCs animate treads via scrolling UVs, not by spinning the mesh.
+  // Tanks: road-wheel tread pads scroll UVs; drive sprockets still spin geometry.
   bool spin_geometry = true;
+  bool is_sprocket = false;
   float gear_tuck_angle = 65.f;  // degrees when landing gear stows (jets)
   int gear_tuck_axis = 1;        // 0=Y 1=X 2=Z in render euler order
 };

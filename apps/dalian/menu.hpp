@@ -60,6 +60,15 @@ MenuResult run_main_menu(SDL_Window* window, bf2::Renderer& renderer, Settings& 
 PauseResult run_pause_overlay(SDL_Window* window, bf2::Renderer& renderer, Settings& settings,
                               int& screen_w, int& screen_h, bool* options_open);
 
+// Modal shown when a multiplayer client loses the host (quit or disconnect).
+void run_connection_lost_dialog(SDL_Window* window, bf2::Renderer& renderer, int& screen_w,
+                                int& screen_h, const char* title, const char* message);
+
+// Scrollable map list with map name + mod columns (all mods, duplicates allowed).
+void draw_map_list_panel(bf2::Renderer& renderer, int mx, int my, bool clicked,
+                         const std::vector<MapEntry>& maps, float lx, float list_y, float lw,
+                         float list_h, int& selected_map, float& map_scroll);
+
 bool run_options_panel(SDL_Window* window, bf2::Renderer& renderer, Settings& settings, int& screen_w,
                        int& screen_h, bool modal);
 

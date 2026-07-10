@@ -1518,6 +1518,13 @@ int main(int argc, char** argv) {
                s.find("tyre") != std::string::npos || s.find("sprocket") != std::string::npos ||
                s.find("drivewheel") != std::string::npos || s.find("driwewheel") != std::string::npos;
       };
+      const auto is_sprocket_wheel = [&](const std::string& n, const std::string& type) {
+        const std::string s = lc(n);
+        const std::string t = lc(type);
+        if (t == "rotationalbundle") return true;
+        return s.find("sprocket") != std::string::npos || s.find("driwe") != std::string::npos ||
+               s.find("drivewheel") != std::string::npos;
+      };
       const auto is_steer_name = [&](const std::string& n) {
         const std::string s = lc(n);
         return s.find("front") != std::string::npos || s.find("_fl") != std::string::npos ||
@@ -1621,6 +1628,7 @@ int main(int argc, char** argv) {
             ws.geom_part = gp;
             ws.rest = xform;
             ws.steers = is_steer_name(oname);
+            ws.is_sprocket = is_sprocket_wheel(oname, otype);
             const auto [ang, ax] = tuck_for_wheel(oname);
             ws.gear_tuck_angle = ang;
             ws.gear_tuck_axis = ax;
@@ -1822,7 +1830,11 @@ int main(int argc, char** argv) {
           if (!tweak_text.empty()) tracked = vehicle_tweak_is_tracked(tweak_text);
         }
         v.is_tracked = tracked;
-        for (auto& w : v.wheels) w.spin_geometry = !tracked;
+        for (auto& w : v.wheels) {
+          // Wheeled vehicles spin every tire; tracked tanks UV-scroll road pads and only
+          // spin the rear drive sprockets (RotationalBundle in the .con).
+          w.spin_geometry = !tracked || w.is_sprocket;
+        }
         if (!tweak_text.empty()) {
           if (v.is_air) {
             const dalian::VehicleAirProfile air = dalian::parse_vehicle_air_profile(tweak_text);
@@ -3299,6 +3311,13 @@ int main(int argc, char** argv) {
     // Pump the network early so this frame renders the freshest remote states.
     // `net_fired` / `net_fire_*` capture a shot taken this frame for replication.
     if (net.active()) net.poll(dt);
+    if (session_mp.enabled && !session_mp.is_host && net.connection_lost()) {
+      dalian::run_connection_lost_dialog(window, renderer, cur_w, cur_h, "CONNECTION LOST",
+                                         net.connection_lost_message());
+      net.clear_connection_lost();
+      leave_to_menu = true;
+      running = false;
+    }
     if (net.active()) {
       std::unordered_set<std::uint32_t> active_remotes;
       for (const auto& p : net.players()) {
@@ -3868,6 +3887,13 @@ int main(int argc, char** argv) {
         tuck = glm::rotate(tuck, rad, glm::vec3(1, 0, 0));
       return rest * tuck;
     };
+    const auto track_uv_scroll = [](float spin, float speed) {
+      const float sign = speed >= 0.f ? 1.f : -1.f;
+      float u = sign * spin * 0.08f;
+      u = u - std::floor(u);  // wrap to [0,1) for stable tiling
+      if (u < 0.f) u += 1.f;
+      return u;
+    };
     for (const auto& v : vehicles) {
       const glm::vec3 d = v.pos - cam;
       if (glm::dot(d, d) > draw_dist2) continue;
@@ -3875,7 +3901,9 @@ int main(int argc, char** argv) {
       if (vit != vehicle_cache.end() && vit->second.vao != 0) {
         const glm::mat4 mvp = view_proj * v.model;
         const float track_scroll =
-            v.is_tracked && !v.wheel_spin.empty() ? v.wheel_spin[0] * 0.08f : 0.f;
+            v.is_tracked && !v.wheel_spin.empty()
+                ? track_uv_scroll(v.wheel_spin[0], v.speed)
+                : 0.f;
         // Cull back faces on the hull so you don't see the interior back-faces
         // through hatches/viewports (the "see inside the vehicle" artifact).
         renderer.draw_textured(vit->second, glm::value_ptr(mvp), glm::value_ptr(v.model), 0, nullptr,
@@ -3892,7 +3920,7 @@ int main(int argc, char** argv) {
         if (wslot.steers) pm = glm::rotate(pm, v.visual_steer, glm::vec3(0, 1, 0));
         const float spin = wi < v.wheel_spin.size() ? v.wheel_spin[wi] : 0.f;
         if (wslot.spin_geometry) pm = glm::rotate(pm, spin, glm::vec3(1, 0, 0));
-        const float uv_scroll = wslot.spin_geometry ? 0.f : spin * 0.08f;
+        const float uv_scroll = wslot.spin_geometry ? 0.f : track_uv_scroll(spin, v.speed);
         const glm::mat4 mvp = view_proj * pm;
         renderer.draw_textured(wit->second, glm::value_ptr(mvp), glm::value_ptr(pm), 0, nullptr,
                                false, 0, uv_scroll, !wslot.spin_geometry);

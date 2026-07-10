@@ -205,6 +205,23 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
 
     if (net) net->poll(1.f / 60.f);
 
+    if (net && !is_host && net->connection_lost()) {
+      int dlg_w = 0, dlg_h = 0;
+      refresh_display(window, renderer, dlg_w, dlg_h);
+      run_connection_lost_dialog(window, renderer, dlg_w, dlg_h, "CONNECTION LOST",
+                               net->connection_lost_message());
+      net->clear_connection_lost();
+      text_field_blur(name_field);
+      text_field_blur(ip_field);
+      net.reset();
+      discovery.stop();
+      discovery_active = false;
+      view = MpView::Browse;
+      scan_started = false;
+      is_host = false;
+      continue;
+    }
+
     if (view == MpView::Lobby && net && name_was_focused && !name_field.focused &&
         net->lobby_joined()) {
       net->send_join_info(name_field.buf, static_cast<std::uint16_t>(faction_id));
@@ -292,14 +309,25 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
       if (e.type == SDL_MOUSEWHEEL) {
         float dx = 0.f, dy = 0.f;
         ui_mouse_design(renderer, mx, my, dx, dy);
-        if (view == MpView::Browse && dx >= 40 && dx <= 40 + W * 0.55f && dy >= 266 && dy <= H - 110)
+        if (view == MpView::Browse && dx >= 40.f && dx <= 40.f + W * 0.55f && dy >= 266.f &&
+            dy <= H - 110.f) {
           server_scroll -= e.wheel.y * 40.f;
-        else if (view == MpView::Lobby && dx >= 40 && dx <= 580 && dy >= 234 && dy <= H - 240)
-          lobby_scroll -= e.wheel.y * 26.f;
-        else if (view == MpView::HostSetup)
-          map_scroll -= e.wheel.y * 28.f;
-        else
+        } else if (view == MpView::Lobby) {
+          if (dx >= 40.f && dx <= 580.f && dy >= 234.f && dy <= H - 240.f)
+            lobby_scroll -= e.wheel.y * 26.f;
+          else if (dx >= W - 400.f && dx <= W - 40.f && dy >= 188.f && dy <= H - 180.f)
+            faction_scroll -= e.wheel.y * 24.f;
+        } else if (view == MpView::HostSetup) {
+          const float lx = 40.f, ly = 120.f, lw = 380.f;
+          const float list_y = ly + 28.f, list_h = 220.f;
+          const float fx = lx + 420.f, fy = ly + 28.f, fw = 360.f, fh = H - 300.f;
+          if (dx >= fx && dx <= fx + fw && dy >= fy && dy <= fy + fh)
+            faction_scroll -= e.wheel.y * 24.f;
+          else if (dx >= lx && dx <= lx + lw && dy >= list_y && dy <= list_y + list_h)
+            map_scroll -= e.wheel.y * 28.f;
+        } else {
           faction_scroll -= e.wheel.y * 24.f;
+        }
       }
     }
     SDL_GetMouseState(&mx, &my);
@@ -447,22 +475,15 @@ bool run_multiplayer_flow(SDL_Window* window, bf2::Renderer& renderer, Settings&
                        UiTheme::kOrangeB, 1.f);
       const float list_y = ly + 28;
       const float list_h = 220.f;
-      renderer.ui_rect(lx, list_y, lw, list_h, 0.04f, 0.05f, 0.06f, 0.95f);
-      const float row_h = 32.f;
-      map_scroll = clamp_scroll(map_scroll, static_cast<float>(maps.size()) * row_h, list_h);
-      const int start = static_cast<int>(map_scroll / row_h);
-      for (int i = start; i < static_cast<int>(maps.size()) && i < start + static_cast<int>(list_h / row_h) + 2;
-           ++i) {
-        const float ry = list_y + i * row_h - map_scroll;
-        if (ry < list_y || ry > list_y + list_h - row_h) continue;
-        const bool sel = i == selected_map;
-        const bool hov = rect_hit(renderer, mx, my, lx, ry, lw, row_h);
-        renderer.ui_rect(lx, ry, lw, row_h - 2, sel ? 0.16f : (hov ? 0.11f : 0.07f),
-                         sel ? 0.28f : (hov ? 0.14f : 0.09f), sel ? 0.42f : (hov ? 0.18f : 0.11f),
-                         0.96f);
-        draw_clipped_text(renderer, lx + 10, ry + 8, lw - 20.f, 1.2f, maps[i].display_name.c_str(),
-                          0.9f, 0.92f, 0.94f, 1.f);
-        if (clicked && hov) selected_map = i;
+      draw_map_list_panel(renderer, mx, my, clicked, maps, lx, list_y, lw, list_h, selected_map,
+                          map_scroll);
+      if (selected_map >= 0 && selected_map < static_cast<int>(maps.size())) {
+        const MapEntry& hm = maps[selected_map];
+        char mbuf[256];
+        std::snprintf(mbuf, sizeof(mbuf), "Mod: [%s]   Folder: %s", hm.mod_name.c_str(),
+                      hm.folder.c_str());
+        draw_clipped_text(renderer, lx, list_y + list_h + 8, lw + 360.f, 1.1f, mbuf, 0.6f, 0.63f,
+                          0.68f, 1.f);
       }
 
       char port_buf[16];

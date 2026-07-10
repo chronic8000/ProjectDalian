@@ -710,37 +710,15 @@ MenuResult run_main_menu(SDL_Window* window, bf2::Renderer& renderer, Settings& 
                        UiTheme::kOrangeB, 1.f);
       const float list_y = ly + 32;
       const float list_h = H - list_y - 120;
-      renderer.ui_rect(lx, list_y, lw, list_h, 0.04f, 0.05f, 0.06f, 0.95f);
-      const float row_h = 36.f;
-      const int visible = static_cast<int>(list_h / row_h) + 1;
-      const int max_scroll = std::max(0, static_cast<int>(maps.size()) - visible + 1);
-      map_scroll = std::min(map_scroll, static_cast<float>(max_scroll) * row_h);
-      const int start = static_cast<int>(map_scroll / row_h);
-      for (int i = start; i < static_cast<int>(maps.size()) && i < start + visible + 2; ++i) {
-        const float ry = list_y + i * row_h - map_scroll;
-        if (ry < list_y || ry > list_y + list_h - row_h) continue;
-        const bool sel = i == selected_map;
-        const bool hov = rect_hit(renderer, mx, my, lx, ry, lw, row_h);
-        renderer.ui_rect(lx, ry, lw, row_h - 2,
-                         sel ? 0.18f : (hov ? 0.12f : 0.07f),
-                         sel ? 0.35f : (hov ? 0.18f : 0.09f),
-                         sel ? 0.55f : (hov ? 0.22f : 0.11f), 0.95f);
-        if (sel)
-          renderer.ui_rect(lx, ry, 4, row_h - 2, UiTheme::kOrangeR, UiTheme::kOrangeG,
-                           UiTheme::kOrangeB, 1.f);
-        draw_clipped_text(renderer, lx + 12, ry + 10, lw - 160.f, 1.35f, maps[i].display_name.c_str(),
-                          0.92f, 0.94f, 0.96f, 1.f);
-        draw_clipped_text(renderer, lx + lw - 132, ry + 12, 120.f, 1.1f, maps[i].mod_name.c_str(),
-                          0.5f, 0.55f, 0.6f, 1.f);
-        if (clicked && hov) selected_map = i;
-      }
+      draw_map_list_panel(renderer, mx, my, clicked, maps, lx, list_y, lw, list_h, selected_map,
+                          map_scroll);
       const float dx = lx + lw + 30;
       if (selected_map >= 0 && selected_map < static_cast<int>(maps.size())) {
         const MapEntry& m = maps[selected_map];
         draw_clipped_text(renderer, dx, ly, W - dx - 260.f, 2.0f, m.display_name.c_str(), 0.95f,
                           0.96f, 0.98f, 1.f);
         char buf[256];
-        std::snprintf(buf, sizeof(buf), "Mod: %s", m.mod_name.c_str());
+        std::snprintf(buf, sizeof(buf), "Mod: [%s]", m.mod_name.c_str());
         draw_clipped_text(renderer, dx, ly + 36, W - dx - 260.f, 1.4f, buf, 0.65f, 0.68f, 0.72f,
                           1.f);
         std::snprintf(buf, sizeof(buf), "Folder: %s", m.folder.c_str());
@@ -887,6 +865,85 @@ PauseResult run_pause_overlay(SDL_Window* window, bf2::Renderer& renderer, Setti
     SDL_GL_SwapWindow(window);
   }
   return pr;
+}
+
+void draw_map_list_panel(bf2::Renderer& renderer, int mx, int my, bool clicked,
+                         const std::vector<MapEntry>& maps, float lx, float list_y, float lw,
+                         float list_h, int& selected_map, float& map_scroll) {
+  renderer.ui_rect(lx, list_y, lw, list_h, 0.04f, 0.05f, 0.06f, 0.95f);
+  const float header_h = 22.f;
+  draw_clipped_text(renderer, lx + 12, list_y + 4, lw - 160.f, 1.0f, "MAP", 0.55f, 0.58f, 0.62f,
+                    1.f);
+  draw_clipped_text(renderer, lx + lw - 132, list_y + 4, 120.f, 1.0f, "MOD", 0.55f, 0.58f, 0.62f,
+                    1.f);
+  renderer.ui_rect(lx + 8, list_y + header_h - 2, lw - 16, 1, 0.14f, 0.15f, 0.16f, 1.f);
+  const float row_h = 36.f;
+  const float body_y = list_y + header_h;
+  const float body_h = list_h - header_h;
+  const int visible = static_cast<int>(body_h / row_h) + 1;
+  const int max_scroll = std::max(0, static_cast<int>(maps.size()) - visible + 1);
+  map_scroll = std::min(map_scroll, static_cast<float>(max_scroll) * row_h);
+  map_scroll = std::max(0.f, map_scroll);
+  const int start = static_cast<int>(map_scroll / row_h);
+  for (int i = start; i < static_cast<int>(maps.size()) && i < start + visible + 2; ++i) {
+    const float ry = body_y + i * row_h - map_scroll;
+    if (ry < body_y || ry > body_y + body_h - row_h) continue;
+    const bool sel = i == selected_map;
+    const bool hov = rect_hit(renderer, mx, my, lx, ry, lw, row_h);
+    renderer.ui_rect(lx, ry, lw, row_h - 2, sel ? 0.18f : (hov ? 0.12f : 0.07f),
+                     sel ? 0.35f : (hov ? 0.18f : 0.09f), sel ? 0.55f : (hov ? 0.22f : 0.11f),
+                     0.95f);
+    if (sel)
+      renderer.ui_rect(lx, ry, 4, row_h - 2, UiTheme::kOrangeR, UiTheme::kOrangeG,
+                       UiTheme::kOrangeB, 1.f);
+    draw_clipped_text(renderer, lx + 12, ry + 10, lw - 160.f, 1.35f, maps[i].display_name.c_str(),
+                      0.92f, 0.94f, 0.96f, 1.f);
+    char mod_buf[96];
+    std::snprintf(mod_buf, sizeof(mod_buf), "[%s]", maps[i].mod_name.c_str());
+    draw_clipped_text(renderer, lx + lw - 132, ry + 12, 120.f, 1.1f, mod_buf, UiTheme::kOrangeR,
+                      UiTheme::kOrangeG, UiTheme::kOrangeB, 1.f);
+    if (clicked && hov) selected_map = i;
+  }
+}
+
+void run_connection_lost_dialog(SDL_Window* window, bf2::Renderer& renderer, int& screen_w,
+                                int& screen_h, const char* title, const char* message) {
+  SDL_SetRelativeMouseMode(SDL_FALSE);
+  SDL_ShowCursor(SDL_ENABLE);
+  constexpr float W = 1600.f, H = 900.f;
+  bool running = true;
+  while (running) {
+    SDL_Event e;
+    bool clicked = false;
+    int mx = 0, my = 0;
+    while (SDL_PollEvent(&e)) {
+      if (e.type == SDL_QUIT) {
+        running = false;
+        break;
+      } else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
+        clicked = true;
+      }
+    }
+    SDL_GetMouseState(&mx, &my);
+    refresh_display(window, renderer, screen_w, screen_h);
+    renderer.begin_frame(0.04f, 0.05f, 0.06f);
+    renderer.begin_ui(window);
+    renderer.ui_rect(0, 0, W, H, 0.f, 0.f, 0.f, 0.65f);
+    const float pw = 520.f, ph = 280.f;
+    const float px = (W - pw) * 0.5f, py = (H - ph) * 0.5f;
+    renderer.ui_rect(px, py, pw, ph, 0.06f, 0.07f, 0.08f, 0.98f);
+    renderer.ui_rect(px, py, pw, 3, UiTheme::kOrangeR, UiTheme::kOrangeG, UiTheme::kOrangeB, 1.f);
+    draw_clipped_text(renderer, px + 24, py + 20, pw - 48.f, 2.0f, title, 0.95f, 0.96f, 0.98f, 1.f);
+    draw_clipped_text(renderer, px + 24, py + 64, pw - 48.f, 1.45f, message, 0.72f, 0.74f, 0.78f,
+                      1.f);
+    const float bx = px + (pw - 240.f) * 0.5f, by = py + ph - 72.f;
+    if (draw_button(renderer, mx, my, bx, by, 240, 48, "BACK TO MAIN MENU", true) && clicked) {
+      running = false;
+    }
+    renderer.end_ui();
+    renderer.end_frame();
+    SDL_GL_SwapWindow(window);
+  }
 }
 
 }  // namespace dalian

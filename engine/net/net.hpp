@@ -250,6 +250,11 @@ class Net {
 
   bool connected() const { return connected_; }
 
+  // Client: set when the server drops (host quit, network loss). Read once per disconnect.
+  bool connection_lost() const { return connection_lost_; }
+  const char* connection_lost_message() const { return connection_lost_message_.c_str(); }
+  void clear_connection_lost() { connection_lost_ = false; }
+
   std::uint32_t local_id() const { return local_id_; }
 
   double net_time() const { return net_time_; }
@@ -348,6 +353,10 @@ class Net {
   bool dedicated_ = false;
 
   bool connected_ = false;
+
+  bool connection_lost_ = false;
+
+  std::string connection_lost_message_;
 
   void* host_ = nullptr;
 

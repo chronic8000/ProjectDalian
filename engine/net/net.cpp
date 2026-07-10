@@ -1728,6 +1728,12 @@ void Net::poll(float dt) {
 
           connected_ = false;
 
+          connection_lost_ = true;
+
+          connection_lost_message_ = "The host has ended the session.";
+
+          std::printf("Net: disconnected from server\n");
+
         }
 
         break;
@@ -1971,6 +1977,10 @@ void Net::shutdown() {
   role_ = Role::None;
 
   connected_ = false;
+
+  connection_lost_ = false;
+
+  connection_lost_message_.clear();
 
   players_.clear();
 
