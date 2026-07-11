@@ -804,19 +804,63 @@ void GameSim::step_push_player_from_hulls() {
 
 void GameSim::decay_sticks(float dt, const PlayerInput& input) {
   state_.air_input_grace = std::max(0.f, state_.air_input_grace - dt);
-  if (state_.in_vehicle >= 0 && state_.in_vehicle < static_cast<int>(state_.vehicles.size()) &&
-      state_.player_seat == 0 && state_.air_input_grace <= 0.f && !input.air_stick_moved) {
-    const Vehicle& av = state_.vehicles[state_.in_vehicle];
-    if (!av.is_heli) {
-      const float decay = std::exp(-5.f * dt);
-      state_.air_pitch_stick *= decay;
-      state_.air_roll_stick *= decay;
-    }
+
+  // Rudder axis: keys drive toward ±1, then auto-center (virtual joystick).
+  float yaw_target = 0.f;
+  if (input.yaw_left) yaw_target -= 1.f;
+  if (input.yaw_right) yaw_target += 1.f;
+  const float yaw_rate = yaw_target != 0.f ? 6.f : 4.5f;
+  state_.air_yaw_stick += (yaw_target - state_.air_yaw_stick) * std::min(1.f, yaw_rate * dt);
+  if (std::fabs(state_.air_yaw_stick) < 0.01f) state_.air_yaw_stick = 0.f;
+
+  if (state_.in_vehicle < 0 || state_.in_vehicle >= static_cast<int>(state_.vehicles.size()) ||
+      state_.player_seat != 0) {
+    return;
   }
-  float pitch_stick = input.air_pitch_stick;
-  if (input.pitch_up) pitch_stick = std::max(pitch_stick, 1.f);
-  state_.air_pitch_stick = pitch_stick;
-  state_.air_roll_stick = input.air_roll_stick;
+
+  const Vehicle& av = state_.vehicles[state_.in_vehicle];
+  if (!av.is_air) return;
+
+  // Jets: AutomaticReset — decay stick toward zero when mouse idle (BF2 flap recenter).
+  // Helis: hold cyclic (rotor AoA decay is handled in the flight integrator).
+  if (state_.air_input_grace <= 0.f && !input.air_stick_moved && !av.is_heli) {
+    const float reset = std::max(0.15f, av.automatic_reset);
+    const float decay = std::exp(-5.f * reset * dt);
+    state_.air_pitch_stick *= decay;
+    state_.air_roll_stick *= decay;
+    if (std::fabs(state_.air_pitch_stick) < 0.008f) state_.air_pitch_stick = 0.f;
+    if (std::fabs(state_.air_roll_stick) < 0.008f) state_.air_roll_stick = 0.f;
+  }
+
+  if (input.pitch_up) state_.air_pitch_stick = std::max(state_.air_pitch_stick, 1.f);
+}
+
+void GameSim::absorb_air_mouse(const PlayerInput& input) {
+  if (state_.air_input_grace > 0.f) return;
+  if (state_.in_vehicle < 0 || state_.in_vehicle >= static_cast<int>(state_.vehicles.size()))
+    return;
+  if (state_.player_seat != 0) return;
+  Vehicle& av = state_.vehicles[state_.in_vehicle];
+  if (!av.is_air) return;
+
+  const float dx = input.air_mouse_dx;
+  const float dy = input.air_mouse_dy;
+  if (std::fabs(dx) < 1e-8f && std::fabs(dy) < 1e-8f) return;
+
+  const float inv = input.invert_air ? -1.f : 1.f;
+  const float sens = std::max(0.25f, input.air_mouse_sens);
+  const float pitch_sens = (av.is_heli ? 0.020f : 0.032f) * sens;
+  const float roll_sens = (av.is_heli ? 0.016f : 0.018f) * sens;
+  const float ground_pitch_scale =
+      (!av.is_heli && av.wheels_on_ground && !av.jet_airborne) ? 0.28f : 1.f;
+
+  state_.air_pitch_stick =
+      std::clamp(state_.air_pitch_stick + dy * pitch_sens * inv * ground_pitch_scale, -1.f, 1.f);
+  if (av.is_heli) {
+    state_.air_roll_stick = std::clamp(state_.air_roll_stick + dx * roll_sens, -1.f, 1.f);
+  } else if (!av.wheels_on_ground || av.jet_airborne) {
+    state_.air_roll_stick = std::clamp(state_.air_roll_stick - dx * roll_sens, -1.f, 1.f);
+  }
 }
 
 void GameSim::step_rotor_spool(float dt, const PlayerInput& input) {
@@ -1401,16 +1445,22 @@ void GameSim::tick_fixed(float dt, const PlayerInput& input) {
 void GameSim::tick(float frame_dt, const PlayerInput& input) {
   if (frame_dt <= 0.f) frame_dt = kFixedDt;
   clear_events();
+  // Buffer all OS mouse polls into the virtual stick once per frame, then
+  // advance physics at a fixed rate (Refractor-style accumulator + fixed step).
+  absorb_air_mouse(input);
   time_accumulator_ += frame_dt;
   time_accumulator_ = std::min(time_accumulator_, kFixedDt * 5.f);
   bool first_substep = true;
   while (time_accumulator_ >= kFixedDt) {
     PlayerInput sub = input;
+    sub.air_mouse_dx = 0.f;
+    sub.air_mouse_dy = 0.f;
     if (!first_substep) {
       sub.enter_exit = false;
       sub.seat_switch = -1;
       sub.launch_missile = false;
       sub.flare_request = false;
+      sub.air_stick_moved = false;
     }
     tick_fixed(kFixedDt, sub);
     first_substep = false;

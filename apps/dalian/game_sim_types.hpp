@@ -51,6 +51,11 @@ struct PlayerInput {
   bool enter_exit = false;
   float air_pitch_stick = 0.f;
   float air_roll_stick = 0.f;
+  float air_yaw_stick = 0.f;     // rudder axis (−1…1), keys + optional mouse
+  float air_mouse_dx = 0.f;      // raw mouse deltas buffered this frame (pre-sens)
+  float air_mouse_dy = 0.f;
+  float air_mouse_sens = 1.f;    // sensitivity scale applied at physics absorb
+  float air_throttle_delta = 0.f; // mouse-wheel / c_PIThrottle analog (−N…N notches)
   bool air_stick_moved = false;
 };
 
@@ -181,6 +186,9 @@ struct Vehicle {
   float gear_anim_down_rate = 0.7f;
   float wing_body_lift = 0.62f;
   float wing_flap_lift = 11.f;
+  float regulate_to_lift = 1.15f;
+  float wing_to_regulator = 1.f;
+  float automatic_reset = 1.f;  // jet stick recenter (0 = hold like heli)
   float max_thrust = 120.f;     // Engine.maxThrust
   float sprint_factor = 1.6f;   // Engine.sprintFactor
   float sprint_limit = 1.f;
@@ -192,6 +200,14 @@ struct Vehicle {
   float physics_wing_lift = 0.f;
   float horizon_damp_angle = 45.f;
   float horizontal_damp_factor = 2.4f;
+  float damp_horizontal_vel = 1.35f;
+  float decrease_aoa_to_zero = 2.0f;
+  float default_aoa = 2.5f;
+  float max_aoa = 16.f;
+  float attack_speed = 2.8f;
+  float airflow_yaw_factor = 0.65f;
+  float rotor_aoa_pitch = 0.f;  // current rotor tilt (deg)
+  float rotor_aoa_roll = 0.f;
   float collective_gain = 14.f;
   float max_collective_thrust = 24.f;
   float heli_max_pitch = 38.f;
@@ -204,6 +220,9 @@ struct Vehicle {
   float heli_drag_horiz = 0.32f;
   float heli_drag_vert = 0.55f;
   float gravity = 9.81f;
+  float gravity_modifier = 1.f;
+  float inertia_modifier = 1.f;
+  glm::vec3 drag_modifier{1.f, 1.f, 1.f};
   float jet_v1 = 20.f;
   float jet_liftoff = 26.f;
   float jet_stall = 20.f;
@@ -212,6 +231,13 @@ struct Vehicle {
   float jet_max_air = 92.f;
   float jet_min_roll_rpm = 0.55f;
   float jet_sprint = 1.f;
+  float jet_pitch_rate = 4.2f;
+  float jet_roll_rate = 3.6f;
+  float jet_bank_turn_gain = 52.f;
+  float elevator_z_offset = -5.5f;  // aft elevators → pitch torque arm
+  float aileron_x_offset = 3.2f;    // wing span → roll torque arm
+  float gear_spring = 55.f;
+  float gear_damping = 14.f;
   glm::vec3 jet_exhaust_l{0.44f, 0.f, -5.9f};  // model-space engine nozzles
   glm::vec3 jet_exhaust_r{-0.44f, 0.f, -5.9f};
   struct SeatSlot {

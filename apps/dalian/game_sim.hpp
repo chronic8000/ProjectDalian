@@ -102,6 +102,8 @@ private:
   std::string player_weapon_label() const;
   std::string enemy_weapon_label() const;
   void decay_sticks(float dt, const PlayerInput& input);
+  // Apply frame-buffered mouse deltas once per render frame (before fixed ticks).
+  void absorb_air_mouse(const PlayerInput& input);
   void step_vehicle_interaction(const PlayerInput& input);
   void step_rotor_spool(float dt, const PlayerInput& input);
   void step_vehicles(float dt, const PlayerInput& input);

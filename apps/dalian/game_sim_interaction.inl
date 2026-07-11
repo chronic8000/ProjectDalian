@@ -32,7 +32,7 @@ if (state_.in_vehicle >= 0 && state_.in_vehicle < static_cast<int>(state_.vehicl
   for (auto& s : v.seats) s.occupant = -1;
   events_.vehicle_exited = true;
   events_.exit_yaw_deg = 90.f - v.heading;
-  state_.air_pitch_stick = state_.air_roll_stick = 0.f;
+  state_.air_pitch_stick = state_.air_roll_stick = state_.air_yaw_stick = 0.f;
   state_.in_vehicle = -1;
   state_.player_seat = 0;
   return;
@@ -55,7 +55,7 @@ if (best < 0) return;
 
 state_.in_vehicle = best;
 state_.player_seat = 0;
-state_.air_pitch_stick = state_.air_roll_stick = 0.f;
+state_.air_pitch_stick = state_.air_roll_stick = state_.air_yaw_stick = 0.f;
 Vehicle& nv = state_.vehicles[best];
 for (auto& s : nv.seats) s.occupant = -1;
 if (!nv.seats.empty()) nv.seats[0].occupant = 0;

@@ -28,6 +28,7 @@ struct GameState {
   int player_seat = 0;
   float air_pitch_stick = 0.f;
   float air_roll_stick = 0.f;
+  float air_yaw_stick = 0.f;
   float air_input_grace = 0.f;
 
   float fire_cooldown = 0.f;

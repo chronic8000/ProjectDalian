@@ -2887,6 +2887,9 @@ int main(int argc, char** argv) {
   double net_last_send_at = -1.0;
   dalian::PlayerInput last_net_inp{};
   bool air_stick_moved = false; // set when mouse moves the flight stick this frame
+  float air_mouse_dx_accum = 0.f;
+  float air_mouse_dy_accum = 0.f;
+  float air_throttle_wheel_accum = 0.f;
   auto air_invert_fn = [&]() { return settings.invert_air; };
 
   constexpr float kMuzzleSpeed = 340.f;
@@ -3705,6 +3708,12 @@ int main(int argc, char** argv) {
       } else if (deploy_open && e.type == SDL_MOUSEWHEEL) {
         deploy_side1_scroll -= e.wheel.y * 24.f;
         deploy_side2_scroll -= e.wheel.y * 24.f;
+      } else if (!pause_open && !deploy_open && e.type == SDL_MOUSEWHEEL &&
+                 in_vehicle >= 0 && player_seat == 0 &&
+                 in_vehicle < static_cast<int>(vehicles.size()) && vehicles[in_vehicle].is_air) {
+        // c_PIThrottle analog — buffer wheel notches for the fixed physics tick.
+        air_throttle_wheel_accum += static_cast<float>(e.wheel.y);
+        input.handle_event(e, settings.bindings, false);
       } else if (deploy_open && e.type == SDL_MOUSEBUTTONDOWN &&
                  e.button.button == SDL_BUTTON_LEFT) {
         deploy_click = true;
@@ -3721,22 +3730,10 @@ int main(int argc, char** argv) {
       } else if (e.type == SDL_MOUSEMOTION && mouse_look && !deploy_open && !pause_open &&
                  air_input_grace <= 0.f && in_vehicle >= 0 && vehicles[in_vehicle].is_air &&
                  player_seat == 0) {
+        // Buffer deltas for the fixed physics tick (virtual joystick accumulator).
         air_stick_moved = true;
-        const Vehicle& av = vehicles[in_vehicle];
-        const float inv = air_invert_fn() ? -1.f : 1.f;
-        const float sens_scale = sensitivity / 0.12f;
-        const float pitch_sens = (av.is_heli ? 0.020f : 0.032f) * sens_scale;
-        const float roll_sens = (av.is_heli ? 0.016f : 0.018f) * sens_scale;
-        const float ground_pitch_scale =
-            (!av.is_heli && av.wheels_on_ground && !av.jet_airborne) ? 0.28f : 1.f;
-        air_pitch_stick = std::clamp(
-            air_pitch_stick + e.motion.yrel * pitch_sens * inv * ground_pitch_scale, -1.f, 1.f);
-        if (av.is_heli) {
-          air_roll_stick = std::clamp(air_roll_stick + e.motion.xrel * roll_sens, -1.f, 1.f);
-        } else if (!av.wheels_on_ground) {
-          air_roll_stick =
-              std::clamp(air_roll_stick - e.motion.xrel * roll_sens, -1.f, 1.f);
-        }
+        air_mouse_dx_accum += static_cast<float>(e.motion.xrel);
+        air_mouse_dy_accum += static_cast<float>(e.motion.yrel);
       } else if (e.type == SDL_MOUSEMOTION && mouse_look && !deploy_open && !pause_open) {
         const float inv_y = settings.invert_mouse_y ? -1.f : 1.f;
         yaw += e.motion.xrel * sensitivity;
@@ -4150,7 +4147,15 @@ int main(int argc, char** argv) {
       inp.reloading_blocked = reloading;
       inp.air_pitch_stick = air_pitch_stick;
       inp.air_roll_stick = air_roll_stick;
+      inp.air_yaw_stick = G.air_yaw_stick;
+      inp.air_mouse_dx = air_mouse_dx_accum;
+      inp.air_mouse_dy = air_mouse_dy_accum;
+      inp.air_mouse_sens = sensitivity / 0.12f;
+      inp.air_throttle_delta = air_throttle_wheel_accum;
       inp.air_stick_moved = air_stick_moved;
+      air_mouse_dx_accum = 0.f;
+      air_mouse_dy_accum = 0.f;
+      air_throttle_wheel_accum = 0.f;
       inp.enter_exit = pending_enter_exit;
       inp.seat_switch = pending_seat_switch;
       inp.launch_at = launch_requested && has_at;
@@ -4241,6 +4246,7 @@ int main(int argc, char** argv) {
       if (ev.vehicle_exited) {
         yaw = ev.exit_yaw_deg;
         air_pitch_stick = air_roll_stick = 0.f;
+        G.air_yaw_stick = 0.f;
         jet_afterburner = false;
       }
       if (ev.capture_mouse && !deploy_open && !pause_open) {

@@ -1,6 +1,6 @@
 # Parity status (Project Dalian vs retail BF2)
 
-Last updated: **2026-07-10** (v0.5.11-alpha line)
+Last updated: **2026-07-11** (v0.5.17-alpha line)
 
 This document tracks what is implemented, what is partial, and what is still missing.
 **Does not claim full BF2 parity** — several combat, flight, networking, and
@@ -25,7 +25,7 @@ world-placement areas remain open.
 | Area | Gap |
 |------|-----|
 | Afterburner FX | Uses exhaust smoke billboards + flash texture, not full `e_jetexhaust_AB_s` particle system |
-| Jet flight | Per-aircraft tweak data wired; gear timing and feel still need tuning |
+| Jet / heli flight | Virtual joystick (−1…1) + buffered mouse, AutomaticReset, heli rotor AoA/PID damp/AirFlowEffect, jet WingLift/FlapLift/RegulateToLift + PositionOffset torque arms + gear spring/damper; **not** full Wing/RotationalBundle graph, col0/1/2 mesh select, or true 30 Hz retail tick |
 | Conquest | Tickets, CP capture, voice cues — not full retail ruleset |
 | Multiplayer | Host/join/dedicated, player+shot+vehicle transform sync — seats/prediction/auth damage incomplete |
 | Static prop height | Authored `StaticObjects.con` Y used as-is; deck/road props may float vs bare terrain |

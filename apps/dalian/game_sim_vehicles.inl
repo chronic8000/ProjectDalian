@@ -36,101 +36,137 @@ auto jet_turn_authority = [](float speed, float cruise, float max_air) {
 };
 
 if (v.is_air && v.is_heli) {
-  // ---- BF2 rotary-wing flight (thrust-vector + virtual cyclic) ----
-  //   W / S       collective: increase (W) / decrease (S) motor — up/down
-  //   A / D       yaw (tail rotor) — turn left / right
-  //   Mouse X/Y   cyclic attitude targets (holds where you leave it)
-  //   Shift       extra rotor power
-  // Thrust is applied along the rotor mast; cyclic tilt bleeds altitude via
-  // cos(pitch)*cos(roll). Horizon damping recentres when cyclic is neutral.
-  const float kHorizonDampAngle = v.horizon_damp_angle;
-  const float kHorizontalDampAngleFactor = v.horizontal_damp_factor;
-  const float kMaxCollectiveThrust = v.max_collective_thrust;
-
-  float coll_in = 0.f, yaw_in = 0.f;
-  float pitch_cmd = 0.f, roll_cmd = 0.f;
-  const float max_pitch = v.heli_max_pitch, max_roll = v.heli_max_roll;
+  // ---- BF2 rotary-wing: cyclic → rotor AoA → tilted thrust → body follows ----
+  // Refractor model (research §5): mouse does NOT pitch the chassis directly.
+  // Stick tilts the rotor disc; thrust along that disc swings the heavy body.
+  const float g = v.gravity * v.gravity_modifier;
+  const float inertia = std::max(0.45f, v.inertia_modifier);
+  float coll_in = 0.f;
+  float yaw_in = state_.air_yaw_stick;
   if (driving) {
     if (input.throttle_up) coll_in += 1.f;
     if (input.throttle_down) coll_in -= 1.f;
-    // BF2 yaw: +heading = clockwise (right). A = left, D = right.
-    if (input.yaw_left) yaw_in -= 1.f;
-    if (input.yaw_right) yaw_in += 1.f;
-    pitch_cmd = state_.air_pitch_stick * max_pitch;
-    roll_cmd = -state_.air_roll_stick * max_roll;
+    // Mouse wheel → collective (c_PIThrottle analog).
+    if (std::fabs(input.air_throttle_delta) > 1e-4f) coll_in += input.air_throttle_delta * 0.55f;
+    coll_in = glm::clamp(coll_in, -1.f, 1.f);
   }
   const float authority = v.rotor_rpm;
   const float thrust_scale = std::max(0.65f, v.max_thrust / 120.f);
   auto approach = [&](float cur, float cmd, float rate) {
     return cur + (cmd - cur) * std::min(1.f, rate * step);
   };
-  // Angular response stays snappy (high damp when stick centres) — BF2 "secret sauce".
-  v.pitch = approach(v.pitch, pitch_cmd * authority, 2.6f);
-  v.roll = approach(v.roll, roll_cmd * authority, 2.2f);
 
-  // Weak horizon spring when cyclic is centred — prevents infinite tumble.
+  // --- Rotor Angle of Attack (virtual cyclic) ---
+  const float max_aoa = v.max_aoa;
+  float aoa_pitch_tgt = v.default_aoa;
+  float aoa_roll_tgt = 0.f;
+  if (driving) {
+    aoa_pitch_tgt = v.default_aoa + state_.air_pitch_stick * max_aoa;
+    aoa_roll_tgt = -state_.air_roll_stick * max_aoa;
+  }
   const bool cyclic_neutral =
       std::fabs(state_.air_pitch_stick) < 0.06f && std::fabs(state_.air_roll_stick) < 0.06f;
+  if (cyclic_neutral && driving) {
+    // DecreaseAngleToZero — rotor disc returns to hover trim when stick released.
+    aoa_pitch_tgt = v.default_aoa;
+    aoa_roll_tgt = 0.f;
+    const float zrate = v.decrease_aoa_to_zero / inertia;
+    v.rotor_aoa_pitch = approach(v.rotor_aoa_pitch, aoa_pitch_tgt, zrate);
+    v.rotor_aoa_roll = approach(v.rotor_aoa_roll, aoa_roll_tgt, zrate);
+  } else {
+    const float aspeed = v.attack_speed / inertia;
+    v.rotor_aoa_pitch = approach(v.rotor_aoa_pitch, aoa_pitch_tgt, aspeed);
+    v.rotor_aoa_roll = approach(v.rotor_aoa_roll, aoa_roll_tgt, aspeed);
+  }
+  v.rotor_aoa_pitch = glm::clamp(v.rotor_aoa_pitch, -max_aoa - 2.f, max_aoa + v.default_aoa + 2.f);
+  v.rotor_aoa_roll = glm::clamp(v.rotor_aoa_roll, -max_aoa - 2.f, max_aoa + 2.f);
+
+  // Body attitude lags the rotor disc (pendulum / heavy swing).
+  const float body_follow = (2.1f / inertia) * authority;
+  const float pitch_cmd = glm::clamp(v.rotor_aoa_pitch * (v.heli_max_pitch / std::max(8.f, max_aoa)),
+                                     -v.heli_max_pitch, v.heli_max_pitch);
+  const float roll_cmd = glm::clamp(v.rotor_aoa_roll * (v.heli_max_roll / std::max(8.f, max_aoa)),
+                                    -v.heli_max_roll, v.heli_max_roll);
+  v.pitch = approach(v.pitch, pitch_cmd * authority, body_follow);
+  v.roll = approach(v.roll, roll_cmd * authority, body_follow * 0.95f);
+
+  // HorizonDampAngle / HorizontalDampAngleFactor — auto-level when cyclic neutral.
   if (cyclic_neutral && authority > 0.25f && driving) {
-    const float damp = kHorizontalDampAngleFactor * authority * step;
-    const float pitch_w = glm::clamp(std::fabs(v.pitch) / kHorizonDampAngle, 0.f, 1.f);
-    const float roll_w = glm::clamp(std::fabs(v.roll) / kHorizonDampAngle, 0.f, 1.f);
+    const float damp = v.horizontal_damp_factor * authority * step / inertia;
+    const float pitch_w = glm::clamp(std::fabs(v.pitch) / v.horizon_damp_angle, 0.f, 1.f);
+    const float roll_w = glm::clamp(std::fabs(v.roll) / v.horizon_damp_angle, 0.f, 1.f);
     if (std::fabs(v.pitch) > 0.5f)
-      v.pitch = approach(v.pitch, 0.f, damp * (0.35f + 0.65f * pitch_w));
+      v.pitch = approach(v.pitch, 0.f, damp * (0.4f + 0.6f * pitch_w) * 8.f);
     if (std::fabs(v.roll) > 0.5f)
-      v.roll = approach(v.roll, 0.f, damp * (0.35f + 0.65f * roll_w));
+      v.roll = approach(v.roll, 0.f, damp * (0.4f + 0.6f * roll_w) * 8.f);
   }
 
-  v.heading += yaw_in * v.heli_yaw_rate * step * authority * 0.55f;
+  // Tail rotor: AirFlowEffect — yaw authority drops with forward speed.
+  const float horiz_spd = glm::length(glm::vec2(v.vel.x, v.vel.z));
+  const float yaw_air =
+      glm::mix(1.f, v.airflow_yaw_factor, glm::clamp(horiz_spd / 42.f, 0.f, 1.f));
+  v.heading += yaw_in * v.heli_yaw_rate * step * authority * 0.55f * yaw_air;
 
-  // Thrust along the tilted mast — pitching forward bleeds altitude (BF2 collective rule).
+  // Thrust along rotor mast (tilted by AoA in body space, then world).
   const glm::quat q_yaw = glm::angleAxis(glm::radians(v.heading), glm::vec3(0, 1, 0));
   const glm::quat q_pitch = glm::angleAxis(glm::radians(-v.pitch), glm::vec3(1, 0, 0));
   const glm::quat q_roll = glm::angleAxis(glm::radians(-v.roll), glm::vec3(0, 0, 1));
   const glm::quat orient = q_yaw * q_pitch * q_roll;
-  const glm::vec3 up_vector = orient * glm::vec3(0.f, 1.f, 0.f);
+  // Disc tilt relative to body: small additional offset from AoA vs body attitude.
+  const float disc_p = glm::radians(v.rotor_aoa_pitch - v.pitch * 0.35f);
+  const float disc_r = glm::radians(v.rotor_aoa_roll - v.roll * 0.35f);
+  glm::vec3 mast_local = glm::normalize(glm::vec3(std::sin(disc_r), 1.f, -std::sin(disc_p)));
+  const glm::vec3 thrust_dir = glm::normalize(orient * mast_local);
 
   float thrust_mag;
   if (driving) {
-    thrust_mag = (v.gravity + coll_in * v.collective_gain * thrust_scale) * authority;
+    thrust_mag = (g + coll_in * v.collective_gain * thrust_scale) * authority;
     if (input.boost) thrust_mag *= 1.15f * std::sqrt(v.sprint_factor);
   } else {
-    thrust_mag = (9.81f - v.vel.y * 2.0f) * authority;
+    thrust_mag = (g - v.vel.y * 2.0f) * authority;
     v.pitch = approach(v.pitch, 0.f, 2.0f);
     v.roll = approach(v.roll, 0.f, 2.0f);
+    v.rotor_aoa_pitch = approach(v.rotor_aoa_pitch, v.default_aoa, 2.0f);
+    v.rotor_aoa_roll = approach(v.rotor_aoa_roll, 0.f, 2.0f);
   }
-  thrust_mag = glm::clamp(thrust_mag, 0.f, kMaxCollectiveThrust * (boost ? 1.25f : 1.f));
+  thrust_mag = glm::clamp(thrust_mag, 0.f, v.max_collective_thrust * (boost ? 1.25f : 1.f));
   thrust_mag *= mass_scale;
 
-  v.vel += up_vector * thrust_mag * step;
-  v.vel.y -= v.gravity * step;
+  v.vel += thrust_dir * thrust_mag * step;
+  v.vel.y -= g * step;
 
-  // Low linear drag + further reduction when tilted = BF2 slide / J-hook momentum.
+  // Anisotropic drag (DragModifier) + slide when tilted.
   const float tilt = 1.f - std::cos(glm::radians(v.pitch)) * std::cos(glm::radians(v.roll));
   const float slide = glm::clamp(tilt * 1.8f, 0.f, 1.f);
-  const float drag_h = v.heli_drag_horiz * glm::mix(1.f, 0.28f, slide);
-  const float drag_v = v.heli_drag_vert;
+  float drag_h = v.heli_drag_horiz * glm::mix(1.f, 0.28f, slide);
+  float drag_v = v.heli_drag_vert;
+  drag_h *= 0.5f * (v.drag_modifier.x + v.drag_modifier.z);
+  drag_v *= v.drag_modifier.y;
+
+  // DampHorizontalVelFactor — bleed forward momentum when stick is neutral (hover gun).
+  if (cyclic_neutral && driving && authority > 0.4f) {
+    drag_h += v.damp_horizontal_vel * 0.55f;
+  }
+
   v.vel.x -= v.vel.x * drag_h * step;
   v.vel.z -= v.vel.z * drag_h * step;
   v.vel.y -= v.vel.y * drag_v * step;
   v.vel = glm::clamp(v.vel, glm::vec3(-95.f), glm::vec3(95.f));
-  // Integrate horizontally (with building collision), then vertically.
+
   if (move_vehicle_horiz(v, glm::vec3(v.vel.x, 0.f, v.vel.z) * step)) {
     v.vel.x *= 0.1f;
     v.vel.z *= 0.1f;
   }
   v.pos.y += v.vel.y * step;
-  // Land on terrain or a deck below, using the true skid height.
   const float floor_y = air_floor_y(v);
   if (v.pos.y < floor_y) {
     v.pos.y = floor_y;
     if (v.vel.y < 0.f) v.vel.y = 0.f;
-    // Settle to level once the skids are on the ground.
     v.pitch = approach(v.pitch, 0.f, 4.0f);
     v.roll = approach(v.roll, 0.f, 4.0f);
+    v.rotor_aoa_pitch = approach(v.rotor_aoa_pitch, v.default_aoa, 4.0f);
+    v.rotor_aoa_roll = approach(v.rotor_aoa_roll, 0.f, 4.0f);
   }
-  // Diagnostic (BF2_HELIDEMO): pin an airborne bank so a headless capture
-  // shows the pitch/roll attitude model. No effect in normal play.
   if (std::getenv("BF2_HELIDEMO")) {
     v.rotor_rpm = 1.f;
     v.pitch = -18.f;
@@ -138,14 +174,12 @@ if (v.is_air && v.is_heli) {
     v.pos.y = params_.world->terrain_height(v.pos.x, v.pos.z) + 25.f;
   }
 } else if (v.is_air) {
-  // ---- BF2 fixed-wing jet (arcade) ---------------------------------------
-  // Ground: W spools engines (no roll until ~55% RPM), double-tap W = afterburner toggle.
-  // Air: body-wing lift holds altitude at cruise; stick adds flap lift; bank to turn.
+  // ---- BF2 fixed-wing: v² wing/flap lift, speed-scaled controls, energy model ----
   auto approach = [&](float cur, float cmd, float rate) {
     return cur + (cmd - cur) * std::min(1.f, rate * step);
   };
 
-  constexpr float kV1 = 20.f;          // fallback if tweak missing
+  constexpr float kV1 = 20.f;
   constexpr float kLiftoff = 26.f;
   constexpr float kStall = 20.f;
   constexpr float kCruise = 45.f;
@@ -167,17 +201,21 @@ if (v.is_air && v.is_heli) {
   const float kThrustScale = std::max(0.7f, v.max_thrust / 120.f);
   const float kSprintDissipation = v.sprint_dissipation > 0.f ? v.sprint_dissipation : 10.f;
   const float kSprintRecover = v.sprint_recover > 0.f ? v.sprint_recover : 30.f;
-  const float kGravity = v.gravity > 1.f ? v.gravity : 9.81f;
+  const float kGravity = (v.gravity > 1.f ? v.gravity : 9.81f) * v.gravity_modifier;
+  const float inertia = std::max(0.45f, v.inertia_modifier);
+  const float yaw_in = state_.air_yaw_stick;
 
-  float thr_in = 0.f, yaw_in = 0.f;
+  float thr_in = 0.f;
   if (driving) {
     if (input.throttle_up) thr_in += 1.f;
     if (input.throttle_down) thr_in -= 1.f;
-    if (input.yaw_left) yaw_in -= 1.f;
-    if (input.yaw_right) yaw_in += 1.f;
   }
 
-  // Landing gear: G toggles; auto-deploy when low/slow; animate tuck 0..1.
+  // c_PIThrottle analog (mouse wheel notches buffered between fixed ticks).
+  if (driving && std::fabs(input.air_throttle_delta) > 1e-4f) {
+    v.throttle = glm::clamp(v.throttle + input.air_throttle_delta * 0.14f, 0.f, 1.f);
+  }
+
   if (input.gear_toggle && driving) {
     if (v.jet_gear_down) {
       if (v.jet_airborne) v.jet_gear_down = false;
@@ -189,9 +227,10 @@ if (v.is_air && v.is_heli) {
   if (v.jet_airborne && v.pos.y < floor_y_gear + v.gear_up_height) v.jet_gear_down = true;
   if (!v.jet_airborne) v.jet_gear_down = true;
   const float gear_tgt = v.jet_gear_down ? 0.f : 1.f;
-  v.jet_gear_anim = approach(v.jet_gear_anim, gear_tgt, gear_tgt > v.jet_gear_anim ? v.gear_anim_up_rate : v.gear_anim_down_rate);
+  v.jet_gear_anim =
+      approach(v.jet_gear_anim, gear_tgt,
+               gear_tgt > v.jet_gear_anim ? v.gear_anim_up_rate : v.gear_anim_down_rate);
 
-  // Afterburner sprint tank (BF2 sprintLimit/dissipation/recover).
   const bool ab_active = boost && v.jet_sprint > 0.01f;
   if (ab_active) {
     v.jet_sprint = std::max(0.f, v.jet_sprint - step / kSprintDissipation);
@@ -199,7 +238,6 @@ if (v.is_air && v.is_heli) {
     v.jet_sprint = std::min(v.sprint_limit, v.jet_sprint + step / kSprintRecover);
   }
 
-  // Commanded throttle ramps slowly; jet_rpm lags behind (engine spool).
   if (thr_in > 0.f)
     v.throttle = glm::clamp(v.throttle + step * 0.32f, 0.f, 1.f);
   else if (thr_in < 0.f)
@@ -224,7 +262,6 @@ if (v.is_air && v.is_heli) {
     v.wheels_on_ground = true;
     state_.air_roll_stick = approach(state_.air_roll_stick, 0.f, 16.f);
 
-    // Brakes / idle bleed until engines are spooled enough to roll.
     if (v.jet_rpm < jet_min_roll_rpm) {
       horiz_spd = std::max(0.f, horiz_spd - 18.f * step);
     } else {
@@ -244,7 +281,6 @@ if (v.is_air && v.is_heli) {
     v.heading += yaw_in * rudder * step;
     flat_fwd = glm::vec3(std::sin(glm::radians(v.heading)), 0.f, std::cos(glm::radians(v.heading)));
 
-    // Rotation only after V1; gentle pitch cap prevents tail strikes on the runway.
     float pitch_target = 0.f;
     if (horiz_spd >= jet_v1 && state_.air_pitch_stick > 0.04f) {
       const float rot_t = glm::clamp((horiz_spd - jet_v1) / (jet_liftoff - jet_v1), 0.f, 1.f);
@@ -259,7 +295,6 @@ if (v.is_air && v.is_heli) {
     v.vel = flat_fwd * horiz_spd;
     v.pos.y = floor_y;
 
-    // Liftoff: need speed, nose-up, and enough vertical lift — single transition, no flicker.
     const float pitch_rad = glm::radians(v.pitch);
     const float lift_rate =
         std::max(0.f, horiz_spd - jet_v1 * 0.9f) * std::sin(pitch_rad) * 0.55f;
@@ -278,65 +313,79 @@ if (v.is_air && v.is_heli) {
     const bool stick_neutral =
         std::fabs(state_.air_pitch_stick) < 0.06f && std::fabs(state_.air_roll_stick) < 0.06f;
     const float airspeed = glm::length(v.vel);
-    const float spd_norm = glm::clamp(horiz_spd / jet_cruise, 0.35f, 1.35f);
-    // BF2 sweet spot: peak turn near cruise; stall + afterburner both punish.
+    // Dynamic pressure proxy (v/cruise)² — controls AND lift scale with this.
+    const float q = glm::clamp((airspeed / jet_cruise) * (airspeed / jet_cruise), 0.08f, 2.2f);
     const float turn_speed_factor = jet_turn_authority(airspeed, jet_cruise, jet_max_air);
-    float ctrl = turn_speed_factor;
+    float ctrl = turn_speed_factor * glm::clamp(q, 0.2f, 1.35f) / inertia;
 
+    // Flap deflection → attitude. Torque arms from PositionOffset (§7.1):
+    // elevators aft (Z) pitch the nose; ailerons outboard (X) roll the jet.
+    const float elev_arm = glm::clamp(-v.elevator_z_offset / 5.5f, 0.55f, 1.6f);
+    const float ail_arm = glm::clamp(v.aileron_x_offset / 3.2f, 0.55f, 1.6f);
     const float pitch_target = state_.air_pitch_stick * 48.f;
     const float roll_target = -state_.air_roll_stick * 58.f;
-    v.pitch = approach(v.pitch, pitch_target, 4.2f * ctrl);
-    v.roll = approach(v.roll, roll_target, 3.6f * ctrl);
+    v.pitch = approach(v.pitch, pitch_target, v.jet_pitch_rate * ctrl * elev_arm);
+    v.roll = approach(v.roll, roll_target, v.jet_roll_rate * ctrl * ail_arm);
 
-    if (stick_neutral && driving) {
-      const float damp = 3.2f * ctrl * step;
+    if (stick_neutral && driving && v.automatic_reset > 0.2f) {
+      const float damp = 3.2f * ctrl * v.automatic_reset * step;
       v.pitch = approach(v.pitch, 0.f, damp * 8.f);
       v.roll = approach(v.roll, 0.f, damp * 10.f);
     }
 
-    const bool stalled = horiz_spd < jet_stall && v.pitch > 8.f;
+    const bool stalled = horiz_spd < jet_stall && (v.pitch > 8.f || airspeed < jet_stall * 0.85f);
     if (stalled) {
-      ctrl *= 0.3f;
-      v.pitch = approach(v.pitch, -8.f, 6.f);
+      ctrl *= 0.28f;
+      v.pitch = approach(v.pitch, -12.f, 7.f);
     }
 
-    // Auto-trim: full throttle climbs slightly without stick (BF2 body-wing behaviour).
     if (stick_neutral && driving && !stalled && v.throttle > 0.55f) {
-      const float trim = glm::clamp((jet_cruise - horiz_spd) * 0.12f + (v.throttle - 0.6f) * 4.f, -3.f, 5.f);
+      const float trim =
+          glm::clamp((jet_cruise - horiz_spd) * 0.12f + (v.throttle - 0.6f) * 4.f, -3.f, 5.f);
       v.pitch = approach(v.pitch, trim, 1.8f * step);
     }
 
     v.pitch = glm::clamp(v.pitch, -55.f, 55.f);
     v.roll = glm::clamp(v.roll, -70.f, 70.f);
 
-    // BF2 turn: bank with mouse, pull back to carve — not A/D wide turns.
-    const float bank_turn =
-        std::sin(glm::radians(v.roll)) * 52.f * glm::clamp(horiz_spd / 28.f, 0.25f, 1.f) *
-        turn_speed_factor;
-    const float rudder_air = 8.f * ctrl * glm::clamp(1.f - horiz_spd / jet_cruise, 0.15f, 1.f);
+    const float bank_turn = std::sin(glm::radians(v.roll)) * v.jet_bank_turn_gain *
+                            glm::clamp(horiz_spd / 28.f, 0.25f, 1.f) * turn_speed_factor;
+    const float rudder_air =
+        10.f * ctrl * glm::clamp(1.f - horiz_spd / (jet_cruise * 1.2f), 0.12f, 1.f) *
+        glm::mix(1.f, 0.45f, glm::clamp(horiz_spd / jet_cruise, 0.f, 1.f));
     v.heading += (bank_turn + yaw_in * rudder_air) * step;
     flat_fwd = glm::vec3(std::sin(glm::radians(v.heading)), 0.f, std::cos(glm::radians(v.heading)));
 
     float thrust_acc =
         v.jet_rpm * (ab_active ? 30.f * kSprintFactor : 26.f) * kThrustScale * mass_scale;
+    // Drag + induced drag from high flap / bank (energy bleed in turns).
     const float drag_base = v.physics_drag > 0.f ? v.physics_drag * 0.0008f : 0.04f;
-    const float drag = drag_base + 0.0012f * horiz_spd +
-                       (v.jet_gear_anim > 0.05f ? 0.018f * v.jet_gear_anim : 0.f);
-    if (input.throttle_down && driving) horiz_spd -= 22.f * step * glm::clamp(horiz_spd / 25.f, 0.3f, 1.f);
+    const float load =
+        1.f + 0.55f * std::fabs(state_.air_pitch_stick) + 0.35f * std::fabs(std::sin(glm::radians(v.roll)));
+    float drag = drag_base * (0.65f * v.drag_modifier.z + 0.35f) + 0.0012f * horiz_spd * load;
+    drag += (v.jet_gear_anim > 0.05f ? 0.018f * v.jet_gear_anim : 0.f);
+    if (input.throttle_down && driving)
+      horiz_spd -= 22.f * step * glm::clamp(horiz_spd / 25.f, 0.3f, 1.f);
     horiz_spd += (thrust_acc - drag * horiz_spd) * step;
-    horiz_spd = glm::clamp(horiz_spd, stalled ? 10.f : 16.f,
+    horiz_spd = glm::clamp(horiz_spd, stalled ? 8.f : 14.f,
                            ab_active ? jet_max_air * 1.08f : jet_max_air);
 
     const float pitch_rad = glm::radians(v.pitch);
-  // Body-wing lift rises with speed²; flap lift from stick; gravity always on.
-    const float wing_lift =
-        kBodyWingLift * spd_norm * spd_norm * kGravity * glm::max(0.35f, std::cos(pitch_rad * 0.55f));
-    const float flap_climb = state_.air_pitch_stick * kFlapLift * spd_norm;
+    // WingLift + FlapLift×stick, scaled by dynamic pressure, clamped by RegulateToLift.
+    float lift_raw = (kBodyWingLift + state_.air_pitch_stick * (kFlapLift * 0.045f)) * q;
+    const float lift_cap = v.regulate_to_lift * v.wing_to_regulator;
+    lift_raw = std::min(lift_raw, lift_cap);
+    const float wing_lift = lift_raw * kGravity * glm::max(0.28f, std::cos(pitch_rad * 0.55f));
+    const float flap_climb = state_.air_pitch_stick * kFlapLift * glm::clamp(q, 0.25f, 1.4f) * 0.55f;
     const float pitch_climb = std::sin(pitch_rad) * horiz_spd * 0.32f;
     float vy_acc = wing_lift + flap_climb + pitch_climb - kGravity;
     if (ab_active) vy_acc += 2.5f;
+    if (stalled) vy_acc -= 6.f;
     v.vel.y += vy_acc * step;
-    v.vel.y = glm::clamp(v.vel.y, -50.f, 42.f);
+    v.vel.y = glm::clamp(v.vel.y, -55.f, 42.f);
+
+    // Vertical drag modifier.
+    v.vel.y -= v.vel.y * (0.04f * v.drag_modifier.y) * step;
 
     v.vel.x = flat_fwd.x * horiz_spd;
     v.vel.z = flat_fwd.z * horiz_spd;
@@ -348,13 +397,19 @@ if (v.is_air && v.is_heli) {
     }
     v.pos.y += v.vel.y * step;
 
-    if (v.pos.y <= floor_y + 0.35f && v.vel.y <= 0.3f) {
-      v.pos.y = floor_y;
-      v.vel.y = 0.f;
-      v.jet_airborne = false;
-      v.wheels_on_ground = true;
-      v.roll = approach(v.roll, 0.f, 10.f);
-      if (horiz_spd < jet_v1) v.pitch = approach(v.pitch, 0.f, 8.f);
+    if (v.pos.y <= floor_y + 0.35f && v.vel.y <= 0.8f) {
+      // Landing gear spring/damper (§7.2) — absorb sink rate instead of a hard stop.
+      const float penet = std::max(0.f, floor_y - v.pos.y);
+      v.vel.y += (penet * v.gear_spring - v.vel.y * v.gear_damping) * step;
+      if (v.pos.y < floor_y) v.pos.y = floor_y;
+      if (v.vel.y > 0.f) v.vel.y *= 0.35f;
+      if (v.vel.y <= 0.35f && penet < 0.08f) {
+        v.vel.y = 0.f;
+        v.jet_airborne = false;
+        v.wheels_on_ground = true;
+        v.roll = approach(v.roll, 0.f, 10.f);
+        if (horiz_spd < jet_v1) v.pitch = approach(v.pitch, 0.f, 8.f);
+      }
     }
   }
   if (std::getenv("BF2_JETDEMO")) {
