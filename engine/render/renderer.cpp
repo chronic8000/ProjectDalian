@@ -241,11 +241,14 @@ std::uint32_t create_textured_program() {
     uniform sampler2D uDirt;
     uniform sampler2D uNormal;
     uniform sampler2D uCrack;
+    uniform sampler2D uSpecular;
     uniform int uHasDetail;
     uniform int uHasObjLm;
     uniform int uHasDirt;
     uniform int uHasNormal;
     uniform int uHasCrack;
+    uniform int uHasSpecular;
+    uniform float uSpecPower;  // Blinn exponent (BF2-era, not GGX roughness)
     uniform int uAlphaMode;  // 0 opaque, 1 tex alpha blend, 2 cutout, 3 road edge fade
     uniform vec4 uLmXform;  // xy = uv scale, zw = uv offset into the atlas
     uniform vec2 uUvScroll;   // tread / animated-UV scroll (tanks)
@@ -338,39 +341,42 @@ std::uint32_t create_textured_program() {
         albedo = mix(albedo, albedo * c.rgb, c.a);
       }
 
-      // Per-pixel normal from the detail bump (_deb) via the tangent basis. Its
-      // perturbation strength also drives a *synthetic roughness* value, so busy
-      // surfaces (concrete, rock) scatter light while flat ones (metal) stay glossy.
+      // Per-pixel normal from the detail bump (_deb) via the tangent basis.
       vec3 N = normalize(vNormal);
-      float rough = 0.62;  // default dielectric roughness
       if (uHasNormal == 1 && dot(vTangent, vTangent) > 1e-6) {
         vec3 nt = texture(uNormal, vUv1).xyz * 2.0 - 1.0;
         vec3 T = normalize(vTangent - N * dot(N, vTangent));
         vec3 B = cross(N, T);
         N = normalize(mat3(T, B, N) * nt);
-        rough = clamp(0.22 + 0.62 * length(nt.xy), 0.06, 0.95);
       }
 
-      // ---- Cook-Torrance PBR direct lighting from the sun (single light) ----
+      // ---- BF2 Blinn-Phong (not modern GGX/PBR) ----
+      // Retail BF2 used diffuse + optional specular/_s / specular-in-alpha.
+      // Full Cook-Torrance on those maps reads as plastic/cellophane.
       vec3 L = length(uSunDir) > 0.001 ? normalize(-uSunDir) : normalize(vec3(0.35, 0.85, 0.4));
       vec3 V = normalize(uCamPos - vWorldPos);
       vec3 H = normalize(L + V);
       float NdotL = max(dot(N, L), 0.0);
-      float NdotV = max(dot(N, V), 1e-3);
       float NdotH = max(dot(N, H), 0.0);
-      float VdotH = max(dot(V, H), 0.0);
-      float a = rough * rough;
-      float a2 = a * a;
-      float dnm = (NdotH * NdotH * (a2 - 1.0) + 1.0);
-      float D = a2 / max(3.14159265 * dnm * dnm, 1e-5);          // GGX NDF
-      float kg = (rough + 1.0); kg = kg * kg / 8.0;              // Smith-Schlick k
-      float G = (NdotV / (NdotV * (1.0 - kg) + kg)) *
-                (NdotL / (NdotL * (1.0 - kg) + kg));             // geometry
-      vec3 F0 = vec3(0.04);                                       // dielectric base reflectance
-      vec3 F = F0 + (1.0 - F0) * pow(1.0 - VdotH, 5.0);          // Fresnel-Schlick
-      vec3 spec = (D * G) * F / max(4.0 * NdotV * NdotL, 1e-4);
-      vec3 kd = vec3(1.0) - F;
-      vec3 diffuse = kd * albedo * 0.3183099;                     // Lambert (albedo/pi)
+
+      float gloss = 0.22;
+      if (uHasSpecular == 1) {
+        vec4 sp = texture(uSpecular, uv0);
+        // *_s maps: intensity often in RGB or alpha depending on authoring.
+        gloss = clamp(max(max(sp.r, sp.g), max(sp.b, sp.a)), 0.0, 1.0);
+      } else if (uAlphaMode == 0) {
+        // Opaque BF2 vehicle/kit maps frequently store specular in diffuse alpha.
+        gloss = mix(0.06, 0.62, clamp(baseTex.a, 0.0, 1.0));
+      } else if (uAlphaMode == 3) {
+        gloss = 0.10;  // roads / dirt — nearly matte
+      } else {
+        gloss = 0.12;  // cutout / blend — dull
+      }
+
+      float power = max(uSpecPower, 4.0);
+      // Glossier masks get a tighter highlight (still Blinn, not mirror GGX).
+      power = mix(power * 0.55, power * 1.35, gloss);
+      float spec = pow(NdotH, power) * gloss * 0.40;
 
       // Ambient occlusion / GI: reuse the baked UV5 lightmap (green = AO term).
       float ao = 1.0;
@@ -379,9 +385,11 @@ std::uint32_t create_textured_program() {
         ao = clamp(texture(uObjLightmap, lmUv).g * 2.0, 0.18, 1.15);
       }
       vec3 sunColor = uSunColor;
-      vec3 ambient = albedo * (0.40 * ao * uAmbientScale);
+      vec3 ambient = albedo * (0.42 * ao * uAmbientScale);
       float sh = shadowFactor(vWorldPos, NdotL);
-      vec3 lit = ambient + (diffuse + spec) * sunColor * (1.35 * NdotL) * ao * sh;
+      // Diffuse is Lambert without /π energy balance — matches BF2's display-referred look.
+      vec3 diffuse = albedo * NdotL;
+      vec3 lit = ambient + (diffuse + vec3(spec)) * sunColor * ao * sh;
       if (uFogRange.y > 0.0) {
         float f = clamp((distance(uCamPos, vWorldPos) - uFogRange.x) /
                             max(uFogRange.y - uFogRange.x, 0.001),
@@ -2023,6 +2031,8 @@ void Renderer::draw_textured(const GpuTexturedMesh& mesh, const float* mvp, cons
   glUniform1i(glGetUniformLocation(textured_program_, "uDirt"), 3);
   glUniform1i(glGetUniformLocation(textured_program_, "uNormal"), 4);
   glUniform1i(glGetUniformLocation(textured_program_, "uCrack"), 5);
+  glUniform1i(glGetUniformLocation(textured_program_, "uSpecular"), 7);
+  glUniform1f(glGetUniformLocation(textured_program_, "uSpecPower"), 22.f);
   glUniform1i(glGetUniformLocation(textured_program_, "uHasObjLm"), obj_lightmap != 0 ? 1 : 0);
   glUniform4fv(glGetUniformLocation(textured_program_, "uLmXform"), 1,
                lm_xform ? lm_xform : kLmIdentity);
@@ -2034,6 +2044,7 @@ void Renderer::draw_textured(const GpuTexturedMesh& mesh, const float* mvp, cons
   const GLint has_dirt_loc = glGetUniformLocation(textured_program_, "uHasDirt");
   const GLint has_normal_loc = glGetUniformLocation(textured_program_, "uHasNormal");
   const GLint has_crack_loc = glGetUniformLocation(textured_program_, "uHasCrack");
+  const GLint has_spec_loc = glGetUniformLocation(textured_program_, "uHasSpecular");
   const GLint uv_scroll_loc = glGetUniformLocation(textured_program_, "uUvScroll");
   const GLint track_strip_loc = glGetUniformLocation(textured_program_, "uTrackStrip");
   const GLint track_wrap_loc = glGetUniformLocation(textured_program_, "uTrackStripWrap");
@@ -2066,10 +2077,13 @@ void Renderer::draw_textured(const GpuTexturedMesh& mesh, const float* mvp, cons
     glBindTexture(GL_TEXTURE_2D, sub.normal_tex != 0 ? sub.normal_tex : fallback_tex_);
     glActiveTexture(GL_TEXTURE5);
     glBindTexture(GL_TEXTURE_2D, sub.crack_tex != 0 ? sub.crack_tex : fallback_tex_);
+    glActiveTexture(GL_TEXTURE7);
+    glBindTexture(GL_TEXTURE_2D, sub.specular_tex != 0 ? sub.specular_tex : fallback_tex_);
     glUniform1i(has_detail_loc, sub.detail_tex != 0 ? 1 : 0);
     glUniform1i(has_dirt_loc, sub.dirt_tex != 0 ? 1 : 0);
     glUniform1i(has_normal_loc, sub.normal_tex != 0 ? 1 : 0);
     glUniform1i(has_crack_loc, sub.crack_tex != 0 ? 1 : 0);
+    glUniform1i(has_spec_loc, sub.specular_tex != 0 ? 1 : 0);
     // Cutout submeshes (foliage/fences) alpha-test regardless of the mesh-wide
     // mode; everything else uses the caller's mode.
     glUniform1i(alpha_mode_loc, sub.cutout ? 2 : alpha_mode);

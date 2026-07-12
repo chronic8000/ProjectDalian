@@ -96,7 +96,8 @@ void LoadingScreen::draw(SDL_Window* window, bf2::Renderer& renderer, float prog
                       0.48f, 0.52f, 1.f);
   } else {
     draw_clipped_text(renderer, 80, H - 110, panel_x - 60.f, 1.15f,
-                      "Loading level data — please wait...", 0.45f, 0.48f, 0.52f, 1.f);
+                      "Loading level data — please wait (clicks ignored until Ready)...", 0.45f,
+                      0.48f, 0.52f, 1.f);
   }
 
   renderer.end_ui();
@@ -106,14 +107,23 @@ void LoadingScreen::draw(SDL_Window* window, bf2::Renderer& renderer, float prog
 
 void LoadingScreen::pump(SDL_Window* window, bf2::Renderer& renderer, float progress,
                          const char* phase, const char* detail) {
-  int mx = 0, my = 0;
-  SDL_GetMouseState(&mx, &my);
-  draw(window, renderer, progress, phase, detail, false, mx, my);
-
+  // Always drain the OS queue. Long terrain/mesh stretches used to freeze at a
+  // single %; a click then made Windows mark us Not Responding and kill the process.
+  SDL_PumpEvents();
   SDL_Event e;
   while (SDL_PollEvent(&e)) {
     if (e.type == SDL_QUIT) std::exit(0);
+    // Ignore clicks/keys until wait_until_ready — they must not accumulate.
   }
+
+  const std::uint32_t now = SDL_GetTicks();
+  // ~20 fps redraw max during load so mesh uploads aren't thrashing the GPU UI path.
+  if (last_draw_ms_ != 0 && (now - last_draw_ms_) < 50u && progress < 0.999f) return;
+  last_draw_ms_ = now;
+
+  int mx = 0, my = 0;
+  SDL_GetMouseState(&mx, &my);
+  draw(window, renderer, progress, phase, detail, false, mx, my);
 }
 
 void LoadingScreen::wait_until_ready(SDL_Window* window, bf2::Renderer& renderer,
@@ -126,6 +136,7 @@ void LoadingScreen::wait_until_ready(SDL_Window* window, bf2::Renderer& renderer
   SDL_ShowCursor(SDL_ENABLE);
   bool ready = false;
   while (!ready) {
+    SDL_PumpEvents();
     SDL_Event e;
     bool clicked = false;
     while (SDL_PollEvent(&e)) {
@@ -147,6 +158,8 @@ void LoadingScreen::wait_until_ready(SDL_Window* window, bf2::Renderer& renderer
     const float bx = (W - bw) * 0.5f;
     const float by = H * 0.55f;
     if (clicked && rect_hit(renderer, mx, my, bx, by, bw, bh)) ready = true;
+
+    SDL_Delay(16);
   }
 
   stop_music();

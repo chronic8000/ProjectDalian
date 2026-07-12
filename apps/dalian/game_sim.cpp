@@ -821,18 +821,19 @@ void GameSim::decay_sticks(float dt, const PlayerInput& input) {
   const Vehicle& av = state_.vehicles[state_.in_vehicle];
   if (!av.is_air) return;
 
-  // Jets: AutomaticReset — decay stick toward zero when mouse idle (BF2 flap recenter).
-  // Helis: hold cyclic (rotor AoA decay is handled in the flight integrator).
+  // Jets: mild AutomaticReset — hold attitude briefly, then ease toward wings-level.
   if (state_.air_input_grace <= 0.f && !input.air_stick_moved && !av.is_heli) {
-    const float reset = std::max(0.15f, av.automatic_reset);
-    const float decay = std::exp(-5.f * reset * dt);
+    const float reset = std::clamp(av.automatic_reset * 0.35f, 0.06f, 0.45f);
+    const float decay = std::exp(-2.2f * reset * dt);
     state_.air_pitch_stick *= decay;
     state_.air_roll_stick *= decay;
-    if (std::fabs(state_.air_pitch_stick) < 0.008f) state_.air_pitch_stick = 0.f;
-    if (std::fabs(state_.air_roll_stick) < 0.008f) state_.air_roll_stick = 0.f;
+    if (std::fabs(state_.air_pitch_stick) < 0.01f) state_.air_pitch_stick = 0.f;
+    if (std::fabs(state_.air_roll_stick) < 0.01f) state_.air_roll_stick = 0.f;
   }
 
-  if (input.pitch_up) state_.air_pitch_stick = std::max(state_.air_pitch_stick, 1.f);
+  // Space = mild pitch-up assist (not a hard stick slam that blocks nose-down).
+  if (input.pitch_up)
+    state_.air_pitch_stick = std::min(1.f, state_.air_pitch_stick + 0.35f * dt * 6.f);
 }
 
 void GameSim::absorb_air_mouse(const PlayerInput& input) {
@@ -848,25 +849,34 @@ void GameSim::absorb_air_mouse(const PlayerInput& input) {
   if (std::fabs(dx) < 1e-8f && std::fabs(dy) < 1e-8f) return;
 
   const float inv = input.invert_air ? -1.f : 1.f;
-  // Axis-specific gains (research §2.1). Pitch is deliberately softer than roll —
-  // infantry look sens must not slam elevators to ±1 on a short flick.
   const float sens = glm::clamp(input.air_mouse_sens, 0.35f, 1.5f);
-  const float pitch_sens = (av.is_heli ? 0.011f : 0.0085f) * sens;
-  const float roll_sens = (av.is_heli ? 0.013f : 0.014f) * sens;
+  // Jets: softer mouse → stick with rate limit + reverse resistance (plane inertia).
+  const float pitch_sens = (av.is_heli ? 0.011f : 0.0092f) * sens;
+  const float roll_sens = (av.is_heli ? 0.013f : 0.0105f) * sens;
   const float ground_pitch_scale =
-      (!av.is_heli && av.wheels_on_ground && !av.jet_airborne) ? 0.22f : 1.f;
+      (!av.is_heli && av.wheels_on_ground && !av.jet_airborne) ? 0.28f : 1.f;
 
-  // Cap stick delta per absorb so high-polling mice can't dump a full ±1 in one frame.
   float dp = dy * pitch_sens * inv * ground_pitch_scale;
   float dr = dx * roll_sens;
-  dp = glm::clamp(dp, -0.16f, 0.16f);
-  dr = glm::clamp(dr, -0.20f, 0.20f);
+  dp = glm::clamp(dp, av.is_heli ? -0.16f : -0.22f, av.is_heli ? 0.16f : 0.22f);
+  dr = glm::clamp(dr, av.is_heli ? -0.20f : -0.18f, av.is_heli ? 0.20f : 0.18f);
 
-  state_.air_pitch_stick = std::clamp(state_.air_pitch_stick + dp, -1.f, 1.f);
+  auto apply_stick = [](float& stick, float delta, float max_step, bool jet_feel) {
+    float desired = std::clamp(stick + delta, -1.f, 1.f);
+    float step = desired - stick;
+    // Harder to whip through center into the opposite bank/pitch (G / stick inertia).
+    if (jet_feel && desired * stick < 0.f && std::fabs(stick) > 0.12f) step *= 0.38f;
+    stick = std::clamp(stick + glm::clamp(step, -max_step, max_step), -1.f, 1.f);
+  };
+
   if (av.is_heli) {
+    state_.air_pitch_stick = std::clamp(state_.air_pitch_stick + dp, -1.f, 1.f);
     state_.air_roll_stick = std::clamp(state_.air_roll_stick + dr, -1.f, 1.f);
-  } else if (!av.wheels_on_ground || av.jet_airborne) {
-    state_.air_roll_stick = std::clamp(state_.air_roll_stick - dr, -1.f, 1.f);
+  } else {
+    apply_stick(state_.air_pitch_stick, dp, 0.095f, true);
+    if (!av.wheels_on_ground || av.jet_airborne) {
+      apply_stick(state_.air_roll_stick, -dr, 0.11f, true);
+    }
   }
 }
 
@@ -1467,7 +1477,8 @@ void GameSim::tick(float frame_dt, const PlayerInput& input) {
       sub.seat_switch = -1;
       sub.launch_missile = false;
       sub.flare_request = false;
-      sub.air_stick_moved = false;
+      // Keep air_stick_moved for the whole frame so AutomaticReset doesn't
+      // chew the stick on later fixed substeps after a mouse flick.
     }
     tick_fixed(kFixedDt, sub);
     first_substep = false;

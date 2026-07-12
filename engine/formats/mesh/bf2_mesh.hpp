@@ -118,11 +118,12 @@ struct ExtractedMesh {
 struct TexturedSubmesh {
     std::uint32_t index_offset = 0;  // offset into TexturedMeshData::indices
     std::uint32_t index_count = 0;
-    std::string base_map;    // diffuse/base color (*_c)
-    std::string detail_map;  // detail (*_de)
-    std::string normal_map;  // detail normal/bump (*_deb)
-    std::string dirt_map;    // tiling-break dirt overlay (*_di)
-    std::string crack_map;   // alpha damage decal (*_cr)
+    std::string base_map;      // diffuse/base color (*_c)
+    std::string detail_map;    // detail (*_de)
+    std::string normal_map;    // detail normal/bump (*_deb)
+    std::string dirt_map;      // tiling-break dirt overlay (*_di)
+    std::string crack_map;     // alpha damage decal (*_cr)
+    std::string specular_map;  // gloss/specular (*_s) — not specularlut
     // AnimatedUV* tread subset: BF2 UV-matrix id from BLENDINDICES byte 3 (0 = none).
     std::uint8_t uv_matrix_id = 0;
     // True when this range should scroll with vehicle speed (translation matrices only).

@@ -223,6 +223,14 @@ void assign_maps_from_technique(const std::string& technique,
     const std::size_t n = std::strlen(suf);
     return s.size() >= n && s.compare(s.size() - n, n, suf) == 0;
   };
+  auto is_surface_specular = [&](const std::string& m) {
+    const std::string s = stem_lower(m);
+    if (s.find("specularlut") != std::string::npos) return false;
+    if (ends_with(s, "_s")) return true;
+    if (s.find("specular") != std::string::npos) return true;
+    if (ends_with(s, "_spec") || ends_with(s, "spec")) return true;
+    return false;
+  };
 
   std::vector<std::string> layers;
   layers.reserve(raw_maps.size());
@@ -239,8 +247,8 @@ void assign_maps_from_technique(const std::string& technique,
   bool classified = false;
   if (tech.find("base") != std::string::npos) {
     // Longest-match tokenize so "ndetail" wins over "detail".
-    static const char* kToks[] = {"ndetail", "ncrack", "nbase", "detail",
-                                  "dirt",    "crack",  "base"};
+    static const char* kToks[] = {"ndetail", "ncrack",   "nbase", "specular",
+                                  "detail",  "dirt",     "crack", "base"};
     std::vector<std::string> toks;
     for (std::size_t i = 0; i < tech.size();) {
       bool hit = false;
@@ -268,6 +276,8 @@ void assign_maps_from_technique(const std::string& technique,
         take(sub.dirt_map);
       } else if (tok == "crack") {
         take(sub.crack_map);
+      } else if (tok == "specular") {
+        take(sub.specular_map);
       } else if (tok == "ndetail" || tok == "nbase") {
         take(sub.normal_map);
       } else if (tok == "ncrack") {
@@ -281,7 +291,9 @@ void assign_maps_from_technique(const std::string& technique,
     sub.base_map = layers[0];
     for (const auto& m : layers) {
       const std::string s = stem_lower(m);
-      if (ends_with(s, "_deb") || ends_with(s, "deb")) {
+      if (is_surface_specular(m)) {
+        sub.specular_map = m;
+      } else if (ends_with(s, "_deb") || ends_with(s, "deb")) {
         sub.normal_map = m;
       } else if (ends_with(s, "_de") ||
                  (ends_with(s, "de") && !ends_with(s, "side") && !ends_with(s, "node"))) {
@@ -294,6 +306,16 @@ void assign_maps_from_technique(const std::string& technique,
         sub.normal_map = m;
       } else if (ends_with(s, "_c")) {
         sub.base_map = m;
+      }
+    }
+  }
+
+  // Technique streams often leave *_s as an extra unused map — pick it up.
+  if (sub.specular_map.empty()) {
+    for (const auto& m : layers) {
+      if (is_surface_specular(m)) {
+        sub.specular_map = m;
+        break;
       }
     }
   }
@@ -665,6 +687,20 @@ bool MeshLoader::technique_map_assign_self_test() {
         !sub.detail_map.empty()) {
       return false;
     }
+  }
+  {
+    // Extra *_s map after technique stream (common BF2 layout).
+    TexturedSubmesh sub;
+    assign_maps_from_technique(
+        "BaseDetailNDetail",
+        {"base_c.dds", "detail_de.dds", "normal_deb.dds", "hull_s.dds"}, sub);
+    if (sub.base_map != "base_c.dds" || sub.specular_map != "hull_s.dds") return false;
+  }
+  {
+    // specularlut must never become a surface specular map.
+    TexturedSubmesh sub;
+    assign_maps_from_technique("Base", {"base_c.dds", "Common/specularlut.dds"}, sub);
+    if (sub.base_map != "base_c.dds" || !sub.specular_map.empty()) return false;
   }
   return true;
 }

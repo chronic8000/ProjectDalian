@@ -45,7 +45,7 @@ struct Settings {
   bool grass_enabled = true;
   float grass_distance = 55.f;
   bool bloom = true;
-  float bloom_intensity = 0.45f;
+  float bloom_intensity = 0.28f;
   // Engine "HDR" = float colour buffer + ACES tonemap — NOT Windows/monitor HDR.
   // Off by default; weak laptop GPUs often corrupt float FBOs (green/magenta).
   bool hdr = false;

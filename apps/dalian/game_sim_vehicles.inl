@@ -17,22 +17,24 @@ const float mass_scale = [&]() {
   return glm::clamp(kRefMass / m, 0.55f, 1.4f);
 }();
 
-// Jet dogfight authority: peak near cruise (BF2 ~300–315 HUD), weak when stalled
-// or afterburning. Replaces the old monotonic "slower = better" factor.
+// Jet dogfight authority: peak near cruise (BF2 ~300–315 HUD), still usable
+// when afterburning — arcade floor so pitch/roll don't die at top speed.
 auto jet_turn_authority = [](float speed, float cruise, float max_air) {
   const float sweet = std::max(12.f, cruise);
   const float ratio = speed / sweet;
+  float auth = 1.f;
   if (ratio < 0.5f) {
     const float t = glm::clamp(ratio / 0.5f, 0.f, 1.f);
-    return glm::mix(0.12f, 0.42f, t);
-  }
-  if (ratio <= 1.f) {
+    auth = glm::mix(0.35f, 0.7f, t);
+  } else if (ratio <= 1.f) {
     const float t = (ratio - 0.5f) / 0.5f;
-    return glm::mix(0.42f, 1.f, t);
+    auth = glm::mix(0.7f, 1.f, t);
+  } else {
+    const float hi = std::max(sweet + 1.f, max_air);
+    const float t = glm::clamp((speed - sweet) / (hi - sweet), 0.f, 1.f);
+    auth = glm::mix(1.f, 0.72f, t);
   }
-  const float hi = std::max(sweet + 1.f, max_air);
-  const float t = glm::clamp((speed - sweet) / (hi - sweet), 0.f, 1.f);
-  return glm::mix(1.f, 0.22f, t);
+  return std::max(0.65f, auth);
 };
 
 if (v.is_air && v.is_heli) {
@@ -238,16 +240,22 @@ if (v.is_air && v.is_heli) {
     v.jet_sprint = std::min(v.sprint_limit, v.jet_sprint + step / kSprintRecover);
   }
 
-  if (thr_in > 0.f)
+  // Afterburner commits full power: without this, double-tap AB + released W
+  // leaves jet_rpm≈0 so thrust dies and the airframe stalls out of the sky.
+  if (ab_active && thr_in >= 0.f) {
+    v.throttle = glm::clamp(v.throttle + step * 1.35f, 0.f, 1.f);
+    if (v.throttle < 0.92f) v.throttle = glm::min(1.f, v.throttle + step * 2.5f);
+  } else if (thr_in > 0.f)
     v.throttle = glm::clamp(v.throttle + step * 0.32f, 0.f, 1.f);
   else if (thr_in < 0.f)
     v.throttle = glm::clamp(v.throttle - step * 0.45f, 0.f, 1.f);
   else
-    v.throttle = glm::max(0.f, v.throttle - step * 0.02f);
+    // Airborne: bleed thrust when hands off W so idle → glide → stall is reachable.
+    v.throttle = glm::max(0.f, v.throttle - step * (v.jet_airborne ? 0.08f : 0.02f));
 
-  const float spool_up = ab_active ? 0.95f : 0.55f;
-  const float spool_down = 0.35f;
-  v.jet_rpm = approach(v.jet_rpm, v.throttle, thr_in >= 0.f ? spool_up : spool_down);
+  const float spool_up = ab_active ? 1.6f : 0.55f;
+  const float spool_down = ab_active ? 0.15f : (v.jet_airborne ? 0.55f : 0.35f);
+  v.jet_rpm = approach(v.jet_rpm, v.throttle, thr_in >= 0.f || ab_active ? spool_up : spool_down);
 
   const float floor_y = air_floor_y(v);
   const float hd = glm::radians(v.heading);
@@ -304,7 +312,8 @@ if (v.is_air && v.is_heli) {
       v.vel.y = lift_rate + std::sin(pitch_rad) * horiz_spd * 0.12f;
       v.pos.y = floor_y + kAirborneHeight * 0.5f;
       v.roll = 0.f;
-      state_.air_pitch_stick *= 0.35f;
+      // Keep rotation stick — wiping into the deadzone used to trigger climb trim.
+      state_.air_pitch_stick = glm::clamp(std::max(state_.air_pitch_stick, 0.35f), -1.f, 1.f);
       state_.air_roll_stick = 0.f;
     }
   } else {
@@ -312,97 +321,122 @@ if (v.is_air && v.is_heli) {
 
     const bool stick_neutral =
         std::fabs(state_.air_pitch_stick) < 0.06f && std::fabs(state_.air_roll_stick) < 0.06f;
-    const float airspeed = glm::length(v.vel);
-    // Dynamic pressure proxy (v/cruise)² — controls AND lift scale with this.
-    const float q = glm::clamp((airspeed / jet_cruise) * (airspeed / jet_cruise), 0.08f, 2.2f);
+    float airspeed = std::max(1.f, glm::length(v.vel));
+    const float q = glm::clamp((airspeed / jet_cruise) * (airspeed / jet_cruise), 0.05f, 2.2f);
     const float turn_speed_factor = jet_turn_authority(airspeed, jet_cruise, jet_max_air);
-    float ctrl = turn_speed_factor * glm::clamp(q, 0.2f, 1.35f) / inertia;
+    float ctrl = turn_speed_factor * glm::clamp(q, 0.25f, 1.35f) / inertia;
 
-    // Flap deflection → attitude. Torque arms from PositionOffset (§7.1).
-    // Pitch target softer than before so elevator stick isn't an on/off flip.
+    // Attitude rates — plane inertia, not fighter-game snap.
     const float elev_arm = glm::clamp(-v.elevator_z_offset / 5.5f, 0.55f, 1.6f);
     const float ail_arm = glm::clamp(v.aileron_x_offset / 3.2f, 0.55f, 1.6f);
-    const float pitch_target = state_.air_pitch_stick * 36.f;
-    const float roll_target = -state_.air_roll_stick * 58.f;
-    v.pitch = approach(v.pitch, pitch_target, v.jet_pitch_rate * ctrl * elev_arm * 0.85f);
-    v.roll = approach(v.roll, roll_target, v.jet_roll_rate * ctrl * ail_arm);
+    const float pitch_rate = std::clamp(v.jet_pitch_rate, 2.8f, 5.8f);
+    const float roll_rate = std::clamp(v.jet_roll_rate, 2.6f, 5.5f);
+    const float pitch_target = state_.air_pitch_stick * 78.f;
+    const float roll_target = -state_.air_roll_stick * 75.f;
 
+    // G-load proxy: hard pull / knife-edge bleeds authority (feels heavy).
+    const float stick_load =
+        1.f + 1.15f * std::fabs(state_.air_pitch_stick) + 0.85f * std::fabs(state_.air_roll_stick);
+    const float bank_g = 1.f / std::max(0.25f, std::cos(glm::radians(glm::clamp(v.roll, -70.f, 70.f))));
+    const float g_est = stick_load * glm::clamp(bank_g, 1.f, 4.5f) * glm::clamp(q, 0.35f, 1.6f);
+    const float g_soft = glm::clamp((7.2f - g_est) / 3.5f, 0.28f, 1.f);
+    ctrl *= g_soft;
+
+    v.pitch = approach(v.pitch, pitch_target, pitch_rate * ctrl * elev_arm * 0.72f);
+    v.roll = approach(v.roll, roll_target, roll_rate * ctrl * ail_arm * 0.78f);
+
+    // Gentle horizon assist when hands off — never a climb trim from throttle.
     if (stick_neutral && driving && v.automatic_reset > 0.2f) {
-      const float damp = 3.2f * ctrl * v.automatic_reset * step;
-      v.pitch = approach(v.pitch, 0.f, damp * 8.f);
-      v.roll = approach(v.roll, 0.f, damp * 10.f);
+      const float damp = 1.2f * ctrl * v.automatic_reset * step;
+      v.pitch = approach(v.pitch, 0.f, damp * 5.f);
+      v.roll = approach(v.roll, 0.f, damp * 6.5f);
     }
 
-    const bool stalled = horiz_spd < jet_stall && (v.pitch > 8.f || airspeed < jet_stall * 0.85f);
+    const float power = v.jet_rpm;
+    // Energy stall: slow airframe, or idle engine bleeding below cruise.
+    bool stalled = airspeed < jet_stall * 0.95f ||
+                   (power < 0.14f && airspeed < jet_cruise * 0.58f) ||
+                   (horiz_spd < jet_stall && v.pitch > 10.f);
     if (stalled) {
-      ctrl *= 0.28f;
-      v.pitch = approach(v.pitch, -12.f, 7.f);
+      ctrl *= 0.32f;
+      // Nose wants down; mushy elevators.
+      v.pitch = approach(v.pitch, std::min(v.pitch, -22.f), 7.5f);
     }
 
-    if (stick_neutral && driving && !stalled && v.throttle > 0.55f) {
-      const float trim =
-          glm::clamp((jet_cruise - horiz_spd) * 0.12f + (v.throttle - 0.6f) * 4.f, -3.f, 5.f);
-      v.pitch = approach(v.pitch, trim, 1.8f * step);
-    }
-
-    v.pitch = glm::clamp(v.pitch, -55.f, 55.f);
-    v.roll = glm::clamp(v.roll, -70.f, 70.f);
+    v.pitch = glm::clamp(v.pitch, -85.f, 85.f);
+    v.roll = glm::clamp(v.roll, -105.f, 105.f);
 
     const float bank_turn = std::sin(glm::radians(v.roll)) * v.jet_bank_turn_gain *
-                            glm::clamp(horiz_spd / 28.f, 0.25f, 1.f) * turn_speed_factor;
-    // Rudder (A/D → air_yaw_stick). Was effectively dead at cruise (~1°/s).
-    // Keep mild high-speed falloff (tail/streamlining) but stay useful for coordination.
+                            glm::clamp(horiz_spd / 28.f, 0.25f, 1.f) * turn_speed_factor * g_soft;
     const float rudder_spd = glm::clamp(horiz_spd / 16.f, 0.4f, 1.f);
-    const float rudder_hi =
-        glm::mix(1.f, 0.55f, glm::clamp((horiz_spd - jet_cruise * 0.85f) / (jet_max_air * 0.5f), 0.f, 1.f));
+    const float rudder_hi = glm::mix(
+        1.f, 0.65f,
+        glm::clamp((horiz_spd - jet_cruise * 0.85f) / (jet_max_air * 0.5f), 0.f, 1.f));
     const float rudder_air = (26.f / inertia) * rudder_spd * rudder_hi *
-                             glm::clamp(turn_speed_factor * 0.85f + 0.35f, 0.45f, 1.15f);
+                             glm::clamp(turn_speed_factor * 0.85f + 0.35f, 0.55f, 1.2f);
     v.heading += (bank_turn + yaw_in * rudder_air) * step;
     flat_fwd = glm::vec3(std::sin(glm::radians(v.heading)), 0.f, std::cos(glm::radians(v.heading)));
 
-    float thrust_acc =
-        v.jet_rpm * (ab_active ? 30.f * kSprintFactor : 26.f) * kThrustScale * mass_scale;
-    // Drag + induced drag from high flap / bank (energy bleed in turns).
-    const float drag_base = v.physics_drag > 0.f ? v.physics_drag * 0.0008f : 0.04f;
-    const float load =
-        1.f + 0.55f * std::fabs(state_.air_pitch_stick) + 0.35f * std::fabs(std::sin(glm::radians(v.roll)));
-    float drag = drag_base * (0.65f * v.drag_modifier.z + 0.35f) + 0.0012f * horiz_spd * load;
-    drag += (v.jet_gear_anim > 0.05f ? 0.018f * v.jet_gear_anim : 0.f);
-    if (input.throttle_down && driving)
-      horiz_spd -= 22.f * step * glm::clamp(horiz_spd / 25.f, 0.3f, 1.f);
-    horiz_spd += (thrust_acc - drag * horiz_spd) * step;
-    horiz_spd = glm::clamp(horiz_spd, stalled ? 8.f : 14.f,
-                           ab_active ? jet_max_air * 1.08f : jet_max_air);
-
     const float pitch_rad = glm::radians(v.pitch);
-    // WingLift + FlapLift×stick, scaled by dynamic pressure, clamped by RegulateToLift.
-    float lift_raw = (kBodyWingLift + state_.air_pitch_stick * (kFlapLift * 0.045f)) * q;
-    const float lift_cap = v.regulate_to_lift * v.wing_to_regulator;
-    lift_raw = std::min(lift_raw, lift_cap);
-    const float wing_lift = lift_raw * kGravity * glm::max(0.28f, std::cos(pitch_rad * 0.55f));
-    const float flap_climb = state_.air_pitch_stick * kFlapLift * glm::clamp(q, 0.25f, 1.4f) * 0.38f;
-    const float pitch_climb = std::sin(pitch_rad) * horiz_spd * 0.32f;
-    float vy_acc = wing_lift + flap_climb + pitch_climb - kGravity;
-    if (ab_active) vy_acc += 2.5f;
-    if (stalled) vy_acc -= 6.f;
-    v.vel.y += vy_acc * step;
-    v.vel.y = glm::clamp(v.vel.y, -55.f, 42.f);
+    glm::vec3 nose(std::sin(glm::radians(v.heading)) * std::cos(pitch_rad), std::sin(pitch_rad),
+                   std::cos(glm::radians(v.heading)) * std::cos(pitch_rad));
+    if (glm::dot(nose, nose) < 1e-8f) nose = flat_fwd;
+    else nose = glm::normalize(nose);
 
-    // Vertical drag modifier.
-    v.vel.y -= v.vel.y * (0.04f * v.drag_modifier.y) * step;
+    float thrust_acc =
+        power * (ab_active ? 30.f * kSprintFactor : 26.f) * kThrustScale * mass_scale;
+    const float drag_base = v.physics_drag > 0.f ? v.physics_drag * 0.0008f : 0.04f;
+    const float load = 1.f + 0.55f * std::fabs(state_.air_pitch_stick) +
+                       0.4f * std::fabs(std::sin(glm::radians(v.roll))) +
+                       (stalled ? 0.8f : 0.f);
+    float drag = drag_base * (0.65f * v.drag_modifier.z + 0.35f) + 0.0011f * airspeed * load;
+    drag += (v.jet_gear_anim > 0.05f ? 0.018f * v.jet_gear_anim : 0.f);
+    // Idle / cut throttle: parasite + induced drag eats energy (glide, don't hover).
+    if (power < 0.25f) drag *= glm::mix(1.55f, 1.1f, power / 0.25f);
+    if (input.throttle_down && driving)
+      airspeed -= 22.f * step * glm::clamp(airspeed / 25.f, 0.3f, 1.f);
 
-    v.vel.x = flat_fwd.x * horiz_spd;
-    v.vel.z = flat_fwd.z * horiz_spd;
+    airspeed += thrust_acc * step;
+    airspeed -= drag * airspeed * step;
+    // Gravity along the flight path (climb costs speed, dive recovers).
+    airspeed -= kGravity * nose.y * step;
 
+    const float level = glm::clamp(std::cos(pitch_rad), 0.f, 1.f);
+    float lift_raw = (kBodyWingLift + state_.air_pitch_stick * (kFlapLift * 0.028f)) * q;
+    lift_raw = std::min(lift_raw, v.regulate_to_lift * v.wing_to_regulator);
+    // Lift needs airspeed; idle power doesn't invent it.
+    float wing_up = lift_raw * kGravity * level * level;
+    if (power < 0.2f) wing_up *= glm::clamp(0.35f + power * 2.5f, 0.35f, 1.f);
+    if (stalled) {
+      wing_up *= 0.22f;
+      airspeed = std::max(airspeed - 14.f * step, 4.f);
+    }
+
+    const float max_spd = ab_active ? jet_max_air * 1.08f : jet_max_air;
+    const float min_spd = stalled ? 4.f : (power < 0.12f ? 5.f : 9.f);
+    airspeed = glm::clamp(airspeed, min_spd, max_spd);
+
+    // Path mostly follows the nose; keep a little flat track for landings.
+    const float path_blend =
+        glm::clamp(0.72f + 0.28f * std::fabs(std::sin(pitch_rad)), 0.72f, 1.f);
+    glm::vec3 wish = glm::normalize(glm::mix(flat_fwd, nose, path_blend));
+    v.vel = wish * airspeed;
+
+    // Weight vs lift: surplus holds altitude; deficit sinks (real glide/stall).
+    const float net_vert = wing_up - kGravity;
+    v.vel.y += net_vert * step * glm::clamp(1.f - 0.65f * std::fabs(nose.y), 0.25f, 1.f);
+    if (stalled) v.vel.y -= kGravity * 0.55f * step;  // rapid departure
+    v.vel.y = glm::clamp(v.vel.y, -75.f, 48.f);
+
+    horiz_spd = glm::length(glm::vec2(v.vel.x, v.vel.z));
     if (move_vehicle_horiz(v, glm::vec3(v.vel.x, 0.f, v.vel.z) * step)) {
-      horiz_spd *= 0.25f;
-      v.vel.x = flat_fwd.x * horiz_spd;
-      v.vel.z = flat_fwd.z * horiz_spd;
+      v.vel.x *= 0.25f;
+      v.vel.z *= 0.25f;
+      horiz_spd = glm::length(glm::vec2(v.vel.x, v.vel.z));
     }
     v.pos.y += v.vel.y * step;
 
     if (v.pos.y <= floor_y + 0.35f && v.vel.y <= 0.8f) {
-      // Landing gear spring/damper (§7.2) — absorb sink rate instead of a hard stop.
       const float penet = std::max(0.f, floor_y - v.pos.y);
       v.vel.y += (penet * v.gear_spring - v.vel.y * v.gear_damping) * step;
       if (v.pos.y < floor_y) v.pos.y = floor_y;
@@ -412,6 +446,7 @@ if (v.is_air && v.is_heli) {
         v.jet_airborne = false;
         v.wheels_on_ground = true;
         v.roll = approach(v.roll, 0.f, 10.f);
+        horiz_spd = glm::length(glm::vec2(v.vel.x, v.vel.z));
         if (horiz_spd < jet_v1) v.pitch = approach(v.pitch, 0.f, 8.f);
       }
     }

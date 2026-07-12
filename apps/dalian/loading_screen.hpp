@@ -4,6 +4,7 @@
 #include "menu_music.hpp"
 
 #include <SDL.h>
+#include <cstdint>
 
 namespace dalian {
 
@@ -13,6 +14,8 @@ struct Settings;
 class LoadingScreen {
  public:
   void start_music(const Settings& settings);
+  // Pump OS messages + redraw. Safe to call often from long load loops — redraw
+  // is throttled; events are always drained so Windows won't kill us as hung.
   void pump(SDL_Window* window, bf2::Renderer& renderer, float progress, const char* phase,
             const char* detail = nullptr);
   void wait_until_ready(SDL_Window* window, bf2::Renderer& renderer, const char* subtitle);
@@ -26,6 +29,7 @@ class LoadingScreen {
 
   MenuMusic music_;
   bool music_started_ = false;
+  std::uint32_t last_draw_ms_ = 0;
 };
 
 }  // namespace dalian

@@ -430,6 +430,7 @@ bf2::GpuTexturedMesh& ensure_textured_mesh(
           gpu.submeshes[i].normal_tex = textures.get(data.submeshes[i].normal_map, tex_folder);
           gpu.submeshes[i].dirt_tex = textures.get(data.submeshes[i].dirt_map, tex_folder);
           gpu.submeshes[i].crack_tex = textures.get(data.submeshes[i].crack_map, tex_folder);
+          gpu.submeshes[i].specular_tex = textures.get(data.submeshes[i].specular_map, tex_folder);
           gpu.submeshes[i].cutout = textures.is_cutout(gpu.submeshes[i].base_tex);
           gpu.submeshes[i].track_uv = is_track_texture_path(data.submeshes[i].base_map) ||
                                       data.submeshes[i].animated_uv;
@@ -977,7 +978,7 @@ int main(int argc, char** argv) {
       archive_path.clear();
       continue;
     }
-    load_step(0.18f, "LOADING TERRAIN", "Heightmap, sky, roads, and navigation...");
+    load_step(0.18f, "LOADING TERRAIN", "Heightmap, sky, atmosphere...");
 
     float xz = 2.0f;
     std::string heightdata_con;
@@ -1012,6 +1013,7 @@ int main(int argc, char** argv) {
     if (!atmo.sky_texture.empty()) std::cout << "  skydome";
     if (atmo.has_cloud_layer) std::cout << "  clouds";
     std::cout << '\n';
+    load_step(0.20f, "LOADING TERRAIN", "Navigation mesh...");
 
     bf2::NavMesh nav_mesh;
     if (const auto nav_bytes = resources.read_bytes("GTSData/output/Infantry.vbf")) {
@@ -1032,6 +1034,7 @@ int main(int argc, char** argv) {
     resolver.build_from_level_scripts(static_script, dummy_script);
     std::cout << "Resolved " << resolver.map().size() << " templates; " << level.placements.size()
               << " placements\n";
+    load_step(0.23f, "LOADING TERRAIN", "Auditing templates and textures...");
 
     {
       std::vector<std::string> tmpl_names;
@@ -1078,6 +1081,7 @@ int main(int argc, char** argv) {
       }
     }
     dalian::init_bf2_fx(&fx_library);
+    load_step(0.27f, "LOADING TERRAIN", "Terrain colormap and foliage...");
 
     // Terrain: colormap + lightmap tiles from client.zip when available.
   bf2::TerrainVisualConfig terrain_cfg;
@@ -1242,7 +1246,16 @@ int main(int argc, char** argv) {
   int resolved = 0;
   int collision_tris = 0;
   int collision_miss = 0;
+  const std::size_t placement_total = level.placements.size();
+  std::size_t placement_i = 0;
   for (const auto& inst : level.placements) {
+    if ((placement_i & 7u) == 0u || placement_i + 1 == placement_total) {
+      const float t =
+          placement_total > 0 ? static_cast<float>(placement_i) / static_cast<float>(placement_total)
+                              : 1.f;
+      load_step(0.32f + 0.08f * t, "LOADING WORLD", "Uploading static meshes...");
+    }
+    ++placement_i;
     const std::string vpath = resolver.resolve_mesh(inst.template_name);
     if (vpath.empty()) {
       continue;
@@ -1293,7 +1306,15 @@ int main(int argc, char** argv) {
   // These are RoadCompiled binaries (not StaticMesh) — dedicated loader.
   int road_resolved = 0;
   int road_tex_miss = 0;
+  const std::size_t road_total = level.roads.size();
+  std::size_t road_i = 0;
   for (const auto& road : level.roads) {
+    if ((road_i & 3u) == 0u || road_i + 1 == road_total) {
+      const float t =
+          road_total > 0 ? static_cast<float>(road_i) / static_cast<float>(road_total) : 1.f;
+      load_step(0.40f + 0.02f * t, "LOADING WORLD", "Compiled roads...");
+    }
+    ++road_i;
     if (road.mesh_vpath.empty()) continue;
     const std::string resolved_mesh =
         bf2::resolve_mesh_vpath(resources.archives(), road.mesh_vpath);
@@ -1358,7 +1379,7 @@ int main(int argc, char** argv) {
             << " static instances; textures loaded " << textures.loaded_count() << ", missing "
             << textures.missing_count() << "; collision tris " << collision_tris << ", meshes w/o "
             << "collision " << collision_miss << '\n';
-  load_step(0.42f, "BUILDING WORLD", "Static objects, trees, and collision...");
+  load_step(0.42f, "BUILDING WORLD", "Trees, collision, and spawn setup...");
 
   std::vector<dalian::AmbientEmitter> ambient_emitters =
       dalian::collect_ambient_emitters(level.placements);
@@ -1381,7 +1402,14 @@ int main(int argc, char** argv) {
   if (!overgrowth_defs.types().empty()) {
     if (const auto og_raw = resources.read_bytes("Overgrowth/Overgrowth.raw")) {
       auto trees = bf2::build_overgrowth_instances(overgrowth_defs, *og_raw, resources, xz);
-      for (const auto& tr : trees) {
+      const std::size_t tree_total = trees.size();
+      for (std::size_t ti = 0; ti < trees.size(); ++ti) {
+        if ((ti & 15u) == 0u || ti + 1 == tree_total) {
+          const float t =
+              tree_total > 0 ? static_cast<float>(ti) / static_cast<float>(tree_total) : 1.f;
+          load_step(0.43f + 0.04f * t, "BUILDING WORLD", "Trees and bushes...");
+        }
+        const auto& tr = trees[ti];
         auto& gpu = ensure_textured_mesh(tr.mesh_vpath, template_cache, resources, textures, renderer);
         if (gpu.vao == 0) continue;
         bf2::ObjectInstance pseudo;
@@ -1411,7 +1439,14 @@ int main(int argc, char** argv) {
   }
 
   // Feed world-space collision triangles for every placed building.
-  for (const auto& in : instances) {
+  const std::size_t inst_total = instances.size();
+  for (std::size_t ii = 0; ii < instances.size(); ++ii) {
+    if ((ii & 15u) == 0u || ii + 1 == inst_total) {
+      const float t =
+          inst_total > 0 ? static_cast<float>(ii) / static_cast<float>(inst_total) : 1.f;
+      load_step(0.48f + 0.08f * t, "BUILDING WORLD", "Baking collision...");
+    }
+    const auto& in = instances[ii];
     const auto cit = collision_cache.find(in.mesh_key);
     if (cit == collision_cache.end() || cit->second.empty()) {
       continue;
@@ -1599,6 +1634,8 @@ int main(int argc, char** argv) {
           gpu.submeshes[i].normal_tex = textures.get(data.submeshes[i].normal_map, tex_folder);
           gpu.submeshes[i].dirt_tex = textures.get(data.submeshes[i].dirt_map, tex_folder);
           gpu.submeshes[i].crack_tex = textures.get(data.submeshes[i].crack_map, tex_folder);
+          gpu.submeshes[i].specular_tex =
+              textures.get(data.submeshes[i].specular_map, tex_folder);
           // Do NOT set cutout here. BF2 vehicle/kit maps often put specular in
           // alpha; the foliage cutout heuristic would discard most of the hull.
           if (gpu.submeshes[i].base_tex == 0) ++missing;
@@ -2310,6 +2347,7 @@ int main(int argc, char** argv) {
           gpu.submeshes[i].normal_tex = textures.get(wdata.submeshes[i].normal_map);
           gpu.submeshes[i].dirt_tex = textures.get(wdata.submeshes[i].dirt_map);
           gpu.submeshes[i].crack_tex = textures.get(wdata.submeshes[i].crack_map);
+          gpu.submeshes[i].specular_tex = textures.get(wdata.submeshes[i].specular_map);
         }
         weapon_meshes[idx] = std::move(gpu);
       }
@@ -2491,6 +2529,8 @@ int main(int argc, char** argv) {
               missile_mesh.submeshes[i].normal_tex = textures.get(data.submeshes[i].normal_map);
               missile_mesh.submeshes[i].dirt_tex = textures.get(data.submeshes[i].dirt_map);
               missile_mesh.submeshes[i].crack_tex = textures.get(data.submeshes[i].crack_map);
+              missile_mesh.submeshes[i].specular_tex =
+                  textures.get(data.submeshes[i].specular_map);
             }
           }
         } catch (const std::exception&) {
@@ -3666,8 +3706,12 @@ int main(int argc, char** argv) {
   };
 
   bool jet_afterburner = false;
-  float last_jet_w_tap = -10.f;
+  std::uint32_t last_jet_w_tap_ms = 0;
   bool jet_w_was_down = false;
+  float jet_w_hold_sec = 0.f;
+  bool jet_w_hold_armed = false;  // one-shot per W press (prevents AB HUD flicker)
+  float jet_ab_rearm_cd = 0.f;    // block re-latch after fuel empty
+  bool jet_ab_lit = false;        // HUD/FX: physical AB (latch/Shift/Ctrl + fuel)
   bool jet_gear_toggle = false;
   float match_restart_cd = 0.f;
   dalian::HudFeed hud_feed;
@@ -3684,6 +3728,7 @@ int main(int argc, char** argv) {
     bool sam_map_click = false;
     air_stick_moved = false;
     jet_gear_toggle = false;
+    jet_ab_lit = false;
     input.begin_frame();
     // Capture the cursor in-game; free it for deploy/pause menus.
     const bool mouse_look = !deploy_open && !pause_open && !sam_map_open;
@@ -4113,16 +4158,45 @@ int main(int argc, char** argv) {
         }
         const bool w_down = input.down(dalian::GameAction::MoveForward);
         if (in_jet_pilot) {
+          if (jet_ab_rearm_cd > 0.f) jet_ab_rearm_cd = std::max(0.f, jet_ab_rearm_cd - dt);
+          // Wall-clock double-tap (round_time resets on match restart and breaks the window).
           if (w_down && !jet_w_was_down) {
-            const float t = game_sim.state().round_time;
-            if (t - last_jet_w_tap < 0.38f) jet_afterburner = !jet_afterburner;
-            last_jet_w_tap = t;
+            const std::uint32_t tap_now = SDL_GetTicks();
+            if (jet_ab_rearm_cd <= 0.f && last_jet_w_tap_ms != 0 &&
+                (tap_now - last_jet_w_tap_ms) < 380u) {
+              jet_afterburner = !jet_afterburner;
+            }
+            last_jet_w_tap_ms = tap_now;
+            jet_w_hold_armed = false;
           }
-          if (input.down(dalian::GameAction::Crouch)) jet_afterburner = true;
+          if (w_down)
+            jet_w_hold_sec += dt;
+          else {
+            jet_w_hold_sec = 0.f;
+            jet_w_hold_armed = false;
+          }
+          // Hold W ~0.45s while spooled → arm AB once per press (not every frame).
           const float sprint =
               in_vehicle >= 0 ? vehicles[in_vehicle].jet_sprint : 0.f;
-          if (jet_afterburner && sprint <= 0.01f) jet_afterburner = false;
-          if (inp.boost || (jet_afterburner && sprint > 0.01f)) inp.boost = true;
+          if (!jet_w_hold_armed && w_down && jet_w_hold_sec >= 0.45f && jet_ab_rearm_cd <= 0.f &&
+              in_vehicle >= 0 && vehicles[in_vehicle].throttle >= 0.85f && sprint > 0.12f) {
+            jet_afterburner = true;
+            jet_w_hold_armed = true;
+          }
+          // Ctrl / Shift = hold-to-AB; double-tap / long-hold W latch until fuel empty or toggle off.
+          const bool ctrl_ab = input.down(dalian::GameAction::Crouch);
+          if (jet_afterburner && sprint <= 0.01f) {
+            jet_afterburner = false;
+            jet_ab_rearm_cd = 1.25f;  // stop hold-W / fuel edge from strobing HUD
+          }
+          const bool want_ab =
+              inp.boost || ctrl_ab || (jet_afterburner && sprint > 0.01f);
+          inp.boost = want_ab;
+          jet_ab_lit = want_ab && sprint > 0.01f;
+        } else {
+          jet_w_hold_sec = 0.f;
+          jet_w_hold_armed = false;
+          jet_ab_lit = false;
         }
         jet_w_was_down = w_down;
         inp.gear_toggle = jet_gear_toggle;
@@ -4189,8 +4263,7 @@ int main(int argc, char** argv) {
       if (!ambient_emitters.empty()) {
         dalian::step_ambient_emitters(ambient_emitters, smoke, dt);
       }
-      if (in_jet_pilot && jet_afterburner && in_vehicle >= 0 &&
-          vehicles[in_vehicle].jet_sprint > 0.01f) {
+      if (in_jet_pilot && jet_ab_lit && in_vehicle >= 0) {
         const Vehicle& jv = vehicles[in_vehicle];
         for (const glm::vec3& ex : {jv.jet_exhaust_l, jv.jet_exhaust_r}) {
           const glm::vec4 wp = jv.model * glm::vec4(ex, 1.f);
@@ -4249,6 +4322,12 @@ int main(int argc, char** argv) {
         air_pitch_stick = air_roll_stick = 0.f;
         G.air_yaw_stick = 0.f;
         jet_afterburner = false;
+        jet_ab_lit = false;
+        jet_w_hold_sec = 0.f;
+        jet_w_hold_armed = false;
+        jet_ab_rearm_cd = 0.f;
+        last_jet_w_tap_ms = 0;
+        jet_w_was_down = false;
       }
       if (ev.capture_mouse && !deploy_open && !pause_open) {
         SDL_SetRelativeMouseMode(SDL_TRUE);
@@ -5512,11 +5591,20 @@ int main(int argc, char** argv) {
                         spd_kmh, v.rotor_rpm * 100.f);
           renderer.ui_text(30, H - 46, 1.8f, buf, 0.7f, 0.9f, 0.75f, 1.f);
         } else {
-          const bool ab_on = jet_afterburner && v.jet_sprint > 0.01f;
+          const bool ab_on = jet_ab_lit;
           const char* gear =
               v.jet_gear_anim > 0.95f ? "UP" : (v.jet_gear_anim < 0.05f ? "DN" : "...");
-          std::snprintf(buf, sizeof(buf), "ALT %.0f m    SPD %.0f km/h    ENG %.0f%%    AB %.0f%%    GEAR %s",
-                        radar_alt, spd_kmh, v.jet_rpm * 100.f, v.jet_sprint * 100.f, gear);
+          // THR = commanded, ENG = spool. AB% only while lit (was sprint fuel always — looked wrong).
+          if (ab_on) {
+            std::snprintf(buf, sizeof(buf),
+                          "ALT %.0f m    SPD %.0f km/h    THR %.0f%%    ENG %.0f%%    AB %.0f%%    GEAR %s",
+                          radar_alt, spd_kmh, v.throttle * 100.f, v.jet_rpm * 100.f,
+                          v.jet_sprint * 100.f, gear);
+          } else {
+            std::snprintf(buf, sizeof(buf),
+                          "ALT %.0f m    SPD %.0f km/h    THR %.0f%%    ENG %.0f%%    AB OFF    GEAR %s",
+                          radar_alt, spd_kmh, v.throttle * 100.f, v.jet_rpm * 100.f, gear);
+          }
           renderer.ui_text(30, H - 46, 1.8f, buf, ab_on ? 1.f : 0.7f, ab_on ? 0.55f : 0.9f,
                            ab_on ? 0.25f : 0.75f, 1.f);
         }
@@ -5796,10 +5884,10 @@ int main(int argc, char** argv) {
                             "X flares, F1-F2 seats, E exit"
                       : v.is_air
                           ? (v.wheels_on_ground
-                                 ? "W spool engines, double-tap W/Ctrl afterburner, G gear, A/D "
+                                 ? "W spool, hold W/double-tap W/Shift/Ctrl AB, G gear, A/D "
                                    "rudder, pull BACK after ~72 km/h to rotate, E exit"
-                                 : "W/S throttle, mouse pitch/roll, double-tap W/Ctrl afterburner, "
-                                   "G gear, A/D rudder, E exit")
+                                 : "W/S throttle, hold W/double-tap W/Shift/Ctrl AB, mouse "
+                                   "pitch/roll, G gear, A/D rudder, E exit")
                           : "W/S drive, A/D steer, Shift boost, F1-F3 seats, E exit");
       } else {
         std::snprintf(title, sizeof(title),

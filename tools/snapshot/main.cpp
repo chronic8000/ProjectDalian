@@ -393,6 +393,7 @@ int render_textured_to_png(bf2::ResourceManager& resources, const bf2::TexturedM
     gpu.submeshes[i].normal_tex = textures.get(data.submeshes[i].normal_map);
     gpu.submeshes[i].dirt_tex = textures.get(data.submeshes[i].dirt_map);
     gpu.submeshes[i].crack_tex = textures.get(data.submeshes[i].crack_map);
+    gpu.submeshes[i].specular_tex = textures.get(data.submeshes[i].specular_map);
   }
   std::cout << "Textures loaded " << textures.loaded_count() << ", missing "
             << textures.missing_count() << '\n';
@@ -717,6 +718,7 @@ int render_object_lightmap_to_png(const std::string& objects_zip, const std::str
     gpu.submeshes[i].normal_tex = textures.get(data.submeshes[i].normal_map);
     gpu.submeshes[i].dirt_tex = textures.get(data.submeshes[i].dirt_map);
     gpu.submeshes[i].crack_tex = textures.get(data.submeshes[i].crack_map);
+    gpu.submeshes[i].specular_tex = textures.get(data.submeshes[i].specular_map);
   }
 
   std::uint32_t lm_tex = 0;

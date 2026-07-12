@@ -27,6 +27,11 @@ if (state_.in_vehicle >= 0 && state_.in_vehicle < static_cast<int>(state_.vehicl
     v.pitch = 0.f;
     v.roll = 0.f;
     v.vel = glm::vec3(0.f);
+    v.throttle = 0.f;
+    v.jet_rpm = 0.f;
+    v.jet_airborne = false;
+    v.wheels_on_ground = true;
+    v.jet_gear_down = true;
     rebuild_vehicle_model(v);
   }
   for (auto& s : v.seats) s.occupant = -1;
@@ -72,6 +77,15 @@ if (nv.is_air) {
   nv.roll = 0.f;
   nv.vel = glm::vec3(0.f);
   nv.throttle = 0.f;
+  nv.jet_rpm = 0.f;
+  // Snap to apron so a leftover jet_airborne flag can't freefall a parked airframe.
+  if (!nv.is_heli) {
+    const float floor_y = air_floor_y(nv);
+    nv.pos.y = floor_y;
+    nv.jet_airborne = false;
+    nv.jet_gear_down = true;
+    nv.jet_gear_anim = 0.f;
+  }
   nv.wheels_on_ground = true;
   state_.air_input_grace = 0.35f;
 }

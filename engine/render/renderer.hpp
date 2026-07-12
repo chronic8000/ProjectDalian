@@ -28,6 +28,7 @@ struct GpuSubmesh {
   std::uint32_t normal_tex = 0;
   std::uint32_t dirt_tex = 0;
   std::uint32_t crack_tex = 0;
+  std::uint32_t specular_tex = 0;  // BF2 *_s gloss map (0 = use diffuse alpha)
   bool cutout = false;  // base texture is an alpha cutout mask (foliage/fence)
   bool track_uv = false;  // scroll base UVs when the vehicle moves (tank treads)
   bool track_uv_axis_v = true;  // false = scroll U, true = scroll V (BF2 TranslationMax)
@@ -341,8 +342,8 @@ private:
   int bloom_h_ = 0;
   bool bloom_float_ = false;  // last bloom allocation used float colour
   bool bloom_enabled_ = true;
-  float bloom_intensity_ = 0.55f;
-  float bloom_threshold_ = 0.85f;
+  float bloom_intensity_ = 0.28f;
+  float bloom_threshold_ = 1.05f;
   int anisotropic_ = 4;
   float mip_lod_bias_ = 0.f;
   int max_texture_size_ = 2048;  // 0 = unlimited; default caps 4K remasters

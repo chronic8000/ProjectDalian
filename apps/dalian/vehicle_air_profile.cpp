@@ -302,8 +302,8 @@ void apply_vehicle_air_profile(Vehicle& v, const VehicleAirProfile& p) {
   v.regulate_to_lift = std::max(0.4f, p.regulate_to_lift);
   v.wing_to_regulator = std::max(0.2f, p.wing_to_regulator);
   v.automatic_reset = std::clamp(p.automatic_reset, 0.f, 1.f);
-  v.jet_pitch_rate = std::clamp(p.jet_pitch_rate, 1.5f, 8.f);
-  v.jet_roll_rate = std::clamp(p.jet_roll_rate, 1.5f, 8.f);
+  v.jet_pitch_rate = std::clamp(p.jet_pitch_rate, 1.5f, 12.f);
+  v.jet_roll_rate = std::clamp(p.jet_roll_rate, 1.5f, 12.f);
   v.jet_bank_turn_gain = std::clamp(p.jet_bank_turn_gain, 20.f, 90.f);
   v.elevator_z_offset = p.elevator_z_offset < -0.5f ? p.elevator_z_offset : -5.5f;
   v.aileron_x_offset = p.aileron_x_offset > 0.5f ? p.aileron_x_offset : 3.2f;
