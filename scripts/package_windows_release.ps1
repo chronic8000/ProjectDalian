@@ -56,8 +56,8 @@ No EA/DICE game data is included.
 
 1. Unzip anywhere (e.g. C:\Games\ProjectDalian).
 2. Run project_dalian.exe
-3. In Options, set your BF2 install path if auto-detect fails
-   (default: C:\Program Files (x86)\Battlefield2)
+3. Options → BF2 INSTALL PATH: Change (folder dialog) or Rescan (EA App / Program Files).
+   Pick the folder that contains mods\ (e.g. ...\Battlefield 2).
 4. Pick a map from the main menu and play.
 
 MIM-23 Hawk (Dalian Plant 64 CQ): orange minimap blip near the Chinese heli

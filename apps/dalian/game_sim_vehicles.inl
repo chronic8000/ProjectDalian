@@ -277,7 +277,7 @@ if (v.is_air && v.is_heli) {
     }
     horiz_spd = glm::clamp(horiz_spd, 0.f, ab_active ? jet_max_ground * 1.12f : jet_max_ground);
 
-    const float rudder = 34.f * glm::clamp(horiz_spd / 14.f, 0.f, 1.f);
+    const float rudder = 42.f * glm::clamp(horiz_spd / 10.f, 0.2f, 1.f);
     v.heading += yaw_in * rudder * step;
     flat_fwd = glm::vec3(std::sin(glm::radians(v.heading)), 0.f, std::cos(glm::radians(v.heading)));
 
@@ -318,13 +318,13 @@ if (v.is_air && v.is_heli) {
     const float turn_speed_factor = jet_turn_authority(airspeed, jet_cruise, jet_max_air);
     float ctrl = turn_speed_factor * glm::clamp(q, 0.2f, 1.35f) / inertia;
 
-    // Flap deflection → attitude. Torque arms from PositionOffset (§7.1):
-    // elevators aft (Z) pitch the nose; ailerons outboard (X) roll the jet.
+    // Flap deflection → attitude. Torque arms from PositionOffset (§7.1).
+    // Pitch target softer than before so elevator stick isn't an on/off flip.
     const float elev_arm = glm::clamp(-v.elevator_z_offset / 5.5f, 0.55f, 1.6f);
     const float ail_arm = glm::clamp(v.aileron_x_offset / 3.2f, 0.55f, 1.6f);
-    const float pitch_target = state_.air_pitch_stick * 48.f;
+    const float pitch_target = state_.air_pitch_stick * 36.f;
     const float roll_target = -state_.air_roll_stick * 58.f;
-    v.pitch = approach(v.pitch, pitch_target, v.jet_pitch_rate * ctrl * elev_arm);
+    v.pitch = approach(v.pitch, pitch_target, v.jet_pitch_rate * ctrl * elev_arm * 0.85f);
     v.roll = approach(v.roll, roll_target, v.jet_roll_rate * ctrl * ail_arm);
 
     if (stick_neutral && driving && v.automatic_reset > 0.2f) {
@@ -350,9 +350,13 @@ if (v.is_air && v.is_heli) {
 
     const float bank_turn = std::sin(glm::radians(v.roll)) * v.jet_bank_turn_gain *
                             glm::clamp(horiz_spd / 28.f, 0.25f, 1.f) * turn_speed_factor;
-    const float rudder_air =
-        10.f * ctrl * glm::clamp(1.f - horiz_spd / (jet_cruise * 1.2f), 0.12f, 1.f) *
-        glm::mix(1.f, 0.45f, glm::clamp(horiz_spd / jet_cruise, 0.f, 1.f));
+    // Rudder (A/D → air_yaw_stick). Was effectively dead at cruise (~1°/s).
+    // Keep mild high-speed falloff (tail/streamlining) but stay useful for coordination.
+    const float rudder_spd = glm::clamp(horiz_spd / 16.f, 0.4f, 1.f);
+    const float rudder_hi =
+        glm::mix(1.f, 0.55f, glm::clamp((horiz_spd - jet_cruise * 0.85f) / (jet_max_air * 0.5f), 0.f, 1.f));
+    const float rudder_air = (26.f / inertia) * rudder_spd * rudder_hi *
+                             glm::clamp(turn_speed_factor * 0.85f + 0.35f, 0.45f, 1.15f);
     v.heading += (bank_turn + yaw_in * rudder_air) * step;
     flat_fwd = glm::vec3(std::sin(glm::radians(v.heading)), 0.f, std::cos(glm::radians(v.heading)));
 
@@ -376,7 +380,7 @@ if (v.is_air && v.is_heli) {
     const float lift_cap = v.regulate_to_lift * v.wing_to_regulator;
     lift_raw = std::min(lift_raw, lift_cap);
     const float wing_lift = lift_raw * kGravity * glm::max(0.28f, std::cos(pitch_rad * 0.55f));
-    const float flap_climb = state_.air_pitch_stick * kFlapLift * glm::clamp(q, 0.25f, 1.4f) * 0.55f;
+    const float flap_climb = state_.air_pitch_stick * kFlapLift * glm::clamp(q, 0.25f, 1.4f) * 0.38f;
     const float pitch_climb = std::sin(pitch_rad) * horiz_spd * 0.32f;
     float vy_acc = wing_lift + flap_climb + pitch_climb - kGravity;
     if (ab_active) vy_acc += 2.5f;

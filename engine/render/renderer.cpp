@@ -1793,6 +1793,7 @@ std::uint32_t Renderer::upload_texture(const DdsTexture& texture, bool mipmaps) 
 
   const GLsizei w = static_cast<GLsizei>(texture.width);
   const GLsizei h = static_cast<GLsizei>(texture.height);
+  const int max_edge = max_texture_size_ > 0 ? max_texture_size_ : 0;
 
   GLuint id = 0;
   glGenTextures(1, &id);
@@ -1803,8 +1804,37 @@ std::uint32_t Renderer::upload_texture(const DdsTexture& texture, bool mipmaps) 
 
   if (texture.format == DdsFormat::RGBA8) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE,
-                 texture.pixels.data());
+    // Uncompressed path is rare; still honour the cap via simple subsample upload
+    // when oversize (keeps VRAM from exploding on remastered RGBA dumps).
+    if (max_edge > 0 && (w > max_edge || h > max_edge)) {
+      const int scale = std::max((w + max_edge - 1) / max_edge, (h + max_edge - 1) / max_edge);
+      const GLsizei dw = std::max(1, w / scale);
+      const GLsizei dh = std::max(1, h / scale);
+      std::vector<std::uint8_t> small(static_cast<std::size_t>(dw) * static_cast<std::size_t>(dh) *
+                                      4u);
+      for (GLsizei y = 0; y < dh; ++y) {
+        for (GLsizei x = 0; x < dw; ++x) {
+          const GLsizei sx = std::min(w - 1, x * scale);
+          const GLsizei sy = std::min(h - 1, y * scale);
+          const std::size_t si =
+              (static_cast<std::size_t>(sy) * static_cast<std::size_t>(w) +
+               static_cast<std::size_t>(sx)) *
+              4u;
+          const std::size_t di =
+              (static_cast<std::size_t>(y) * static_cast<std::size_t>(dw) +
+               static_cast<std::size_t>(x)) *
+              4u;
+          small[di] = texture.pixels[si];
+          small[di + 1] = texture.pixels[si + 1];
+          small[di + 2] = texture.pixels[si + 2];
+          small[di + 3] = texture.pixels[si + 3];
+        }
+      }
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, dw, dh, 0, GL_BGRA, GL_UNSIGNED_BYTE, small.data());
+    } else {
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE,
+                   texture.pixels.data());
+    }
   } else {
     GLenum gl_format = 0;
     std::size_t block_bytes = 16;
@@ -1824,28 +1854,39 @@ std::uint32_t Renderer::upload_texture(const DdsTexture& texture, bool mipmaps) 
         return 0;
     }
 
-    // Upload the DXT data compressed (keeps VRAM low) with every mip level stored
-    // in the file, so distant surfaces get proper trilinear + anisotropic
-    // filtering without an ~8x memory blow-up.
-    const GLint mip_count = mipmaps ? static_cast<GLint>(texture.mip_count > 0 ? texture.mip_count : 1)
-                                    : 1;  // alpha-test atlases: base level only
+    // Upload DXT compressed. Skip file mips larger than max_texture_size_ so
+    // 4K remasters land as 2K/1K GPU textures (huge VRAM + bandwidth win).
+    const GLint file_mips =
+        mipmaps ? static_cast<GLint>(texture.mip_count > 0 ? texture.mip_count : 1) : 1;
     std::size_t offset = 0;
     GLsizei level_w = w;
     GLsizei level_h = h;
+    GLint file_level = 0;
+    for (; file_level < file_mips; ++file_level) {
+      const std::size_t level_size = static_cast<std::size_t>((level_w + 3) / 4) *
+                                     static_cast<std::size_t>((level_h + 3) / 4) * block_bytes;
+      if (offset + level_size > texture.pixels.size()) break;
+      const bool fits =
+          max_edge <= 0 || (level_w <= max_edge && level_h <= max_edge);
+      if (fits) break;
+      offset += level_size;
+      if (level_w == 1 && level_h == 1) break;
+      level_w = level_w > 1 ? level_w / 2 : 1;
+      level_h = level_h > 1 ? level_h / 2 : 1;
+    }
+
     GLint uploaded = 0;
-    for (GLint level = 0; level < mip_count; ++level) {
+    for (; file_level < file_mips; ++file_level) {
       const std::size_t level_size = static_cast<std::size_t>((level_w + 3) / 4) *
                                      static_cast<std::size_t>((level_h + 3) / 4) * block_bytes;
       if (offset + level_size > texture.pixels.size()) {
-        break;  // truncated file; stop at the last complete level
+        break;
       }
-      glCompressedTexImage2D(GL_TEXTURE_2D, level, gl_format, level_w, level_h, 0,
+      glCompressedTexImage2D(GL_TEXTURE_2D, uploaded, gl_format, level_w, level_h, 0,
                              static_cast<GLsizei>(level_size), texture.pixels.data() + offset);
       offset += level_size;
       ++uploaded;
-      if (level_w == 1 && level_h == 1) {
-        break;
-      }
+      if (level_w == 1 && level_h == 1) break;
       level_w = level_w > 1 ? level_w / 2 : 1;
       level_h = level_h > 1 ? level_h / 2 : 1;
     }
@@ -2657,6 +2698,16 @@ void Renderer::set_shadows_enabled(bool enabled) {
 
 void Renderer::set_anisotropic(int level) {
   anisotropic_ = std::clamp(level, 1, 16);
+  if (!GLEW_EXT_texture_filter_anisotropic) return;
+  GLfloat max_aniso = 1.f;
+  glGetFloatv(0x84FF /*GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT*/, &max_aniso);
+  const GLfloat aniso = std::min(static_cast<GLfloat>(anisotropic_), max_aniso);
+  for (std::uint32_t id : tracked_textures_) {
+    if (id == 0) continue;
+    glBindTexture(GL_TEXTURE_2D, id);
+    glTexParameterf(GL_TEXTURE_2D, 0x84FE /*GL_TEXTURE_MAX_ANISOTROPY_EXT*/, aniso);
+  }
+  glBindTexture(GL_TEXTURE_2D, 0);
 }
 
 void Renderer::set_mip_lod_bias(float bias) {
@@ -2667,6 +2718,15 @@ void Renderer::set_mip_lod_bias(float bias) {
     glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, mip_lod_bias_);
   }
   glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+void Renderer::set_max_texture_size(int max_edge) {
+  if (max_edge <= 0) {
+    max_texture_size_ = 0;
+    return;
+  }
+  // Power-of-two friendly clamp; 256 floor avoids destroying tiny UI/atlas mips.
+  max_texture_size_ = std::clamp(max_edge, 256, 8192);
 }
 
 void Renderer::set_upscale_mode(int mode) {

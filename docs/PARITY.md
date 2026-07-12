@@ -1,6 +1,6 @@
 # Parity status (Project Dalian vs retail BF2)
 
-Last updated: **2026-07-11** (v0.5.17-alpha line)
+Last updated: **2026-07-11** (v0.5.17-alpha line + HD texture FPS triage)
 
 This document tracks what is implemented, what is partial, and what is still missing.
 **Does not claim full BF2 parity** — several combat, flight, networking, and
@@ -32,6 +32,7 @@ world-placement areas remain open.
 | Vehicle ground contact | Clearance heuristic; tires can embed on roads — road/bridge collision improved |
 | Walk/drive through props | **Fixed for most meshes** — bundledmesh collision + compiled-road render fallback; some gaps remain |
 | Graphics post | **HDR RGB16F + ACES tone map + SSAO + bloom** shipped; water SSR still open |
+| HD texture packs | **Max texture size** cap (default 2048), mip LOD bias, live aniso; no streaming/eviction yet |
 
 ## Not started / backlog
 

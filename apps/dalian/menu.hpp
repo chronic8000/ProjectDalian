@@ -55,7 +55,7 @@ MapEntry resolve_map_entry(const std::vector<MapEntry>& maps, const std::string&
                            const std::string& display_name);
 
 MenuResult run_main_menu(SDL_Window* window, bf2::Renderer& renderer, Settings& settings,
-                         const std::vector<MapEntry>& maps);
+                         std::vector<MapEntry>& maps);
 
 PauseResult run_pause_overlay(SDL_Window* window, bf2::Renderer& renderer, Settings& settings,
                               int& screen_w, int& screen_h, bool* options_open);

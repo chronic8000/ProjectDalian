@@ -32,14 +32,16 @@ struct Settings {
   float draw_distance = 8000.f;
   float fog_scale = 1.15f;
   // Internal 3D resolution vs window (1 = native). Biggest FPS lever on all GPUs.
-  float render_scale = 0.85f;
+  float render_scale = 0.75f;
   // 0=Bilinear, 1=FSR1 (EASU+RCAS), 2=Auto (→ FSR1 on OpenGL; DLSS/XeSS later).
   // Bilinear default — FSR can look like scanlines on weak Intel/AMD laptop GPUs.
   int upscale_mode = 0;
   float fsr_sharpness = 0.2f;  // RCAS stops: 0=max sharp, 2=soft
   // Positive = prefer cheaper/blurrier mips (helps HD texture packs).
-  float mip_lod_bias = 0.35f;
-  float shadow_distance = 1400.f;  // world metres covered by cascades
+  float mip_lod_bias = 0.5f;
+  // Cap uploaded texture edge (0 = unlimited). Default 2048: 4K HD packs → 2K GPU.
+  int max_texture_size = 2048;
+  float shadow_distance = 1200.f;  // world metres covered by cascades
   bool grass_enabled = true;
   float grass_distance = 55.f;
   bool bloom = true;
@@ -52,7 +54,7 @@ struct Settings {
   float output_brightness = 1.f;
   bool ssao = false;             // expensive; off by default for playable FPS
   bool shadows_enabled = true;
-  int shadow_res = 2048;         // 4096 is very heavy with remastered textures
+  int shadow_res = 1024;         // 2048+ is heavy with remastered textures
   int anisotropic = 4;           // 8–16 is costly with remastered albedo
   float master_volume = 1.f;
   float sfx_volume = 1.f;
@@ -105,6 +107,10 @@ struct Settings {
         s.fsr_sharpness = std::clamp(static_cast<float>(std::atof(val.c_str())), 0.f, 2.f);
       else if (key == "mip_lod_bias")
         s.mip_lod_bias = std::clamp(static_cast<float>(std::atof(val.c_str())), -2.f, 2.f);
+      else if (key == "max_texture_size") {
+        const int v = std::atoi(val.c_str());
+        s.max_texture_size = v <= 0 ? 0 : std::clamp(v, 256, 8192);
+      }
       else if (key == "shadow_distance")
         s.shadow_distance = std::clamp(static_cast<float>(std::atof(val.c_str())), 200.f, 4000.f);
       else if (key == "grass_enabled") s.grass_enabled = val == "1" || val == "true";
@@ -184,6 +190,7 @@ struct Settings {
     out << "upscale_mode=" << upscale_mode << '\n';
     out << "fsr_sharpness=" << fsr_sharpness << '\n';
     out << "mip_lod_bias=" << mip_lod_bias << '\n';
+    out << "max_texture_size=" << max_texture_size << '\n';
     out << "shadow_distance=" << shadow_distance << '\n';
     out << "grass_enabled=" << (grass_enabled ? 1 : 0) << '\n';
     out << "grass_distance=" << grass_distance << '\n';
@@ -236,6 +243,10 @@ struct Settings {
     if (const char* ia = std::getenv("BF2_INVERTAIR"))
       invert_air = ia[0] == '1' || ia[0] == 't' || ia[0] == 'T' || ia[0] == 'y' ||
                    ia[0] == 'Y' || ia[0] == 'o' || ia[0] == 'O';
+    if (const char* tm = std::getenv("BF2_TEXMAX")) {
+      const int v = std::atoi(tm);
+      max_texture_size = v <= 0 ? 0 : std::clamp(v, 256, 8192);
+    }
   }
 
   // Safe path for weak Intel/old laptop GPUs: no float HDR buffers, no FSR, cheap shadows.
@@ -250,6 +261,7 @@ struct Settings {
     anisotropic = 2;
     grass_enabled = false;
     mip_lod_bias = 0.75f;
+    max_texture_size = 1024;
     shadow_distance = 800.f;
     draw_distance = 4000.f;
   }

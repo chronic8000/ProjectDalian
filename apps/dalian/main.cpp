@@ -856,11 +856,10 @@ int main(int argc, char** argv) {
   dalian::apply_graphics_settings(renderer, settings);
   renderer.reload_shadow_res(settings.shadow_res);
 
-  const std::string bf2_root =
-      dalian::resolve_bf2_root(settings, argc >= 2 ? argv[1] : nullptr);
-  std::vector<dalian::MapEntry> map_list = dalian::scan_maps(bf2_root);
-  std::cout << "Found " << map_list.size() << " maps under " << (bf2_root.empty() ? "?" : bf2_root)
-            << '\n';
+  dalian::resolve_bf2_root(settings, argc >= 2 ? argv[1] : nullptr);
+  std::vector<dalian::MapEntry> map_list = dalian::scan_maps(settings.bf2_root);
+  std::cout << "Found " << map_list.size() << " maps under "
+            << (settings.bf2_root.empty() ? "?" : settings.bf2_root) << '\n';
 
   bool app_running = true;
   while (app_running) {
@@ -876,6 +875,8 @@ int main(int argc, char** argv) {
       session_mp = mr.mp;
       session_net = std::move(mr.net);
     }
+
+    const std::string bf2_root = settings.bf2_root;
 
     dalian::LoadingScreen loading_scr;
     if (!headless_shot) loading_scr.start_music(settings);
@@ -4150,7 +4151,7 @@ int main(int argc, char** argv) {
       inp.air_yaw_stick = G.air_yaw_stick;
       inp.air_mouse_dx = air_mouse_dx_accum;
       inp.air_mouse_dy = air_mouse_dy_accum;
-      inp.air_mouse_sens = sensitivity / 0.12f;
+      inp.air_mouse_sens = glm::clamp(sensitivity / 0.18f, 0.4f, 1.35f);
       inp.air_throttle_delta = air_throttle_wheel_accum;
       inp.air_stick_moved = air_stick_moved;
       air_mouse_dx_accum = 0.f;

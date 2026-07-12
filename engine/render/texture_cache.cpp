@@ -30,22 +30,28 @@ std::uint32_t TextureCache::get(const std::string& bf2_path, const std::string& 
       const DdsTexture tex = DdsLoader::load_from_memory(*bytes);
       id = renderer_.upload_texture(tex);
       if (id != 0) {
-        try {
-          const DdsTexture rgba = DdsLoader::decode_to_rgba8(tex);
-          const std::size_t px = rgba.pixels.size() / 4;
-          std::size_t clear = 0;
-          std::size_t soft = 0;
-          for (std::size_t i = 0; i < px; ++i) {
-            const std::uint8_t a = rgba.pixels[i * 4 + 3];
-            if (a < 32) ++clear;
-            if (a < 96) ++soft;
+        // Full DXT→RGBA decode of 2K/4K remasters stalls load and spikes RAM.
+        // Only run cutout heuristics on modest textures (typical foliage sheets).
+        const std::uint64_t px_est =
+            static_cast<std::uint64_t>(tex.width) * static_cast<std::uint64_t>(tex.height);
+        if (px_est > 0 && px_est <= 512ull * 512ull) {
+          try {
+            const DdsTexture rgba = DdsLoader::decode_to_rgba8(tex);
+            const std::size_t px = rgba.pixels.size() / 4;
+            std::size_t clear = 0;
+            std::size_t soft = 0;
+            for (std::size_t i = 0; i < px; ++i) {
+              const std::uint8_t a = rgba.pixels[i * 4 + 3];
+              if (a < 32) ++clear;
+              if (a < 96) ++soft;
+            }
+            const double fc = px ? static_cast<double>(clear) / px : 0.0;
+            const double fs = px ? static_cast<double>(soft) / px : 0.0;
+            if (fc > 0.02 || fs > 0.06) {
+              cutout_.insert(id);
+            }
+          } catch (...) {
           }
-          const double fc = px ? static_cast<double>(clear) / px : 0.0;
-          const double fs = px ? static_cast<double>(soft) / px : 0.0;
-          if (fc > 0.02 || fs > 0.06) {
-            cutout_.insert(id);
-          }
-        } catch (...) {
         }
         break;
       }

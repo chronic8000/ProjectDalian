@@ -809,7 +809,7 @@ void GameSim::decay_sticks(float dt, const PlayerInput& input) {
   float yaw_target = 0.f;
   if (input.yaw_left) yaw_target -= 1.f;
   if (input.yaw_right) yaw_target += 1.f;
-  const float yaw_rate = yaw_target != 0.f ? 6.f : 4.5f;
+  const float yaw_rate = yaw_target != 0.f ? 9.f : 5.5f;
   state_.air_yaw_stick += (yaw_target - state_.air_yaw_stick) * std::min(1.f, yaw_rate * dt);
   if (std::fabs(state_.air_yaw_stick) < 0.01f) state_.air_yaw_stick = 0.f;
 
@@ -848,18 +848,25 @@ void GameSim::absorb_air_mouse(const PlayerInput& input) {
   if (std::fabs(dx) < 1e-8f && std::fabs(dy) < 1e-8f) return;
 
   const float inv = input.invert_air ? -1.f : 1.f;
-  const float sens = std::max(0.25f, input.air_mouse_sens);
-  const float pitch_sens = (av.is_heli ? 0.020f : 0.032f) * sens;
-  const float roll_sens = (av.is_heli ? 0.016f : 0.018f) * sens;
+  // Axis-specific gains (research §2.1). Pitch is deliberately softer than roll —
+  // infantry look sens must not slam elevators to ±1 on a short flick.
+  const float sens = glm::clamp(input.air_mouse_sens, 0.35f, 1.5f);
+  const float pitch_sens = (av.is_heli ? 0.011f : 0.0085f) * sens;
+  const float roll_sens = (av.is_heli ? 0.013f : 0.014f) * sens;
   const float ground_pitch_scale =
-      (!av.is_heli && av.wheels_on_ground && !av.jet_airborne) ? 0.28f : 1.f;
+      (!av.is_heli && av.wheels_on_ground && !av.jet_airborne) ? 0.22f : 1.f;
 
-  state_.air_pitch_stick =
-      std::clamp(state_.air_pitch_stick + dy * pitch_sens * inv * ground_pitch_scale, -1.f, 1.f);
+  // Cap stick delta per absorb so high-polling mice can't dump a full ±1 in one frame.
+  float dp = dy * pitch_sens * inv * ground_pitch_scale;
+  float dr = dx * roll_sens;
+  dp = glm::clamp(dp, -0.16f, 0.16f);
+  dr = glm::clamp(dr, -0.20f, 0.20f);
+
+  state_.air_pitch_stick = std::clamp(state_.air_pitch_stick + dp, -1.f, 1.f);
   if (av.is_heli) {
-    state_.air_roll_stick = std::clamp(state_.air_roll_stick + dx * roll_sens, -1.f, 1.f);
+    state_.air_roll_stick = std::clamp(state_.air_roll_stick + dr, -1.f, 1.f);
   } else if (!av.wheels_on_ground || av.jet_airborne) {
-    state_.air_roll_stick = std::clamp(state_.air_roll_stick - dx * roll_sens, -1.f, 1.f);
+    state_.air_roll_stick = std::clamp(state_.air_roll_stick - dr, -1.f, 1.f);
   }
 }
 

@@ -234,6 +234,10 @@ public:
   void set_anisotropic(int level);
   // Positive bias = blurrier/cheaper mips (good with HD textures); negative = sharper.
   void set_mip_lod_bias(float bias);
+  // Cap longest edge at upload (0 = unlimited). Skips oversized DDS mips — biggest
+  // HD-pack VRAM lever. Requires map reload to affect already-cached textures.
+  void set_max_texture_size(int max_edge);
+  int max_texture_size() const { return max_texture_size_; }
   // 0 = bilinear stretch, 1 = FSR1 EASU+RCAS, 2 = Auto (→ FSR1 on OpenGL).
   void set_upscale_mode(int mode);
   // RCAS sharpness in AMD "stops" (0 = max sharp, ~2 = soft). Typical 0.2.
@@ -341,6 +345,7 @@ private:
   float bloom_threshold_ = 0.85f;
   int anisotropic_ = 4;
   float mip_lod_bias_ = 0.f;
+  int max_texture_size_ = 2048;  // 0 = unlimited; default caps 4K remasters
   int upscale_mode_ = 1;  // SpatialFsr by default when render_scale < 1
   float fsr_sharpness_ = 0.2f;
   std::vector<std::uint32_t> tracked_textures_;

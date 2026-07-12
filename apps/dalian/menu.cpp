@@ -1,5 +1,6 @@
 #include "menu.hpp"
 
+#include "bf2_path.hpp"
 #include "controls_ui.hpp"
 #include "menu_background.hpp"
 #include "menu_music.hpp"
@@ -74,6 +75,34 @@ bool draw_button(bf2::Renderer& r, int mx, int my, float x, float y, float w, fl
     r.ui_text(x + (w - tw) * 0.5f, y + (h - 16) * 0.5f, 1.6f, label, 0.9f, 0.92f, 0.94f, 1.f);
   }
   return hov;
+}
+
+// One-line BF2 path + Change (folder dialog) + Rescan. Returns true if root changed.
+bool draw_bf2_install_path_row(SDL_Window* window, bf2::Renderer& r, Settings& settings, int mx,
+                               int my, bool clicked, float x, float y, float path_w) {
+  r.ui_text(x, y, 1.2f, "BF2 INSTALL PATH", 0.75f, 0.78f, 0.82f, 1.f);
+  const bool ok = is_valid_bf2_root(settings.bf2_root);
+  const char* shown =
+      settings.bf2_root.empty() ? "(not set — use Change or Rescan)" : settings.bf2_root.c_str();
+  draw_clipped_text(r, x, y + 22, path_w, 1.1f, shown, ok ? 0.55f : 0.9f, ok ? 0.58f : 0.5f,
+                    ok ? 0.62f : 0.42f, 1.f);
+  bool changed = false;
+  const float bx = x + path_w + 8.f;
+  if (draw_button(r, mx, my, bx, y + 12, 110, 36, "CHANGE") && clicked) {
+    const std::string picked = browse_bf2_install_folder(window);
+    if (!picked.empty()) {
+      if (apply_bf2_root(settings, picked))
+        changed = true;
+      else
+        std::cerr << "Pick the Battlefield 2 root folder (the one that contains mods/).\n";
+    }
+  }
+  if (draw_button(r, mx, my, bx + 118.f, y + 12, 110, 36, "RESCAN") && clicked) {
+    settings.bf2_root.clear();
+    resolve_bf2_root(settings, nullptr);
+    changed = true;
+  }
+  return changed;
 }
 
 bool draw_checkbox(bf2::Renderer& r, int mx, int my, float x, float y, const char* label,
@@ -307,6 +336,31 @@ void draw_options_content(bf2::Renderer& r, Settings& settings, OptTab tab, int 
     }
     row_slider("FSR SHARPNESS", settings.fsr_sharpness, 0.f, 2.f, "(0=sharp, 2=soft)");
     row_slider("MIP LOD BIAS", settings.mip_lod_bias, -1.f, 2.f, "(+ = cheaper HD mips)");
+    {
+      // Cycle: unlimited → 4096 → 2048 → 1024 → 512
+      const int tex_steps[] = {0, 4096, 2048, 1024, 512};
+      int tex_idx = 2;
+      for (int i = 0; i < 5; ++i) {
+        if (settings.max_texture_size == tex_steps[i]) {
+          tex_idx = i;
+          break;
+        }
+      }
+      char tex_label[32];
+      if (settings.max_texture_size <= 0)
+        std::snprintf(tex_label, sizeof(tex_label), "OFF (full)");
+      else
+        std::snprintf(tex_label, sizeof(tex_label), "%d", settings.max_texture_size);
+      if (visible(y, 54.f)) {
+        r.ui_text(ox, y, 1.3f, "MAX TEXTURE SIZE", 0.75f, 0.78f, 0.82f, 1.f);
+        if (draw_button(r, mx, my, ox, y + 22, 140, 32, tex_label) && gclick) {
+          tex_idx = (tex_idx + 1) % 5;
+          settings.max_texture_size = tex_steps[tex_idx];
+        }
+        r.ui_text(ox + 155, y + 30, 1.05f, "(HD packs: reload map)", 0.55f, 0.58f, 0.62f, 1.f);
+      }
+      y += 62;
+    }
     row_check("GRASS", settings.grass_enabled);
     row_slider("GRASS DISTANCE", settings.grass_distance, 10.f, 160.f);
     row_check("BLOOM", settings.bloom);
@@ -451,36 +505,6 @@ void draw_options_popups(bf2::Renderer& r, Settings& settings, OptTab tab, int m
 
 }  // namespace
 
-std::string resolve_bf2_root(Settings& settings, const char* argv1) {
-  if (!settings.bf2_root.empty() && std::filesystem::is_directory(settings.bf2_root))
-    return settings.bf2_root;
-  if (argv1) {
-    std::string p = argv1;
-    for (char& c : p)
-      if (c == '\\') c = '/';
-    const auto pos = p.find("/mods/");
-    if (pos != std::string::npos) {
-      settings.bf2_root = p.substr(0, pos);
-      settings.save();
-      return settings.bf2_root;
-    }
-  }
-  const char* probes[] = {
-      "C:/Program Files (x86)/Battlefield2",
-      "C:/Program Files/Battlefield2",
-      "D:/Games/Battlefield 2",
-  };
-  for (const char* probe : probes) {
-    const auto mods = std::filesystem::path(probe) / "mods";
-    if (std::filesystem::is_directory(mods)) {
-      settings.bf2_root = probe;
-      settings.save();
-      return settings.bf2_root;
-    }
-  }
-  return {};
-}
-
 std::vector<MapEntry> scan_maps(const std::string& bf2_root) {
   std::vector<MapEntry> out;
   if (bf2_root.empty()) return out;
@@ -560,6 +584,7 @@ void apply_graphics_settings(bf2::Renderer& renderer, Settings& settings) {
   renderer.set_shadows_enabled(settings.shadows_enabled);
   renderer.set_anisotropic(settings.anisotropic);
   renderer.set_mip_lod_bias(settings.mip_lod_bias);
+  renderer.set_max_texture_size(settings.max_texture_size);
   renderer.set_upscale_mode(settings.upscale_mode);
   renderer.set_fsr_sharpness(settings.fsr_sharpness);
 }
@@ -652,6 +677,7 @@ bool run_options_panel(SDL_Window* window, bf2::Renderer& renderer, Settings& se
                          anchors, controls_scroll, graphics_scroll, rebind_action, capture_key);
     // Cover scrolled graphics rows so they don't bleed into APPLY / CANCEL.
     renderer.ui_rect(48, H - 130, W - 96, 90, 0.06f, 0.07f, 0.08f, 1.f);
+    draw_bf2_install_path_row(window, renderer, settings, mx, my, clicked, 60, H - 125, W - 520.f);
     const float bx = W - 220, by = H - 100;
     if (draw_button(renderer, mx, my, bx, by, 160, 40, "APPLY", true) && clicked) {
       settings.save();
@@ -673,7 +699,7 @@ bool run_options_panel(SDL_Window* window, bf2::Renderer& renderer, Settings& se
 }
 
 MenuResult run_main_menu(SDL_Window* window, bf2::Renderer& renderer, Settings& settings,
-                         const std::vector<MapEntry>& maps) {
+                         std::vector<MapEntry>& maps) {
   // Free/show the cursor (a prior game session may have captured it).
   SDL_SetRelativeMouseMode(SDL_FALSE);
   SDL_ShowCursor(SDL_ENABLE);
@@ -817,8 +843,15 @@ MenuResult run_main_menu(SDL_Window* window, bf2::Renderer& renderer, Settings& 
                           1.f);
       } else {
         renderer.ui_text(dx, ly, 1.6f, "No maps found.", 0.7f, 0.72f, 0.75f, 1.f);
-        renderer.ui_text(dx, ly + 28, 1.2f, "Set BF2 install path in Options or launch with a map path.",
-                          0.55f, 0.58f, 0.62f, 1.f);
+        renderer.ui_text(dx, ly + 28, 1.2f,
+                         "Set your Battlefield 2 install folder (contains mods/).", 0.55f, 0.58f,
+                         0.62f, 1.f);
+        if (draw_bf2_install_path_row(window, renderer, settings, mx, my, clicked, dx, ly + 60,
+                                      W - dx - 280.f)) {
+          maps = scan_maps(settings.bf2_root);
+          selected_map = maps.empty() ? -1 : 0;
+          map_scroll = 0.f;
+        }
       }
       const float bx = W - 220, by = H - 100;
       const bool can_start = selected_map >= 0 && selected_map < static_cast<int>(maps.size());
@@ -857,10 +890,12 @@ MenuResult run_main_menu(SDL_Window* window, bf2::Renderer& renderer, Settings& 
       // Mask bottom chrome so scrolled settings don't overlay path / APPLY / footer.
       renderer.ui_rect(40, H - 145, W - 80, 117, 0.06f, 0.07f, 0.08f, 1.f);
       float y = H - 130;
-      renderer.ui_text(48, y, 1.2f, "BF2 INSTALL PATH:", 0.75f, 0.78f, 0.82f, 1.f);
-      draw_clipped_text(renderer, 48, y + 22, W - 320.f, 1.1f,
-                        settings.bf2_root.empty() ? "(not set)" : settings.bf2_root.c_str(), 0.55f,
-                        0.58f, 0.62f, 1.f);
+      if (draw_bf2_install_path_row(window, renderer, settings, mx, my, clicked, 48, y,
+                                    W - 420.f)) {
+        maps = scan_maps(settings.bf2_root);
+        selected_map = maps.empty() ? -1 : 0;
+        map_scroll = 0.f;
+      }
       const float bx = W - 220, by = H - 100;
       if (draw_button(renderer, mx, my, bx, by, 160, 40, "APPLY", true) && clicked) {
         settings.save();
