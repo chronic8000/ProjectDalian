@@ -1,0 +1,7 @@
+# Local Real-ESRGAN ncnn runtime — download separately (see README.md)
+realesrgan-ncnn-vulkan.exe
+vcomp140.dll
+vcomp140d.dll
+models/
+__pycache__/
+*.pyc

@@ -1,0 +1,8 @@
+# Core (inventory + extract + repack work without GPU packages)
+Pillow>=10.0.0
+numpy>=1.24.0
+
+# Optional GPU upscale (RTX 3090) — install separately after CUDA torch:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+#   pip install realesrgan basicsr
+# Or drop realesrgan-ncnn-vulkan.exe next to this folder / on PATH.

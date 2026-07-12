@@ -51,6 +51,20 @@ directly out of your local BF2 archives. You must own the game. This project is
 not affiliated with or endorsed by EA or DICE. "Battlefield" is a trademark of
 its respective owner.
 
+### Optional AI-upscaled textures (not included)
+
+**We do not offer or distribute AI-upscaled / remastered BF2 textures.** They are
+derived from EA/DICE assets and cannot be shipped in releases or this repo.
+
+If you want sharper textures, run the local remaster pipeline yourself against
+your own install. That is optional, slow, and entirely on you:
+
+- Guide: [`tools/texture_remaster/README.md`](tools/texture_remaster/README.md)
+- Expect on the order of **2+ days** for a full maps pass even on a high-end GPU
+  (e.g. RTX 3090 at ×2 Real-ESRGAN). Plan to leave the machine running; use
+  `--skip-existing` to resume.
+- After install-over-live, point Dalian at that BF2 root via Options → BF2 path.
+
 ---
 
 ## What works today
@@ -200,7 +214,9 @@ multiplayer, conquest, static prop heights, etc.).
 4. Point **Options → BF2 path** at your retail install (`C:\Program Files (x86)\Battlefield2`)
 
 The zip contains only Project Dalian binaries, SDL2 runtime DLLs, and bundled menu
-music/art. **No EA/DICE game data** — you must own Battlefield 2.
+music/art. **No EA/DICE game data** and **no AI-upscaled texture packs** — you must
+own Battlefield 2. Optional remaster instructions:
+[`tools/texture_remaster/README.md`](tools/texture_remaster/README.md).
 
 ---
 
